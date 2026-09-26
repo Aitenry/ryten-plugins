@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "music-player",
+      "name": "音乐播放器",
+      "version": "0.1.0",
+      "description": "本地音乐播放器：歌单、播放控制与迷你播放器",
+      "builtin": false,
+      "entry": {
+        "renderer": "renderer.mjs",
+        "main": "main.cjs"
+      },
+      "routes": [
+        {
+          "path": "/music",
+          "skeleton": "music"
+        }
+      ],
+      "menu": {
+        "key": "music",
+        "labelKey": "music.menu.title",
+        "icon": "RiDiscLine",
+        "order": 30
+      },
+      "asset": "music-player-0.1.0.zip",
+      "size": 21976,
+      "sha256": "d0feca951f50648e62785d0f8d236266fe937f8894d2eb785204f6db984f6280"
+    },
+    {
+      "id": "task-planner",
+      "name": "任务规划",
+      "version": "0.1.0",
+      "description": "任务树、甘特图与列表视图",
+      "builtin": false,
+      "entry": {
+        "renderer": "renderer.mjs",
+        "main": "main.cjs"
+      },
+      "routes": [
+        {
+          "path": "/planner",
+          "skeleton": "planner"
+        }
+      ],
+      "menu": {
+        "key": "planner",
+        "labelKey": "planner.menu.title",
+        "icon": "RiCalendar2Line",
+        "order": 20
+      },
+      "asset": "task-planner-0.1.0.zip",
+      "size": 18859,
+      "sha256": "a07be860ee59e0034602f93071e0eefcaf28dce354bc06e6f3bca64afbb79f1f"
+    }
+  ]
+}

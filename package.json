@@ -1,0 +1,33 @@
+{
+    "name": "ryten-plugins",
+    "version": "0.1.0",
+    "private": true,
+    "description": "RytenBench plugins that live outside the app: task planner and local music player",
+    "type": "module",
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "build:dev": "node scripts/build.mjs --dev",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "fixture": "node scripts/fixture-server.mjs"
+    },
+    "devDependencies": {
+        "@ant-design/icons": "^6.3.4",
+        "@langchain/core": "^1.2.3",
+        "@remixicon/react": "^4.7.0",
+        "@types/node": "^22.18.0",
+        "@types/react": "^19.1.13",
+        "@types/react-dom": "^19.1.9",
+        "antd": "^6.5.1",
+        "dayjs": "^1.11.21",
+        "drizzle-orm": "^0.45.2",
+        "electron": "^44.1.1",
+        "electron-log": "^5.4.3",
+        "esbuild": "^0.25.12",
+        "jszip": "^3.10.1",
+        "music-metadata": "^11.16.1",
+        "react": "^19.1.1",
+        "react-dom": "^19.1.1",
+        "typescript": "^5.9.2",
+        "zod": "^4.4.3"
+    }
+}
