@@ -27,13 +27,13 @@ const plugin: Plugin = {
     })
     ctx.use('menu').register({
       key: 'music',
-      labelKey: 'shell.menu.music',
+      labelKey: 'music.menu.title',
       icon: <RiDiscLine size={16} />,
       order: 30
     })
     ctx.use('settingsSection').register({
       tabKey: 'music',
-      labelKey: 'settings.nav.music',
+      labelKey: 'musicSettings.nav',
       icon: <RiMusicLine size={16} />,
       group: 'general',
       order: 30,

@@ -24,8 +24,8 @@
         "order": 30
       },
       "asset": "music-player-0.1.0.zip",
-      "size": 21976,
-      "sha256": "d0feca951f50648e62785d0f8d236266fe937f8894d2eb785204f6db984f6280"
+      "size": 21980,
+      "sha256": "88baa83630fafbdc8ac453013a82dc42a6b9cff8cae9e22dc68291bb56c36149"
     },
     {
       "id": "task-planner",
@@ -50,8 +50,8 @@
         "order": 20
       },
       "asset": "task-planner-0.1.0.zip",
-      "size": 18859,
-      "sha256": "a07be860ee59e0034602f93071e0eefcaf28dce354bc06e6f3bca64afbb79f1f"
+      "size": 18846,
+      "sha256": "713d7349e3b9081579f201e9d5062146da18b4ea3a512d8f492592e74dd545ad"
     }
   ]
 }
