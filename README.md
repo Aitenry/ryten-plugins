@@ -3,7 +3,9 @@
 Standalone plugins for [RytenBench](https://github.com/Aitenry/RytenBench), an Electron + React AI workbench.
 
 These plugins are **not bundled with the app**. They are distributed as GitHub Release assets and installed
-from inside RytenBench via **Settings → Plugins → Install from repository** (or from a folder you pick yourself).
+from inside RytenBench via **Settings → Plugins → Install from repository** — or **from a local file**:
+the same panel has **Install from zip** (a `.zip` of a built plugin package) and **Install from folder**
+(point it at a build output directory such as `dist/<id>`, or at its parent when it holds a single package).
 
 | Plugin | Directory | id | Description |
 | --- | --- | --- | --- |
