@@ -66,6 +66,17 @@ index still works.
 The index and the Release must always be in sync (that is exactly what CI does); when you publish by hand,
 remember to update `plugins.json` too.
 
+Two footnotes that follow from that:
+
+- **Builds are not byte-reproducible.** The zip embeds entry timestamps, so two builds of the same source
+  produce the same file sizes but different `sha256` values. Never commit a `plugins.json` that came from a
+  different build than the assets you uploaded — otherwise the app will reject the download as a checksum
+  mismatch. If a local `npm run build` rewrites `plugins.json`, discard that change (`git restore plugins.json`)
+  unless you are publishing exactly those local zips.
+- **The fixture server recomputes `size`/`sha256`** from your local `dist/` zips, precisely so that offline
+  testing keeps working while `plugins.json` in the repository stays the CI-generated, Release-matching one.
+  It also drops `tag`, because in fixture mode the index and the assets are served from the same origin.
+
 ## Repository layout
 
 ```
