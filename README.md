@@ -22,7 +22,16 @@ plugin.json      manifest (generated from manifest.ts: id, name, version, routes
 main.cjs         main-process entry (CJS, exports install(ctx))
 renderer.mjs     renderer entry (ESM, loaded by the host through a blob import)
 chunk-*.mjs      on-demand renderer chunks (lazily loaded views, etc.)
+plugin.css       the plugin's compiled Tailwind utilities (see below)
 ```
+
+**Every package ships its own `plugin.css`, and the host injects it.** The host compiles its own Tailwind
+stylesheet at build time from its sources only, so utilities used by a plugin that is installed at runtime
+would otherwise have no CSS rules at all — that is exactly the "everything is deformed" bug of 2026-09-26.
+`scripts/build.mjs` therefore compiles a stylesheet per plugin (Tailwind scanning **only that plugin's**
+renderer sources, with `source(none)` so the scan cannot leak across plugins, and without Tailwind's
+preflight so injecting it never resets the host's base styles). RytenBench fetches `plugin://<id>/plugin.css`
+and appends it to `<head>` while the plugin is enabled, then removes it on disable/uninstall.
 
 **A plugin package never contains a second copy of React / PGlite / antd.** At build time the `@host/**`
 specifiers in the source are rewritten into host runtime calls (main process: `globalThis.__RB_HOST_RESOLVE__`;

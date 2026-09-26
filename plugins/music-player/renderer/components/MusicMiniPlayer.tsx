@@ -31,7 +31,7 @@ const MusicMiniPlayer: React.FC = () => {
 
   return (
     <div className="flex flex-col items-center">
-      <div className="text-sm1 truncate w-full text-center">
+      <div className="text-sm truncate w-full text-center">
         {currentTrack?.title || t('shell.miniPlayer.idle')}
       </div>
       <div
