@@ -20,7 +20,7 @@ const plugin: Plugin = {
     })
     ctx.use('menu').register({
       key: 'planner',
-      labelKey: 'shell.menu.planner',
+      labelKey: 'planner.menu.title',
       icon: <RiCalendar2Line size={16} />,
       order: 20
     })

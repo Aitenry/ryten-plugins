@@ -75,6 +75,8 @@ export const musicEnUS: typeof musicZhCN = {
     }
   },
   musicSettings: {
+    /* Settings tab caption, shipped by the plugin itself */
+    nav: 'Music',
     pageTitle: 'Music',
     pageDescription: 'Set the music root folder; its subfolders are loaded as playlists',
     sectionTitle: 'Music storage folder',

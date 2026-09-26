@@ -81,6 +81,8 @@ export const musicZhCN = {
   },
   /* 音乐设置页词条。 */
   musicSettings: {
+    /* 设置页签文案（插件自带；宿主不再为第三方插件提供 settings.nav.*） */
+    nav: '音乐',
     pageTitle: '音乐设置',
     pageDescription: '设置音乐文件根目录，子文件夹将作为歌单加载',
     sectionTitle: '音乐存储目录',
