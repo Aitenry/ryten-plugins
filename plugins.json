@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "tag": "v0.1.0",
+  "tag": "v0.1.1",
   "plugins": [
     {
       "id": "music-player",
@@ -25,8 +25,8 @@
         "order": 30
       },
       "asset": "music-player-0.1.0.zip",
-      "size": 21980,
-      "sha256": "a57f5a6cf43472427e7eae161660a53822f44b0627992b01b3443257bc063ef6"
+      "size": 24499,
+      "sha256": "65c8b106b7b89895dcfe95e5139973d2ba3f57e0950a4a946dae0b89c6f82c74"
     },
     {
       "id": "task-planner",
@@ -51,8 +51,8 @@
         "order": 20
       },
       "asset": "task-planner-0.1.0.zip",
-      "size": 18846,
-      "sha256": "5def652a6a5005968ca31cc809b9e275a229e528a440330909f3adb7fea59365"
+      "size": 20063,
+      "sha256": "f663994fcb82f5895841967ec4cd733ee969c94f2363457e6a8a417e0b1a4673"
     }
   ]
 }
