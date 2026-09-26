@@ -1,0 +1,67 @@
+name: release
+
+# 打 tag（如 v0.1.0）即构建两个插件包、发布 Release、并把索引 plugins.json 提交回 main。
+# 应用侧只读两样东西：main 分支的 plugins.json + Release 资产（不需要 GitHub API / token）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（如 v0.1.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build plugin packages
+        run: node scripts/build.mjs --tag ${{ steps.tag.outputs.value }}
+
+      - name: Show outputs
+        run: ls -la dist && cat plugins.json
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: ${{ steps.tag.outputs.value }}
+          generate_release_notes: true
+          files: dist/*.zip
+
+      # 索引必须与 Release 同步，否则应用会下载到不存在的资产
+      - name: Commit index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugins.json
+          if git diff --cached --quiet; then
+            echo "索引无变化"
+          else
+            git commit -m "chore(release): publish ${{ steps.tag.outputs.value }} assets"
+            git push origin HEAD:main
+          fi
