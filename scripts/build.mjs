@@ -31,6 +31,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -39,6 +40,7 @@ import {
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { builtinModules } from 'node:module'
+import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import JSZip from 'jszip'
@@ -175,6 +177,54 @@ async function emitManifest(id, outDir) {
   return json
 }
 
+/**
+ * 编译**插件自己的样式表** `plugin.css`（渲染层用到的 Tailwind 工具类）。
+ *
+ * 为什么插件必须自带 CSS（2026-09-26 用户反馈「装进应用后内容都变形了」）：
+ * 宿主自己的 Tailwind 是**构建期**扫源码生成的，只覆盖随应用分发的内置插件
+ * （`src/plugins/**`）。运行期才装进 `userData/plugins/<id>/` 的外部插件源码不在它的
+ * 扫描范围里——实测 task-planner / music-player 用到的 124 个类名里 49 个没有规则，
+ * `w-[280px]` / `grid-cols-2` / `bottom-full` / `hover:scale-105` 这些布局关键类全缺。
+ * 宿主装载插件时会把 `plugin://<id>/plugin.css` 注入 `<head>`（见 RytenBench 的
+ * `plugin-host/plugin-css.ts`），所以插件只需要把这份 CSS 打进包。
+ *
+ * 只取 `theme` + `utilities` 两层，**不含 preflight**：注入到宿主文档里的 base 层
+ * 会把宿主的全局样式重置掉（那是宿主自己的事）。
+ */
+function buildPluginCss(id, outDir) {
+  const rendererDir = join(PLUGINS_DIR, id, 'renderer')
+  if (!existsSync(rendererDir)) return 0
+  const cli = join(ROOT, 'node_modules', '@tailwindcss', 'cli', 'dist', 'index.mjs')
+  if (!existsSync(cli)) {
+    throw new Error('找不到 @tailwindcss/cli：先跑 npm install（插件自带的 plugin.css 由它编译）')
+  }
+  const tmpDir = mkdtempSync(join(DIST_DIR, '.css-entry-'))
+  const entryCss = join(tmpDir, 'entry.css')
+  const out = join(outDir, 'plugin.css')
+  writeFileSync(
+    entryCss,
+    [
+      '/* 由 scripts/build.mjs 现写现编：只取 theme + utilities，不含 preflight */',
+      "@import 'tailwindcss/theme.css' layer(theme);",
+      // source(none) 很关键：否则 Tailwind 会**自动扫描整个项目**（入口文件落在 dist/ 里，
+      // 自动检测一路走到仓库根），两个插件会得到同一份「全集」CSS（实测两份 sha256 完全一致）
+      "@import 'tailwindcss/utilities.css' layer(utilities) source(none);",
+      // 只扫这个插件自己的渲染层源码（绝对路径 + 正斜杠：临时入口不在插件目录里）
+      `@source ${JSON.stringify(rendererDir.replace(/\\/g, '/'))};`,
+      ''
+    ].join('\n')
+  )
+  const res = spawnSync(process.execPath, [cli, '-i', entryCss, '-o', out, '--minify'], {
+    cwd: ROOT,
+    encoding: 'utf-8'
+  })
+  rmSync(tmpDir, { recursive: true, force: true })
+  if (res.status !== 0) {
+    throw new Error(`Tailwind 编译 plugin.css 失败：${res.stderr || res.stdout || res.error}`)
+  }
+  return statSync(out).size
+}
+
 async function buildPlugin(id) {
   const srcDir = join(PLUGINS_DIR, id)
   const outDir = join(DIST_DIR, id)
@@ -220,6 +270,10 @@ async function buildPlugin(id) {
       logLevel: 'warning'
     })
     absolutizeChunkSpecifiers(id, outDir)
+    buildPluginCss(id, outDir)
+  } else {
+    // 没有渲染层入口 → 也不需要样式
+    buildPluginCss(id, outDir)
   }
 
   return manifest
