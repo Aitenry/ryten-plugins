@@ -54,6 +54,8 @@ CI 会：`npm install` → `node scripts/build.mjs --tag v0.1.0` → 建 Release
 
 **索引与应用的关系**：应用只读 `main` 分支的 `plugins.json`（不需要 GitHub API / token），
 按里面的 `asset` 去 `releases/download/<tag>/<asset>` 下载，并用 `sha256` 校验完整性。
+索引里**没有 `tag`** 时会退到 `releases/latest/download/<asset>`（GitHub 的「最新 Release」路径，
+不是 `releases/download/latest/...`——那会 404），所以本地 `npm run build` 产出的无 tag 索引也能用。
 所以**索引与 Release 必须同步**（CI 就是这么做的）；手工发布时记得也更新 `plugins.json`。
 
 ## 目录结构
