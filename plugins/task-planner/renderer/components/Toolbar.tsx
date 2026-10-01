@@ -29,8 +29,9 @@ const Toolbar: React.FC<Props> = ({ viewMode, onViewModeChange, onAddTask }) => 
         background: token.colorBgContainer
       }}
     >
+      {/* 顶部工具条：提示一律朝下弹（朝上会盖住上方内容，用户 2026-09-26 统一口径） */}
       <Space size={0}>
-        <Tooltip title={t('planner.toolbar.listView')}>
+        <Tooltip title={t('planner.toolbar.listView')} placement="bottom">
           <Button
             type={viewMode === 'list' ? 'primary' : 'text'}
             size="small"
@@ -40,7 +41,7 @@ const Toolbar: React.FC<Props> = ({ viewMode, onViewModeChange, onAddTask }) => 
             onClick={() => onViewModeChange('list')}
           />
         </Tooltip>
-        <Tooltip title={t('planner.toolbar.ganttView')}>
+        <Tooltip title={t('planner.toolbar.ganttView')} placement="bottom">
           <Button
             type={viewMode === 'gantt' ? 'primary' : 'text'}
             size="small"
@@ -54,7 +55,7 @@ const Toolbar: React.FC<Props> = ({ viewMode, onViewModeChange, onAddTask }) => 
 
       <div className="flex-1" />
 
-      <Tooltip title={t('planner.toolbar.newProject')}>
+      <Tooltip title={t('planner.toolbar.newProject')} placement="bottom">
         <Button
           type="primary"
           size="small"
