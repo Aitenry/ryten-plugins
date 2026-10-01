@@ -127,7 +127,8 @@ const TaskTree: React.FC<Props> = ({
             </span>
           )}
 
-          {/* hover 时显示操作按钮 */}
+          {/* hover 时显示操作按钮：这一列只有 300px，提示朝右弹到右侧甘特区上
+              （朝上会压住上一行任务，用户 2026-09-26 统一口径） */}
           {isHovered && (
             <span
               className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 shrink-0"
@@ -139,7 +140,7 @@ const TaskTree: React.FC<Props> = ({
               onClick={(e) => e.stopPropagation()}
             >
               {canAddChild && (
-                <Tooltip title={t('planner.action.addChild')}>
+                <Tooltip title={t('planner.action.addChild')} placement="right">
                   <Button
                     type="text"
                     size="small"
@@ -149,7 +150,7 @@ const TaskTree: React.FC<Props> = ({
                   />
                 </Tooltip>
               )}
-              <Tooltip title={t('common.action.edit')}>
+              <Tooltip title={t('common.action.edit')} placement="right">
                 <Button
                   type="text"
                   size="small"
@@ -158,7 +159,7 @@ const TaskTree: React.FC<Props> = ({
                   onClick={() => onEditTask(node)}
                 />
               </Tooltip>
-              <Tooltip title={t('common.action.delete')}>
+              <Tooltip title={t('common.action.delete')} placement="right">
                 <Button
                   type="text"
                   size="small"

@@ -106,7 +106,9 @@ const MusicSidebar: React.FC<MusicSidebarProps> = ({
           <span className="text-sm font-medium" style={{ color: colorTextSecondary }}>
             {t('music.playlist.sectionTitle')}
           </span>
-          <Tooltip title={t('music.playlist.createTooltip')}>
+          {/* 提示朝右弹（用户 2026-09-26 的统一口径）：这个 + 在左侧歌单栏标题行里，
+              朝上会压住宿主上方的内容，朝右落在右侧曲库区上，不遮本栏 */}
+          <Tooltip title={t('music.playlist.createTooltip')} placement="right">
             <Button
               type="text"
               size="small"
