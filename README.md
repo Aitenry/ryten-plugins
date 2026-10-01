@@ -12,6 +12,7 @@ dialog on Windows/Linux cannot select files and folders at the same time.)
 | --- | --- | --- | --- |
 | Task Planner | `plugins/task-planner` | `task-planner` | Task tree, Gantt chart and list view with dependencies, plus a `manage_planner` tool for the AI assistant |
 | Music Player | `plugins/music-player` | `music-player` | Playlists, tracks, cover art, mini player and a bottom-bar entry, plus a `manage_music` tool for the AI assistant |
+| Personal Ledger | `plugins/personal-ledger` | `personal-ledger` | Multi-account, multi-currency ledger: categories/tags/merchants, budgets and savings goals, recurring entries and instalments, money lent and borrowed, credit-card and deposit reminders, net-worth charts, CSV import/export, plus a `personal_ledger` tool for the AI assistant |
 
 ## What a plugin package looks like
 
