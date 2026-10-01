@@ -83,7 +83,12 @@ declare module '@host/main/plugins/context' {
   }
   /** 主进程插件上下文（宿注入；只声明本插件用到的能力） */
   export interface MainPluginContext {
-    registerIpc(handlers: MainIpcHandlers): void
+    /** 插件 id（manifest.id） */
+    readonly id: string
+    /** 本插件的通道命名空间（`plugin:<namespace>:` 里的 `<namespace>`） */
+    readonly namespace: string
+    /** 注册 IPC 处理器；返回只注销本次注册通道的逆操作 */
+    registerIpc(handlers: MainIpcHandlers): () => void
     registerEvent(...channels: string[]): void
     contribute<T>(key: string, value: T): void
     effect(fn: () => void | (() => void)): void
@@ -136,6 +141,21 @@ declare module '@host/renderer/hooks/useMessage' {
       content: string,
       duration?: number
     ) => void
+  }
+}
+
+declare module '@host/renderer/hooks/useTheme' {
+  /**
+   * 宿主主题上下文：`effectiveTheme` 是宿主按主题模式算好的**实际**亮/暗，
+   * 与 antd 的 `darkAlgorithm`、根节点上的 `.dark` 类同源。
+   *
+   * 插件据此派生颜色（不要读 `prefers-color-scheme`：宿主支持「跟随时间」的 auto，
+   * 与操作系统配色无关，两者会对不上）。
+   */
+  export function useTheme(): {
+    themeMode: 'light' | 'dark' | 'auto'
+    effectiveTheme: 'light' | 'dark'
+    setThemeMode: (mode: 'light' | 'dark' | 'auto') => Promise<void>
   }
 }
 
