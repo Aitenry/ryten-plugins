@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Segmented } from 'antd'
+import { Button, Slider } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api from '../api'
@@ -33,8 +33,12 @@ export function windowLabel(t: Translate, minutes: number): string {
  */
 export function OverviewPanel(props: {
   room: RoomRuntime | null
+  /** 时间范围（进度条拖出来的那一段；`null` = 用最近 `minutes` 分钟的预设） */
+  range: { from: number; to: number } | null
+  onRange: (range: { from: number; to: number } | null) => void
+  /** 进度条两端：这个房间库里最早/最近的消息（没数据时 null） */
+  bounds: { first: number; last: number } | null
   minutes: number
-  onMinutes: (minutes: number) => void
   /**
    * 点礼物榜的一行 → 打开这个人的礼物历史。
    * 参数就是榜上那一行（`userId` / 昵称 / 方向：`sent` = 他送的、`received` = 他收到的）。
@@ -48,6 +52,8 @@ export function OverviewPanel(props: {
   const [sessions, setSessions] = useState<MonitorSession[]>([])
   const [loading, setLoading] = useState(false)
   const webRid = props.room?.webRid ?? ''
+  const rangeFrom = props.range?.from ?? 0
+  const rangeTo = props.range?.to ?? 0
 
   useEffect(() => {
     if (!webRid) {
@@ -59,7 +65,11 @@ export function OverviewPanel(props: {
     const load = (): void => {
       setLoading(true)
       void api
-        .roomSummary(webRid, props.minutes)
+        .roomSummary(
+          webRid,
+          props.minutes,
+          rangeFrom > 0 && rangeTo > rangeFrom ? { from: rangeFrom, to: rangeTo } : undefined
+        )
         .then((next) => {
           if (alive) setSummary(next)
         })
@@ -80,28 +90,37 @@ export function OverviewPanel(props: {
       alive = false
       window.clearInterval(timer)
     }
-  }, [webRid, props.minutes])
+  }, [webRid, props.minutes, rangeFrom, rangeTo])
 
   if (!props.room) return <EmptyHint text={t('douyin-link.page.noActive')} />
 
-  const minutes = windowLabel(t, props.minutes)
+  /**
+   * 标题上的「看的是哪一段」：拖了进度条/点了某一天就写实际区间，否则写预设窗口名。
+   * 区间里如果是今天，那么右端跟着「现在」走（看今天的详情时是活的）。
+   */
+  const rangeText =
+    rangeFrom > 0 && rangeTo > rangeFrom
+      ? `${stamp(rangeFrom)} → ${stamp(rangeTo)}`
+      : t('douyin-link.page.kpiRecent', { window: windowLabel(t, props.minutes) })
   const totals = summary?.totals
   /**
-   * 「平均速率」的分母：常规窗口就是窗口分钟数；**全部**模式下按库里首末消息的实际跨度算
-   * （窗口分钟数是 0，直接除会得到 Infinity）。
+   * 「平均速率」的分母：有明确区间就用区间长度，否则用窗口分钟数；**全部**模式（windowMinutes = 0）
+   * 按库里首末消息的实际跨度算（否则除零得到 Infinity）。
    */
   const spanMinutes =
-    summary && summary.windowMinutes > 0
-      ? summary.windowMinutes
-      : summary && summary.lastAt > summary.firstAt
-        ? (summary.lastAt - summary.firstAt) / 60000
-        : 0
+    rangeFrom > 0 && rangeTo > rangeFrom
+      ? (rangeTo - rangeFrom) / 60000
+      : summary && summary.windowMinutes > 0
+        ? summary.windowMinutes
+        : summary && summary.lastAt > summary.firstAt
+          ? (summary.lastAt - summary.firstAt) / 60000
+          : 0
   const rate = summary && spanMinutes > 0 ? summary.messages / spanMinutes : 0
 
   return (
     <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
       <div className="col-span-8 flex min-h-0 flex-col gap-3">
-        <Panel className="shrink-0" title={t('douyin-link.page.kpiTitle', { window: minutes })}>
+        <Panel className="shrink-0" title={t('douyin-link.page.kpiTitle', { window: rangeText })}>
           <div className="grid grid-cols-3 grid-rows-3 gap-2">
             <Kpi label={t('douyin-link.page.kpiMessages')} value={summary?.messages ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiChat')} value={totals?.chat ?? 0} palette={palette} />
@@ -181,14 +200,47 @@ export function OverviewPanel(props: {
             onOpen={props.onOpenGifts}
           />
         </Panel>
+        {/*
+          时间范围：**一条时间进度条**（用户 2026-10-08：「统计窗口按照时间进度条来构建」）。
+          两端是这个房间库里最早/最近的消息，拖两个把手就是选一段；「每日记录」点一天也走同一段区间
+          （所以「看某一天」不需要另一套控件）。取消选择 = 回到最近 `minutes` 分钟的预设。
+        */}
         <Panel className="shrink-0" title={t('douyin-link.page.range')}>
-          <Segmented
-            size="small"
-            block
-            value={props.minutes}
-            onChange={(value) => props.onMinutes(Number(value))}
-            options={WINDOWS.map((minutes) => ({ value: minutes, label: windowLabel(t, minutes) }))}
-          />
+          {props.bounds && props.bounds.last > props.bounds.first ? (
+            <div className="flex flex-col gap-1">
+              <Slider
+                range
+                min={props.bounds.first}
+                max={props.bounds.last}
+                value={[
+                  rangeFrom > 0 ? rangeFrom : Math.max(props.bounds.first, props.bounds.last - 3600 * 1000),
+                  rangeTo > 0 ? rangeTo : props.bounds.last
+                ]}
+                tooltip={{ formatter: (value) => stamp(Number(value)) }}
+                onChange={(value) => {
+                  const [from, to] = value as number[]
+                  props.onRange(from > 0 && to > from ? { from, to } : null)
+                }}
+              />
+              <div className="flex items-center justify-between gap-2 text-[10px] opacity-60">
+                <span className="shrink-0">{stamp(props.bounds.first)}</span>
+                <span className="min-w-0 truncate font-medium">{rangeText}</span>
+                <span className="shrink-0">{stamp(props.bounds.last)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] opacity-50">
+                  {t('douyin-link.page.rangeSpan', { duration: duration((rangeTo || props.bounds.last) - (rangeFrom || props.bounds.first)) })}
+                </span>
+                {props.range ? (
+                  <Button size="small" type="text" onClick={() => props.onRange(null)}>
+                    {t('douyin-link.page.rangeLatest', { window: windowLabel(t, props.minutes) })}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <span className="text-xs opacity-50">{t('douyin-link.page.rangeEmpty')}</span>
+          )}
         </Panel>
       </div>
     </div>

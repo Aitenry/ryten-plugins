@@ -28,7 +28,13 @@ function phaseMeta(t: Translate, room: RoomRuntime, palette: ReturnType<typeof u
     case 'error':
       return { text: t('douyin-link.page.phaseError'), color: palette.down }
     case 'ended':
-      return { text: t('douyin-link.page.phaseEnded'), color: palette.axis }
+      /**
+       * 下播但开关还开着 = **在等它重新开播**（主进程每分钟探测一次，开播就自动拉起）。
+       * 这两种状态必须分得开：旧版下播会把开关一起关掉，用户看到的是「监控莫名其妙停了」。
+       */
+      return room.monitor
+        ? { text: t('douyin-link.page.phaseWaiting'), color: palette.warn }
+        : { text: t('douyin-link.page.phaseEnded'), color: palette.axis }
     default:
       return { text: t('douyin-link.page.phaseOff'), color: palette.axis }
   }
@@ -81,7 +87,7 @@ export function RoomRail(props: {
 
   return (
     <Panel
-      className="h-full"
+      className="min-h-0 flex-1"
       title={t('douyin-link.page.rooms', { count: props.rooms.length })}
       extra={
         <Button

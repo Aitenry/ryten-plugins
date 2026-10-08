@@ -4,6 +4,7 @@ import type {
   AudioMessage,
   DanmakuItem,
   DanmakuKind,
+  DayRecordRow,
   DbStats,
   FailureInfo,
   GiftBreakdownRow,
@@ -250,8 +251,19 @@ export const api = {
       })
     )
   },
-  roomSummary: async (webRid: string, minutes = 60): Promise<RoomSummary> =>
-    normalizeRoomSummary(await invoke(`${PREFIX}room-summary`, webRid, minutes), webRid, minutes),
+  /**
+   * 房间概览。`range` 给了就按那一段查（时间进度条 / 「看某一天」），否则按最近 `minutes` 分钟；
+   * `minutes = 0` 且没有 range = 全部。
+   */
+  roomSummary: async (webRid: string, minutes = 60, range?: { from: number; to: number }): Promise<RoomSummary> =>
+    normalizeRoomSummary(
+      await invoke(`${PREFIX}room-summary`, webRid, minutes, range?.from, range?.to),
+      webRid,
+      minutes
+    ),
+  /** 每一天的直播记录（左侧房间旁边的列表） */
+  dayRecords: async (webRid: string, limit = 90): Promise<DayRecordRow[]> =>
+    asList<DayRecordRow>(await invoke(`${PREFIX}day-records`, webRid, limit)),
   roomsCompare: async (minutes = 60): Promise<RoomCompareRow[]> =>
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
   usersList: async (
