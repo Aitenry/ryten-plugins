@@ -123,7 +123,12 @@ export const DEFAULT_SETTINGS: LiveSettings = {
   // 还得点两次开关才动）。关掉它则「打开应用只恢复清单」，此时启动会把监控勾选一并清掉，
   // 免得开关撒谎（见 init()）。
   resumeOnStart: true,
-  retentionDays: 7
+  /**
+   * **默认永久保存**（0 = 不自动清理，用户 2026-10-08：「怎么礼物会不断消失，我需要永久存储，
+   * 所有内容都需要永久存储」）。以前默认 7 天，礼物榜/历史翻到 7 天前就没了。
+   * 想要自动瘦身的人可以在设置里填天数（> 0 才清理）。
+   */
+  retentionDays: 0
 }
 
 const idleDanmaku = (): DanmakuStatus => ({ phase: 'off', failure: null, since: 0, received: 0 })
@@ -255,7 +260,10 @@ export class AnalyzerHub {
     }
     logger.info(
       `[douyin-link] 分析中枢已就绪：库里 ${rooms.length} 个直播间（监控中 ${rooms.filter((room) => room.monitor).length} 个）` +
-        `、并发上限 ${this.settings.monitorConcurrency}、保留 ${this.settings.retentionDays} 天`
+        `、并发上限 ${this.settings.monitorConcurrency}、` +
+        (this.settings.retentionDays > 0
+          ? `保留 ${this.settings.retentionDays} 天`
+          : '消息永久保存（不自动清理）')
     )
     this.startTimers()
     void this.cleanup()
@@ -1282,17 +1290,40 @@ export class AnalyzerHub {
 
   /* --------------------------------------------------------- 分析查询 */
 
-  /** 概览：窗口内的 KPI + 分钟序列（补齐缺口）+ 类型分布 + 两个榜单 */
+  /**
+   * 概览：窗口内的 KPI + 分钟序列（补齐缺口）+ 类型分布 + 三份礼物聚合。
+   *
+   * `windowMinutes <= 0` = **全部**（从库里最早的一条到现在的整段）：用户要「永久存储」，
+   * 那也得能一眼看到全部——1 小时的窗口会把更早的礼物从榜上抹掉，看着就像「礼物不断消失」。
+   * 全部模式下序列按「跨度 / 240」合并成粗桶（7 天 = 每 42 分钟一个点），不然一天就是 1440 个点。
+   */
   async summary(webRid: string, windowMinutes = 60): Promise<RoomSummary> {
-    const minutes = Math.min(Math.max(5, Math.round(windowMinutes)), 1440)
+    const requested = Math.round(windowMinutes)
+    const all = !(requested > 0)
+    const minutes = all ? 0 : Math.min(Math.max(5, requested), 1440)
     const toMs = Date.now()
-    const fromMs = toMs - minutes * 60000
+    const fromMs = all ? 0 : toMs - minutes * 60000
     const { totals, messages } = await store.windowTotals(webRid, fromMs, toMs)
     const breakdown = await store.kindBreakdown(webRid, fromMs, toMs)
-    const rows = await store.minuteSeries(webRid, minuteOf(fromMs), minuteOf(toMs))
-    const buckets = new Map(rows.map((row) => [row.minute, row]))
+    const startMinute = all ? minuteOf(breakdown.firstAt > 0 ? breakdown.firstAt : toMs) : minuteOf(fromMs)
+    const endMinute = minuteOf(toMs)
+    const rows = await store.minuteSeries(webRid, startMinute, endMinute)
+    const step = Math.max(1, Math.ceil((endMinute - startMinute + 1) / 240))
+    const buckets = new Map<number, (typeof rows)[number]>()
+    for (const row of rows) {
+      const key = startMinute + Math.floor((row.minute - startMinute) / step) * step
+      const bucket = buckets.get(key)
+      if (!bucket) buckets.set(key, { ...row, minute: key })
+      else {
+        bucket.chat += row.chat
+        bucket.member += row.member
+        bucket.likes += row.likes
+        bucket.social += row.social
+        bucket.gift += row.gift
+      }
+    }
     const series: RoomSummary['series'] = []
-    for (let minute = minuteOf(fromMs); minute <= minuteOf(toMs); minute += 1) {
+    for (let minute = startMinute; minute <= endMinute; minute += step) {
       const row = buckets.get(minute)
       series.push({
         minute: minute * 60000,

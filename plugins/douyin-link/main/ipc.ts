@@ -53,6 +53,15 @@ export function loadSettings(): Partial<LiveSettings> {
     delete parsed.room
     delete parsed.autoConnect
     delete parsed.saveData
+    /**
+     * 保留期的迁移（2026-10-08）：旧默认是 7 天，用户在设置里从没主动选过它——
+     * 而「礼物不断消失」正是它造成的。默认改成**永久保存**（0）之后，把跟着旧默认写进文件的 7
+     * 也一起改成 0，否则老用户升级上来还是 7 天，问题照旧。想自动清理的人填别的天数即可。
+     */
+    if (parsed.retentionDays === 7) {
+      parsed.retentionDays = 0
+      logger.info('[douyin-link] 保留期：旧的默认 7 天 → 永久保存（可在设置里改回具体天数）')
+    }
     return parsed
   } catch {
     return {}
