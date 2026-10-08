@@ -206,6 +206,7 @@ export const DouyinLinkZhCN = {
       giftHistoryTitle: '礼物历史',
       giftHistoryReceived: '收到',
       giftHistorySent: '送出',
+      giftHistoryRange: '范围 {{from}} → {{to}}',
       giftHistoryEmpty: '还没有礼物记录',
       giftBoardEmpty: '这个窗口里还没有礼物',
       giftNameUnknown: '（礼物名未知）',
