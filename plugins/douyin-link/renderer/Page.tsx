@@ -11,6 +11,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
   DanmakuItem,
+  DayRecordRow,
   FailureInfo,
   LiveSettings,
   QualityKey,
@@ -40,6 +41,7 @@ import { SearchPanel } from './components/SearchPanel'
 import { UserAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
+import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
@@ -110,6 +112,15 @@ export default function Page(): React.JSX.Element {
   const [volume, setVolume] = useState(0.8)
   const [openUser, setOpenUser] = useState('')
   /**
+   * 时间范围（概览看的是哪一段）：`null` = 最近 `minutes` 分钟的预设。
+   * 两个入口都往这里写：概览的时间进度条、左侧「每日记录」点某一天。
+   */
+  const [range, setRange] = useState<{ from: number; to: number } | null>(null)
+  /** 当前房间「每一天的直播记录」（左侧列表）与它选中的那一天 */
+  const [days, setDays] = useState<DayRecordRow[]>([])
+  const [daySel, setDaySel] = useState('')
+  const [daysLoading, setDaysLoading] = useState(false)
+  /**
    * 「加载更早」的状态（按房间）：`loading` = 正在查库、`done` = 库里再往前没有了。
    * 实时列表只装得下有限条，更早的内容在库里——这个按钮就是把它翻出来（内容不会消失）。
    */
@@ -139,6 +150,53 @@ export default function Page(): React.JSX.Element {
   const active = useMemo(() => rooms.find((room) => room.webRid === activeRoom) ?? null, [rooms, activeRoom])
   const items = activeRoom ? (itemsByRoom.get(activeRoom) ?? []) : []
   const users = activeRoom ? (usersByRoom.get(activeRoom) ?? new Map()) : new Map<string, UserProfile>()
+
+  /**
+   * 「每日记录」：切房间时拉一次，监控中的房间每分钟补一次（今天那一行是活的）。
+   * 进度条两端也来自它（最早/最近一天的首末消息时间）——所以两处口径天然一致。
+   */
+  const reloadDays = useCallback(async (webRid: string): Promise<void> => {
+    if (!webRid) {
+      setDays([])
+      return
+    }
+    setDaysLoading(true)
+    try {
+      setDays(await api.dayRecords(webRid, 120))
+    } catch {
+      setDays([])
+    } finally {
+      setDaysLoading(false)
+    }
+  }, [])
+
+  /** 进度条的两端：库里最早一条 → 最近一条（没有数据时 null，界面给空态） */
+  const bounds = useMemo(() => {
+    const rows = days.filter((day) => day.firstAt > 0)
+    if (rows.length === 0) return null
+    let first = rows[0].firstAt
+    let last = rows[0].lastAt
+    for (const day of rows) {
+      if (day.firstAt < first) first = day.firstAt
+      if (day.lastAt > last) last = day.lastAt
+    }
+    // 「今天」的右端跟着现在走：看今天的详情时数据是活的
+    const now = Date.now()
+    if (now - last < 5 * 60000) last = now
+    return { first, last }
+  }, [days])
+
+  /** 点「每日记录」里的一天：把详情切到那一天（今天则右端跟着现在走） */
+  const pickDay = useCallback((day: DayRecordRow): void => {
+    const start = new Date(`${day.day}T00:00:00`).getTime()
+    const today = new Date().toDateString() === new Date(start).toDateString()
+    setDaySel(day.day)
+    setRange({
+      // 两端各留 1 秒余量：那一天收尾的消息不至于被边界卡掉
+      from: day.firstAt > 0 ? day.firstAt - 1000 : start,
+      to: today ? Date.now() : day.lastAt > 0 ? day.lastAt + 1000 : start + 86400000 - 1
+    })
+  }, [])
 
   /* ------------------------------------------------------- 初始与推送 */
 
@@ -170,6 +228,21 @@ export default function Page(): React.JSX.Element {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  /**
+   * 当前房间的「每日记录」：切房间时拉一次，监控中每 60 秒补一次（今天那一行的计数是活的）。
+   * 房间没在监控也要拉——历史记录与监控状态无关。
+   */
+  useEffect(() => {
+    if (!activeRoom) {
+      setDays([])
+      return
+    }
+    void reloadDays(activeRoom)
+    if (!active?.monitor) return
+    const timer = window.setInterval(() => void reloadDays(activeRoom), 60000)
+    return () => window.clearInterval(timer)
+  }, [activeRoom, active?.monitor, reloadDays])
 
   /** 房间列表推送：相位、计数、库里累计都在里面（界面直接替换，不做增量合并） */
   useEffect(
@@ -382,9 +455,13 @@ export default function Page(): React.JSX.Element {
     (webRid: string): void => {
       if (webRid === activeRoom) return
       setActiveRoom(webRid)
+      // 换房间 = 换一份数据：时间范围与选中的那一天都回到「最近」
+      setRange(null)
+      setDaySel('')
+      void reloadDays(webRid)
       void api.roomSelect(webRid).then(() => loadRoomData(webRid))
     },
-    [activeRoom, loadRoomData]
+    [activeRoom, loadRoomData, reloadDays]
   )
 
   /**
@@ -517,7 +594,13 @@ export default function Page(): React.JSX.Element {
           <OverviewPanel
             room={active}
             minutes={minutes}
-            onMinutes={setMinutes}
+            range={range}
+            onRange={(next) => {
+              setRange(next)
+              // 拖进度条 = 自己选一段：不再高亮任何一天
+              if (next) setDaySel('')
+            }}
+            bounds={bounds}
             onOpenGifts={(target) => setOpenGifts(target)}
           />
         </Pane>
@@ -644,6 +727,9 @@ export default function Page(): React.JSX.Element {
             onClearMessages={clearRoomMessages}
           />
           {addFailure ? <FailureLine failure={addFailure} /> : null}
+          {activeRoom ? (
+            <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
+          ) : null}
         </div>
 
         <div className="col-span-9 flex min-h-0 flex-col gap-3">

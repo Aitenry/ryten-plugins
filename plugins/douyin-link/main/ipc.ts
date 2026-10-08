@@ -108,8 +108,18 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 分析查询（全部走数据库）
     'plugin:douyin-link:messages-query': (query?: unknown) =>
       hub.queryMessages((query ?? {}) as Parameters<typeof hub.queryMessages>[0]),
-    'plugin:douyin-link:room-summary': (webRid?: string, minutes?: number) =>
-      hub.summary(String(webRid ?? ''), typeof minutes === 'number' ? minutes : 60),
+    'plugin:douyin-link:room-summary': (webRid?: string, minutes?: number, from?: number, to?: number) =>
+      hub.summary(
+        String(webRid ?? ''),
+        typeof minutes === 'number' ? minutes : 60,
+        // 时间进度条 / 「看某一天」给的是一段明确区间：两边都是有限数、且 to > from 才认
+        typeof from === 'number' && typeof to === 'number' && Number.isFinite(from) && Number.isFinite(to) && to > from
+          ? { from, to }
+          : undefined
+      ),
+    // 每一天的直播记录（左侧房间旁边的列表）
+    'plugin:douyin-link:day-records': (webRid?: string, limit?: number) =>
+      hub.dayRecords(String(webRid ?? ''), typeof limit === 'number' ? limit : 90),
     'plugin:douyin-link:rooms-compare': (minutes?: number) =>
       hub.compare(typeof minutes === 'number' ? minutes : 60),
     'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number) =>

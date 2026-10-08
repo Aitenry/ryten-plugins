@@ -533,6 +533,30 @@ export interface MessagePage {
   total: number
 }
 
+/**
+ * **一天**的直播记录（左侧「每日记录」列表的一行）。
+ *
+ * 为什么按天：直播是「一天一场」的东西——用户 2026-10-08 的要求是「要按照每一天的直播来保存，
+ * 有一个每一天的监听列表，点击后才显示当前的详细信息」。这份聚合是**按本地时区**分天的
+ * （当天 00:00 → 次日 00:00），点一行就把详情页的时间范围切到那一天。
+ */
+export interface DayRecordRow {
+  /** 本地日期 `YYYY-MM-DD` */
+  day: string
+  /** 这一天第一/最后一条消息的时刻（ms；0 = 这一天没有消息） */
+  firstAt: number
+  lastAt: number
+  /** 消息条数（含未计入互动的类型） */
+  messages: number
+  /** 礼物条数与抖币总额 */
+  gifts: number
+  diamonds: number
+  /** 这一天出现过的用户数（按消息里的用户 id 去重） */
+  users: number
+  /** 这一天开过几次监控会话 */
+  sessions: number
+}
+
 /** 多房间对比的一行 */
 export interface RoomCompareRow {
   webRid: string

@@ -3,6 +3,7 @@ import logger from 'electron-log'
 import { withOrm } from '@host/main/database/orm'
 import type {
   DanmakuKind,
+  DayRecordRow,
   DbStats,
   GiftBreakdownRow,
   GiftRankRow,
@@ -815,6 +816,63 @@ export async function giftBreakdown(
   })
 }
 
+/**
+ * **每一天的直播记录**（左侧「每日记录」列表）。
+ *
+ * 分天按**本地时区**：SQL 里把 `at_ms` 平移本地偏移再按 86400000 取整（Postgres 的
+ * `to_char` / `timestamptz` 依赖会话时区，嵌入式 PGlite 默认是 UTC——直接用会把一天的边界
+ * 落到 UTC 00:00 上，国内的直播会被劈成两半）。偏移在主进程算一次传进来。
+ *
+ * 两条聚合：消息流水给出条数/首末/用户数/礼物，会话表给出这一天开播了几次
+ * （一天里下播又重开也如实计数）。
+ */
+export async function dayRecords(webRid: string, limit = 90): Promise<DayRecordRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  const offsetMs = -new Date().getTimezoneOffset() * 60000
+  return withOrm('douyin-link.dayRecords', async (db) => {
+    /**
+     * 时区偏移用**字面量**而不是绑定参数：`GROUP BY` 与 `ORDER BY` 会各渲染一次这个表达式，
+     * 绑定参数会变成 $1 / $3 两个不同的占位符，Postgres 就认为它们不是同一个表达式而报
+     * 「at_ms must appear in the GROUP BY clause」。偏移是我们自己算出来的整数，拼字面量是安全的。
+     */
+    const offset = sql.raw(String(Math.trunc(offsetMs)))
+    const buckets = sql`floor((${douyinLinkMessages.atMs} + ${offset}) / 86400000)`
+    const rows = await db
+      .select({
+        bucket: sql<number>`(${buckets})::int`,
+        firstAt: sql<number>`min(${douyinLinkMessages.atMs})::double precision`,
+        lastAt: sql<number>`max(${douyinLinkMessages.atMs})::double precision`,
+        messages: sql<number>`count(*)::int`,
+        gifts: sql<number>`count(*) filter (where ${douyinLinkMessages.kind} = 'gift')::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        users: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int`
+      })
+      .from(douyinLinkMessages)
+      .where(eq(douyinLinkMessages.webRid, webRid))
+      .groupBy(buckets)
+      .orderBy(desc(buckets))
+      .limit(Math.min(Math.max(1, limit), 400))
+    const sessionBuckets = sql`floor((${douyinLinkSessions.startedAt} + ${offset}) / 86400000)`
+    const sessionRows = await db
+      .select({ bucket: sql<number>`(${sessionBuckets})::int`, sessions: sql<number>`count(*)::int` })
+      .from(douyinLinkSessions)
+      .where(eq(douyinLinkSessions.webRid, webRid))
+      .groupBy(sessionBuckets)
+    const sessions = new Map(sessionRows.map((row) => [row.bucket, row.sessions]))
+    return rows.map((row) => ({
+      day: new Date(row.bucket * 86400000).toISOString().slice(0, 10),
+      firstAt: row.firstAt,
+      lastAt: row.lastAt,
+      messages: row.messages,
+      gifts: row.gifts,
+      diamonds: row.diamonds,
+      users: row.users,
+      sessions: sessions.get(row.bucket) ?? 0
+    }))
+  })
+}
+
 /** 某个人送过的礼物（按礼物名聚合；用户榜悬停看明细用） */
 export async function userGiftBreakdown(
   webRid: string,
@@ -868,12 +926,21 @@ export async function giftRankByPerson(
     const rows = await db
       .select({
         userId: idColumn,
-        name: sql<string>`max(${nameColumn})`,
+        /**
+         * 昵称优先用消息里记的那份；点歌那类帧里常常**只有送礼人 id、没有昵称**
+         * （他后来在别处发的消息/礼物里才带上名字），所以再退回用户表里的昵称——
+         * 不这么做，送礼榜上就会出现一串 `1671723870326936` 这样的裸 id。
+         */
+        name: sql<string>`coalesce(nullif(max(${nameColumn}), ''), max(${douyinLinkUsers.nickname}), '')`,
         count: sql<number>`count(*)::int`,
         diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
         lastAt: sql<number>`max(${douyinLinkMessages.atMs})::double precision`
       })
       .from(douyinLinkMessages)
+      .leftJoin(
+        douyinLinkUsers,
+        and(eq(douyinLinkUsers.webRid, douyinLinkMessages.webRid), eq(douyinLinkUsers.userId, idColumn))
+      )
       .where(
         and(
           eq(douyinLinkMessages.webRid, webRid),

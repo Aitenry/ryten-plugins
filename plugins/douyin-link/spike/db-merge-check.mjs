@@ -85,7 +85,8 @@ import { withOrm, closeOrm } from '@host/main/database/orm'
 import { insertMessages } from './mapper'
 import { giftRankByPerson, queryMessages } from './mapper'
 import { deleteMessagesBefore, deleteMinutesBefore } from './mapper'
-import { douyinLinkMessages } from './schema'
+import { dayRecords } from './mapper'
+import { douyinLinkMessages, douyinLinkUsers } from './schema'
 
 const row = (over) => ({
   webRid: '108011161837',
@@ -168,6 +169,28 @@ const senders = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
 const history = await queryMessages({ webRid: '108011161837', kind: 'gift', toUserId: 'R1' })
 
 /*
+ * 每日记录（左侧「每日记录」列表）：跨本地午夜的两条消息必须落进**两个**不同的天。
+ * 用不带 Z 的本地时间构造，正好压在 23:30 / 00:30——按 UTC 分天的话这两条会挤进同一天。
+ */
+await insertMessages([
+  row({ userId: 'S9', content: '跑车', diamonds: 1200, toUserId: 'R9', toUserName: '收礼九', atMs: new Date('2026-10-08T23:30:00').getTime() }),
+  row({ userId: 'S9', content: '礼花筒', diamonds: 199, toUserId: 'R9', toUserName: '收礼九', atMs: new Date('2026-10-09T00:30:00').getTime() })
+])
+const days = await dayRecords('108011161837')
+
+/*
+ * 昵称兜底：点歌那类帧常常只有送礼人 id、没有昵称，榜单不能显示成裸 id。
+ * 插一条**没有昵称**的礼物行（S4）+ 用户表里的一条昵称，榜单应该把用户表的名字用上。
+ */
+await insertMessages([
+  row({ userId: 'S4', userName: '', content: '比心', diamonds: 199, toUserId: 'R2', toUserName: '收礼乙', atMs: 14000 })
+])
+await withOrm('check.user', async (db) =>
+  db.insert(douyinLinkUsers).values({ webRid: '108011161837', userId: 'S4', nickname: '用户表里的丁' })
+)
+const sendersNamed = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
+
+/*
  * 永久保存的兜底（2026-10-08「我需要永久存储」）：
  * hub 的 cleanup 在保留期为 0 时根本不调这两个函数，但这里再验一层——**非正 cutoff 一律不删**，
  * 一个坏参数（0 / NaN）不该把整张表清空。
@@ -204,7 +227,9 @@ export default JSON.stringify({
     total: pageOlder.total,
     ats: pageOlder.rows.map((r) => r.at),
     contents: pageOlder.rows.map((r) => r.text)
-  }
+  },
+  days: days.map((d) => ({ day: d.day, messages: d.messages, gifts: d.gifts, diamonds: d.diamonds, users: d.users })),
+  sendersNamed: sendersNamed.map((s) => ({ userId: s.userId, name: s.name }))
 })
 `
 
@@ -292,6 +317,15 @@ check('永久保存：清理跑完后行数不变', [result.keepGuard.before, re
 check('翻页：只回 at <= to 的行', result.paging.ats.every((at) => at <= 11500), true)
 check('翻页：包含 to 之前的礼物（10000/11000）', result.paging.contents.slice(-2), ['跑车', '跑车'])
 check('翻页：total 只数这一段', result.paging.total, result.paging.ats.length)
+
+/* 每日记录：跨本地午夜的两条消息分进两天，且按天倒序 */
+check('每日记录：00:30 那条落在 10-09', result.days[0], { day: '2026-10-09', messages: 1, gifts: 1, diamonds: 199, users: 1 })
+check('每日记录：23:30 那条落在 10-08', result.days[1], { day: '2026-10-08', messages: 1, gifts: 1, diamonds: 1200, users: 1 })
+check('每日记录：更早的数据各自成一天（按天倒序）', result.days.length >= 3, true)
+
+/* 榜单昵称兜底：消息里没名字就用用户表里的昵称，别给用户看裸 id */
+check('送礼榜：消息里带昵称的用消息里的', result.sendersNamed.find((s) => s.userId === 'S1')?.name, '送礼甲')
+check('送礼榜：消息里没昵称的退回用户表昵称', result.sendersNamed.find((s) => s.userId === 'S4')?.name, '用户表里的丁')
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 
 rmSync(workDir, { recursive: true, force: true })

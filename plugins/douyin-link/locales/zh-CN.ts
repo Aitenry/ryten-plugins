@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 抖音直播分析器 的中文词条。
  *
  * 顶层键 = 插件 id，里面的结构随你——宿主界面只按 labelKey 取用
@@ -42,6 +42,7 @@ export const DouyinLinkZhCN = {
       phaseRetrying: '重连中',
       phaseError: '出错',
       phaseEnded: '已下播',
+      phaseWaiting: '已下播 · 等开播',
       /* 房间信息 */
       anchor: '主播',
       online: '在线',
@@ -76,7 +77,8 @@ export const DouyinLinkZhCN = {
       tabSearch: '检索',
       tabCompare: '对比',
       /* 概览 */
-      kpiTitle: '关键指标（最近{{window}}）',
+      kpiTitle: '关键指标（{{window}}）',
+      kpiRecent: '最近 {{window}}',
       kpiMessages: '消息',
       kpiChat: '弹幕',
       kpiMember: '进场',
@@ -91,13 +93,24 @@ export const DouyinLinkZhCN = {
       trend: '分钟趋势',
       kinds: '类型分布',
       topChat: '发言榜',
-      range: '统计窗口',
+      range: '时间范围',
       window15: '15 分钟',
       window60: '1 小时',
       window6h: '6 小时',
       window24h: '24 小时',
       window7d: '7 天',
       windowAll: '全部',
+      rangeSpan: '时长 {{duration}}',
+      rangeLatest: '回到最近 {{window}}',
+      rangeEmpty: '还没有数据（先开始监控）',
+      dayRecords: '每日记录（{{count}} 天）',
+      dayRecordsEmpty: '还没有记录过这个房间',
+      dayRecordHint: '点击查看 {{day}} 这一天的详情',
+      dayToday: '今天',
+      dayLive: '直播中',
+      dayMessages: '{{count}} 条',
+      dayGifts: '礼物 {{count}}',
+      daySessions: '开播 {{count}} 次',
       noData: '这个窗口内没有数据（先开始监控，或换个窗口）',
       loadEarlier: '加载更早的消息',
       noEarlier: '库里再往前没有更早的了',

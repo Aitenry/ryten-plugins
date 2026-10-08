@@ -7,6 +7,7 @@ import {
   type AnalyzerSnapshot,
   type AudioMessage,
   type DanmakuItem,
+  type DayRecordRow,
   type DanmakuStatus,
   type DbStats,
   type FailureInfo,
@@ -98,6 +99,11 @@ const RESOLVE_DEADLINE_MS = 20000
 /** 掉线后自动重试的间隔与上限（监控是长期的，中断要自己爬起来） */
 const RETRY_DELAY_MS = 25000
 const RETRY_LIMIT = 12
+/**
+ * 下播后「等重新开播」的探测间隔：一分钟一次。
+ * 一整天下来是 1440 次轻量解析——比「主播开播了却永远不开始监控」划算得多。
+ */
+const RELIVE_PROBE_MS = 60 * 1000
 /** 房间信息（成员名单/在线人数/标题）的轻刷新间隔：只打 enter，一次一个请求 */
 const ROOM_REFRESH_MS = 5 * 60 * 1000
 /** 没在监控的房间多久刷一次（只要面板有房间级数据就行，别为闲置房间频繁抓页面） */
@@ -206,6 +212,8 @@ export class AnalyzerHub {
   private flushTimer: ReturnType<typeof setInterval> | null = null
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** 「下播了、等它重新开播」的探测定时器（每房间一个，见 `scheduleRelive`） */
+  private reliveTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private roomsDirty = false
   private roomsPushedAt = 0
   /** 启动令牌自增（见 RoomState.startToken） */
@@ -267,6 +275,17 @@ export class AnalyzerHub {
     )
     this.startTimers()
     void this.cleanup()
+    /**
+     * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
+     * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
+     * 真机验证也踩到过：重启后 CDP 抓不到任何面板，因为根本没选中房间）。
+     */
+    if (!this.activeRoom) {
+      const candidate = [...this.states.values()]
+        .filter((state) => state.monitor)
+        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]
+      if (candidate) this.activeRoom = candidate.webRid
+    }
     if (this.settings.resumeOnStart) {
       // **开关开着 = 就在监控**：库里勾着监控的房间直接接着跑（用户 2026-10 明确要的行为）
       const wanted = [...this.states.values()].filter((state) => state.monitor).length
@@ -291,7 +310,10 @@ export class AnalyzerHub {
 
   /** 插件停用/卸载：轮询、泵与定时器全收干净（不留后台请求） */
   dispose(): void {
-    for (const state of this.states.values()) this.stopState(state, 'pluginDisabled')
+    for (const state of this.states.values()) {
+      this.stopRelive(state)
+      this.stopState(state, 'pluginDisabled')
+    }
     this.stopAudio()
     if (this.flushTimer) clearInterval(this.flushTimer)
     if (this.cleanupTimer) clearInterval(this.cleanupTimer)
@@ -301,6 +323,8 @@ export class AnalyzerHub {
     this.pendingTicks.clear()
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
     this.retryTimers.clear()
+    for (const timer of this.reliveTimers.values()) clearTimeout(timer)
+    this.reliveTimers.clear()
     this.flushTimer = null
     this.cleanupTimer = null
     this.started = false
@@ -318,10 +342,13 @@ export class AnalyzerHub {
     let collected = 0
     for (const state of this.states.values()) {
       if (state.collector || state.sessionId) collected += 1
+      this.stopRelive(state)
       this.stopState(state, reason)
     }
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
     this.retryTimers.clear()
+    for (const timer of this.reliveTimers.values()) clearTimeout(timer)
+    this.reliveTimers.clear()
     this.stopAudio()
     logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
     this.emitRooms(true)
@@ -489,6 +516,7 @@ export class AnalyzerHub {
   async removeRoom(webRid: string, purge = true): Promise<boolean> {
     const state = this.states.get(webRid)
     if (!state) return false
+    this.stopRelive(state)
     this.stopState(state, 'removed')
     if (this.audioRoom === webRid) this.stopAudio()
     this.states.delete(webRid)
@@ -505,6 +533,8 @@ export class AnalyzerHub {
     const state = this.states.get(webRid)
     if (!state) return false
     state.monitor = on
+    // 关掉开关就把「等重新开播」的探测也收掉（探测定时器只在开关开着时才有意义）
+    if (!on) this.stopRelive(state)
     await store.setRoomMonitor(webRid, on)
     if (on) {
       await store.touchRoom(webRid, { active: true })
@@ -549,7 +579,14 @@ export class AnalyzerHub {
       this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
       state.failure = null
-      if (state.phase === 'ended' && resolved.room.status === 'live' && state.monitor) this.reconcile()
+      if (state.phase === 'ended' && resolved.room.status === 'live' && state.monitor) {
+        logger.info(`[douyin-link] ${webRid} 重新开播，自动拉起监听`)
+        this.reconcile()
+      } else if (state.phase === 'ended' && state.monitor) {
+        // 还是没开播：继续排队等着（下播期间开关一直是开的）
+        logger.debug(`[douyin-link] ${webRid} 还没开播，继续等（每分钟探测一次）`)
+        this.scheduleRelive(state)
+      }
       this.emitRooms(true)
       return true
     } catch (error) {
@@ -561,6 +598,37 @@ export class AnalyzerHub {
       this.emitRooms(true)
       return false
     }
+  }
+
+  /**
+   * 下播之后**持续等它重新开播**：每 `RELIVE_PROBE_MS` 解析一次直播间。
+   *
+   * 用户 2026-10-08 的要求：「需要实现实时监听直播间，如果有重新开播需要拉起监听」。
+   * 旧行为是收到下播消息就把监控开关**关掉**（`setRoomMonitor(false)`）——于是主播第二天
+   * 再开播时，这个房间永远不会自己回来，用户看到的就是「监控莫名其妙停了」。
+   *
+   * 现在：下播只停采集器，**开关保持开着**，由一个每分钟一次的状态探测负责把监控拉起来
+   * （探测复用 `refreshRoom` —— 也就是界面上「刷新信息」那一条路，行为一致、只有一处实现）。
+   */
+  private scheduleRelive(state: RoomState): void {
+    if (!state.monitor || this.reliveTimers.has(state.webRid)) return
+    this.reliveTimers.set(
+      state.webRid,
+      setTimeout(() => {
+        this.reliveTimers.delete(state.webRid)
+        if (!state.monitor) return
+        if (this.states.get(state.webRid) !== state) return
+        if (state.collector) return
+        void this.refreshRoom(state.webRid)
+      }, RELIVE_PROBE_MS)
+    )
+  }
+
+  /** 停止「等重新开播」的探测（关开关、删房间、插件停用时都要收掉） */
+  private stopRelive(state: RoomState): void {
+    const timer = this.reliveTimers.get(state.webRid)
+    if (timer) clearTimeout(timer)
+    this.reliveTimers.delete(state.webRid)
   }
 
   /** 备注（自由文本，存在库里） */
@@ -752,7 +820,9 @@ export class AnalyzerHub {
       if (resolved.room.status === 'ended') {
         state.phase = 'ended'
         state.sessionId = 0
-        logger.info(`[douyin-link] ${state.webRid} 当前没在直播，暂停监控`)
+        logger.info(`[douyin-link] ${state.webRid} 当前没在直播，暂停采集并等它开播（开关保持开着）`)
+        // 开关没关就排队等重新开播：主播开播后最多一分钟就会自动开始监控
+        this.scheduleRelive(state)
         this.emitRooms(true)
         return
       }
@@ -1041,11 +1111,14 @@ export class AnalyzerHub {
     if (roomEnded) {
       state.status = 'ended'
       state.info = state.info ? { ...state.info, status: 'ended' } : null
-      logger.info(`[douyin-link] ${state.webRid} 收到下播消息，停止监控`)
+      /**
+       * 下播：停采集器，但**监控开关保持开着**，交给 `scheduleRelive` 每分钟探一次，
+       * 主播再开播时自动拉起来（用户 2026-10-08：「如果有重新开播需要拉起监听」）。
+       */
+      logger.info(`[douyin-link] ${state.webRid} 收到下播消息，停止采集但保持监听（开播后自动拉起）`)
       this.stopState(state, 'ended')
       state.phase = 'ended'
-      state.monitor = false
-      void store.setRoomMonitor(state.webRid, false)
+      this.scheduleRelive(state)
     }
     this.roomsDirty = true
   }
@@ -1293,16 +1366,24 @@ export class AnalyzerHub {
   /**
    * 概览：窗口内的 KPI + 分钟序列（补齐缺口）+ 类型分布 + 三份礼物聚合。
    *
-   * `windowMinutes <= 0` = **全部**（从库里最早的一条到现在的整段）：用户要「永久存储」，
-   * 那也得能一眼看到全部——1 小时的窗口会把更早的礼物从榜上抹掉，看着就像「礼物不断消失」。
-   * 全部模式下序列按「跨度 / 240」合并成粗桶（7 天 = 每 42 分钟一个点），不然一天就是 1440 个点。
+   * 两种口径：
+   * - `windowMinutes > 0`：最近 N 分钟（`windowMinutes <= 0` 也走「全部」，见下）；
+   * - **`range` 给了就按它**（`from` → `to`，毫秒）：左侧「每日记录」点某一天、或时间进度条
+   *   拖出一段，都是走这条路——这样「点一天看那一天的详情」和「拖动选一段时间」共用同一个查询。
+   * - `windowMinutes <= 0`（且没给 range）= **全部**（库里最早一条到现在）。用户要「永久存储」，
+   *   那也得能一眼看到全部——固定窗口会把更早的礼物从榜上抹掉，看着就像「礼物不断消失」。
+   * 序列按跨度合并成粗桶（最多 240 个点），不然一周就是上万个点。
    */
-  async summary(webRid: string, windowMinutes = 60): Promise<RoomSummary> {
+  async summary(
+    webRid: string,
+    windowMinutes = 60,
+    range?: { from: number; to: number }
+  ): Promise<RoomSummary> {
     const requested = Math.round(windowMinutes)
-    const all = !(requested > 0)
+    const all = !range && !(requested > 0)
     const minutes = all ? 0 : Math.min(Math.max(5, requested), 1440)
-    const toMs = Date.now()
-    const fromMs = all ? 0 : toMs - minutes * 60000
+    const toMs = range ? Math.max(1, Math.round(range.to)) : Date.now()
+    const fromMs = range ? Math.max(0, Math.round(range.from)) : all ? 0 : toMs - minutes * 60000
     const { totals, messages } = await store.windowTotals(webRid, fromMs, toMs)
     const breakdown = await store.kindBreakdown(webRid, fromMs, toMs)
     const startMinute = all ? minuteOf(breakdown.firstAt > 0 ? breakdown.firstAt : toMs) : minuteOf(fromMs)
@@ -1581,6 +1662,16 @@ export class AnalyzerHub {
       hasInfo: Boolean(state.info),
       updatedAt: Date.now()
     }
+  }
+
+  /**
+   * **每一天的直播记录**（左侧房间旁边的「每日记录」列表）。
+   *
+   * 点一天之后看详情用的是 `summary(webRid, 0, { from, to })`——同一条查询路径，
+   * 所以「按天看」和「按进度条拖出来的时间段看」看到的数字口径完全一致。
+   */
+  async dayRecords(webRid: string, limit = 90): Promise<DayRecordRow[]> {
+    return store.dayRecords(webRid, limit)
   }
 
   async clearUsers(webRid = ''): Promise<void> {
