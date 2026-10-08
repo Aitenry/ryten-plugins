@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Modal, Tag } from 'antd'
 import { RiDeleteBin6Line, RiTeamLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
@@ -118,6 +118,9 @@ export default function Page(): React.JSX.Element {
   )
   /** 「添加直播间」失败时的提示（代码在主进程，文案在这里翻） */
   const [addFailure, setAddFailure] = useState<FailureInfo | null>(null)
+  /** 脱马甲的结果（左栏一行灰字，8 秒后自己消失） */
+  const [revealHint, setRevealHint] = useState('')
+  const revealTimerRef = useRef<number | null>(null)
 
   const settingsRef = useRef<LiveSettings | null>(null)
   /** 当前页签（事件回调里要用到，但不想因为切页签重订阅事件通道） */
@@ -454,6 +457,36 @@ export default function Page(): React.JSX.Element {
     void api.roomMonitor(webRid, on)
   }, [])
 
+  /**
+   * 脱马甲：把匿名/空名的行还原成这个 id 的真名（用户 2026-10-08：
+   * 「可以脱神秘人的衣服，可以知道这个人是谁」）。跑完在左栏给一句结果（还原几条、还剩几条认不出），
+   * 并把房间/用户/概览都刷一遍——名字变了，榜单与列表都该跟着变。
+   *
+   * 反馈用**页面里的一行灰字**而不是 antd 的静态 `message`：宿主里那套静态函数不一定挂得上
+   * （实测点了菜单什么都没弹），自己渲染一行最稳，也符合「一行居中灰字」的克制口径。
+   */
+  const revealAnonymous = useCallback(
+    async (webRid: string): Promise<void> => {
+      try {
+        const result = await api.revealAnonymous(webRid)
+        setRevealHint(
+          t('douyin-link.page.revealDone', {
+            revealed: formatNumber(result.revealed),
+            remaining: formatNumber(result.remaining)
+          })
+        )
+        if (revealTimerRef.current) window.clearTimeout(revealTimerRef.current)
+        revealTimerRef.current = window.setTimeout(() => setRevealHint(''), 8000)
+        await reload()
+        if (webRid) await loadRoomData(webRid)
+        setUsersReloadKey((previous) => previous + 1)
+      } catch (error) {
+        setRevealHint(String(error))
+      }
+    },
+    [reload, loadRoomData, t]
+  )
+
   const monitorAll = useCallback((on: boolean): void => {
     setBusy(true)
     void api.roomMonitorAll(on).finally(() => setBusy(false))
@@ -663,10 +696,14 @@ export default function Page(): React.JSX.Element {
             onToggleMonitor={toggleMonitor}
             onMonitorAll={monitorAll}
             onRefresh={refreshRoom}
+            onRevealAnonymous={() => void revealAnonymous(activeRoom)}
             onRemove={removeRoom}
             onClearMessages={clearRoomMessages}
           />
           {addFailure ? <FailureLine failure={addFailure} /> : null}
+          {revealHint ? (
+            <span className="shrink-0 px-1 text-[10px] opacity-60">{revealHint}</span>
+          ) : null}
           {activeRoom ? (
             <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
           ) : null}

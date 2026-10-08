@@ -26,6 +26,7 @@ import {
 } from './schema'
 import { schemaReady } from './ddl'
 import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
+import { anonymousSqlPredicate } from '../../shared/anonymous'
 
 /**
  * 抖音直播分析器 的数据访问层。
@@ -900,6 +901,70 @@ export async function userGiftBreakdown(
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(Math.min(Math.max(1, limit), 50))
     return rows.map((row) => ({ name: row.name, count: row.count, diamonds: row.diamonds, users: 1 }))
+  })
+}
+
+/**
+ * **脱马甲**：把「匿名」占位的昵称换回这个 id 在我们自己数据里的真名。
+ *
+ * 用户 2026-10-08 的要求：「可以脱神秘人的衣服，可以知道这个人是谁」。
+ * 抖音在匿名送礼/点歌时只给一个占位名（空串或 `☞ 匿名 -`），但**用户 id 一直在**；
+ * 这个人只要在本房间说过话、进过场、上过房榜，库里就有真名——同一 id 一对就还原了。
+ *
+ * 名字来源优先级：
+ * 1. `douyin_link_users`（本房间的用户档案，`recorder` 每次见到非空昵称都会更新它）；
+ * 2. 消息流水里**同一个 id 最近一条非匿名**的名字（档案被清过也还能救回来）。
+ *
+ * 两条硬约束：
+ * - **只动匿名/空的行**（`shared/anonymous.ts` 的谓词），真名半个字都不改；
+ * - 查不到真名的行**保持原样**（宁可还显示「匿名」，也不猜）。
+ *
+ * 收礼人（`to_user_id` / `to_user_name`）同理再跑一遍——匿名收礼也一样能还原。
+ */
+export async function revealAnonymousNames(webRid = ''): Promise<{ revealed: number; remaining: number }> {
+  await schemaReady
+  const scope = webRid ? ` AND m.web_rid = '${webRid.replace(/'/g, "''")}'` : ''
+  const senderAnon = anonymousSqlPredicate('m.user_name')
+  const recipientAnon = anonymousSqlPredicate('m.to_user_name')
+  /** 「这一列的真名」：先查用户档案，再查流水里同一 id 最近的非匿名名字 */
+  const realName = (idColumn: string, nameColumn: string): string => `COALESCE(
+      (SELECT u.nickname FROM douyin_link_users u
+        WHERE u.web_rid = m.web_rid AND u.user_id = m.${idColumn} AND NOT ${anonymousSqlPredicate('u.nickname')}
+        LIMIT 1),
+      (SELECT n.${nameColumn} FROM douyin_link_messages n
+        WHERE n.web_rid = m.web_rid AND n.${idColumn} = m.${idColumn} AND n.id <> m.id
+          AND NOT ${anonymousSqlPredicate(`n.${nameColumn}`)}
+        ORDER BY n.at_ms DESC LIMIT 1)
+    )`
+  return withOrm('douyin-link.revealAnonymous', async (db) => {
+    const sender = await db.execute(
+      sql.raw(`WITH real AS (
+        SELECT m.id, ${realName('user_id', 'user_name')} AS name
+        FROM douyin_link_messages m
+        WHERE m.user_id <> '' AND ${senderAnon}${scope}
+      )
+      UPDATE douyin_link_messages AS t SET user_name = real.name
+      FROM real WHERE t.id = real.id AND real.name IS NOT NULL
+      RETURNING t.id`)
+    )
+    const recipient = await db.execute(
+      sql.raw(`WITH real AS (
+        SELECT m.id, ${realName('to_user_id', 'to_user_name')} AS name
+        FROM douyin_link_messages m
+        WHERE m.to_user_id <> '' AND ${recipientAnon}${scope}
+      )
+      UPDATE douyin_link_messages AS t SET to_user_name = real.name
+      FROM real WHERE t.id = real.id AND real.name IS NOT NULL
+      RETURNING t.id`)
+    )
+    const left = await db.execute(
+      sql.raw(`SELECT count(*)::int AS remaining FROM douyin_link_messages m
+        WHERE (${senderAnon} AND m.user_id <> '') OR (${recipientAnon} AND m.to_user_id <> '')${
+          webRid ? ` AND m.web_rid = '${webRid.replace(/'/g, "''")}'` : ''
+        }`)
+    )
+    const remaining = Number((left.rows?.[0] as { remaining?: number } | undefined)?.remaining ?? 0)
+    return { revealed: sender.rows.length + recipient.rows.length, remaining }
   })
 }
 
