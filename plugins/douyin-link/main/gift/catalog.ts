@@ -45,6 +45,12 @@ export interface GiftInfo {
  */
 export interface GiftResolver {
   resolve(id: number): { name: string; diamonds: number } | undefined
+  /**
+   * 按**礼物名**反查（可选）：真礼物帧的结构我们还没吃透时，只要帧里出现了某个礼物名
+   * （目录里有 1000 多个名字），就能确认是这件礼物、并拿到它的价。
+   * 同名多件且价格不一致时返回 undefined——宁可没有，不给错价。
+   */
+  resolveByName?(name: string): { name: string; diamonds: number } | undefined
   /** 运行时自检（可选）：帧里自带的抖币价与目录对不上时记一笔 */
   noteFramePrice?(id: number, framePrice: number): void
 }
@@ -59,6 +65,8 @@ type CatalogJson = Record<string, [string, number]>
 
 class GiftCatalog implements GiftResolver {
   private gifts = new Map<number, GiftInfo>()
+  /** 名字 → 候选礼物（反查用；同名多件时看价格是否一致） */
+  private byName = new Map<string, GiftInfo[]>()
   private fetchedAt = 0
   private loading: Promise<void> | null = null
   private ready: Promise<void> | null = null
@@ -79,6 +87,7 @@ class GiftCatalog implements GiftResolver {
             this.gifts.set(giftId, { id: giftId, name: String(entry?.[0] ?? ''), diamonds: Number(entry?.[1] ?? 0) || 0 })
           }
         }
+        this.reindex()
         this.fetchedAt = Number(await getMeta(META_FETCHED_AT)) || 0
         logger.info(
           `[douyin-link] 礼物目录（库里缓存）：${this.gifts.size} 件，抓取于 ${
@@ -96,6 +105,16 @@ class GiftCatalog implements GiftResolver {
   resolve(id: number): { name: string; diamonds: number } | undefined {
     const hit = this.gifts.get(id)
     return hit ? { name: hit.name, diamonds: hit.diamonds } : undefined
+  }
+
+  /** 按名字反查（真礼物帧里出现了某个目录礼物名时用它确认礼物与价格） */
+  resolveByName(name: string): { name: string; diamonds: number } | undefined {
+    const hits = this.byName.get(name.trim())
+    if (!hits || hits.length === 0) return undefined
+    const first = hits[0]
+    // 同名多件且价格不一致：认不出来就是认不出来（不给错价）
+    if (hits.some((gift) => gift.diamonds !== first.diamonds)) return undefined
+    return { name: first.name, diamonds: first.diamonds }
   }
 
   get size(): number {
@@ -135,6 +154,17 @@ class GiftCatalog implements GiftResolver {
     )
   }
 
+  /** 建「名字 → 候选礼物」索引（目录换了之后重建一次） */
+  private reindex(): void {
+    this.byName.clear()
+    for (const gift of this.gifts.values()) {
+      if (!gift.name) continue
+      const list = this.byName.get(gift.name)
+      if (list) list.push(gift)
+      else this.byName.set(gift.name, [gift])
+    }
+  }
+
   private async fetchCatalog(): Promise<void> {
     try {
       const response = await fetch(CATALOG_URL, {
@@ -169,6 +199,7 @@ class GiftCatalog implements GiftResolver {
       if (next.size === 0) return
       // 整份替换：价格是会变的，只补缺会让旧价永远留着
       this.gifts = next
+      this.reindex()
       this.fetchedAt = Date.now()
       this.warned.clear()
       logger.info(`[douyin-link] 礼物目录已更新：${next.size} 件（带价格 ${countPriced(next)} 件）`)

@@ -141,18 +141,33 @@ const orderSingFollowUpFrame = ({ singer = '唱歌的人', orderId = '1000003769
 /**
  * 假的礼物目录（真目录是 `main/gift/catalog.ts` 从官方接口拉的 1282 件）：
  * 自检只关心「按 id 查名字与价格」这条链，所以这里给一件真礼物 + 一件虚构礼物。
+ * 也实现 `resolveByName`：真礼物帧按字段号解不出名字时的兜底靠它。
  */
 const fakeCatalog = (pairs = {}) => {
   const warned = []
+  const names = new Map(Object.values(pairs).map((gift) => [gift.name, gift]))
   return {
     warned,
     resolve: (id) => pairs[id],
+    resolveByName: (name) => names.get(name),
     noteFramePrice: (id, framePrice) => {
       const hit = pairs[id]
       if (hit && hit.diamonds !== framePrice) warned.push(`${id}:${framePrice}≠${hit.diamonds}`)
     }
   }
 }
+
+/**
+ * 一件「结构未知」的真礼物帧：字段号全按社区 proto 猜错的样子——顶层 `7`/`8` 仍是 user/toUser，
+ * 但礼物结构放在别的字段（`23`），名字与价格埋在更深一层。用来验证「帧里出现了目录礼物名」的兜底。
+ */
+const unknownGiftFrame = ({ sender = '失眠了', to = '不乖', name = '爱的纸鹤', unit = 99 } = {}) =>
+  Buffer.concat([
+    pbMessage(7, user(7694190253011159818n, sender)),
+    pbMessage(8, user(7694190253011159819n, to)),
+    pbVarint(5, 1),
+    pbMessage(23, pbMessage(4, Buffer.concat([pbVarint(2, unit), pbString(9, name)])))
+  ])
 
 /** 一条普通弹幕（用来验证「别的消息不该带出抖币」） */
 const chatFrame = ({ nickname = '说话的人', text = '你好' } = {}) =>
@@ -271,7 +286,17 @@ const wrong = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSi
 check('点歌 + 目录价不符 → 写一条自检告警', mismatch.warned, ['3200:5≠99'])
 check('点歌 + 目录价不符 → 仍以目录为准', wrong.item.diamonds, 99)
 
-/* 同一单号串的后续帧（没有礼物记录）必须被丢掉：否则库里会出现「同一单两行、一行没名字」 */
+/* 结构未知的真礼物帧：按字段号解不出名字时，靠「帧里出现的目录礼物名」兜底 */
+const unknown = proto.decodeProtoMessage('WebcastGiftMessage', unknownGiftFrame(), catalog)
+check('未知结构的真礼物 → 靠帧里的礼物名认出礼物', unknown.item.text, '爱的纸鹤')
+check('未知结构的真礼物 → 价格取自目录', unknown.item.diamonds, 99)
+check('未知结构的真礼物 → 送礼人/收礼人照旧', [unknown.item.user, unknown.item.toUser], ['失眠了', '不乖'])
+
+/* 目录里没有这件礼物的名字：不许编，正文留空（界面显示「礼物名未知」） */
+const unknownNoCatalog = proto.decodeProtoMessage('WebcastGiftMessage', unknownGiftFrame(), fakeCatalog({}))
+check('目录对不上名字 → 不编名字', unknownNoCatalog.item.text, '')
+
+/* 同一个点歌单的后续帧（没有礼物记录）必须被丢掉：否则库里会出现「同一单两行、一行没名字」 */
 proto.__resetProtoIds()
 proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ orderId: '55500000000000000000000001' }))
 check(

@@ -156,7 +156,7 @@ export function decodeProtoMessage(
     case 'WebcastSocialMessage':
       return { ...nothing(), item: item('social', nickname, userId, '', 0), users: withUser(user ? [user] : []) }
     case 'WebcastGiftMessage':
-      return decodeProtoGift(msg, user, gifts)
+      return decodeProtoGift(msg, user, gifts, payload)
     case 'WebcastLinkmicOrderSingMessage':
       // 语音房「点歌」：房间里显示成「X 送了 想听 Y 演唱」，归到礼物这一类（见下面的解码器）
       return decodeProtoOrderSing(msg, gifts)
@@ -216,25 +216,107 @@ export function decodeProtoMessage(
  * 连击不单独成一列：`repeatEnd = 0` 的连击服务端会**逐条推增量**，逐条落库本来就是逐条明细，
  * 再合成一列反而会把「这一条到底送了几个」搞乱。
  */
-function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts?: GiftResolver): ProtoDecoded {
+function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResolver | undefined, payload: Buffer): ProtoDecoded {
   const gift = getMessage(msg, 15)
   const nickname = user?.nickname ?? ''
   const toUser = parseProtoUser(getMessage(msg, 8))
   const frameName = (gift ? (pickString(gift, [16, 2], 40) ?? '') : '').trim()
   const frameUnit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
   const giftId = (gift ? (getVarint(gift, 5) ?? 0) : 0) || (getVarint(msg, 2) ?? 0)
-  const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+  let hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+  /**
+   * 兜底一：**帧里出现了某个目录礼物名**就直接认它。
+   *
+   * 为什么需要（2026-10-08 实测）：社区 proto 给的 `GiftStruct` 字段号在本机真帧上没解出名字——
+   * 用户库里出现了一条「收礼人 不乖ఇ 有、礼物名空」的行（写它的就是 0.7.6），
+   * 说明真礼物帧**确实在推**，只是结构和我们照抄的那份不一样。与其再猜字段号，
+   * 不如把帧里所有字符串拿去和官方目录的 1000 多个礼物名对一遍：对上了就是这件礼物（且目录里有价）。
+   */
+  if (!frameName && !hit) hit = matchGiftNameInFrame(msg, gifts)
   // 帧里同时给了 id 和价：顺手做一次「帧 vs 官方目录」的运行时自检（不一致会在日志里 warn）
   if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
   const name = frameName || hit?.name || ''
   const unit = frameUnit || hit?.diamonds || 0
   const repeat = pickVarintInRange(msg, [5], 1, 100000) ?? 1
+  /**
+   * 名字解不出来的真礼物：把**原始帧**记进日志（限几次）。
+   *
+   * 为什么值得留：`WebcastGiftMessage` 的字段号来自社区 proto，本机一直没抓到真帧；
+   * 2026-10-08 用户库里出现了一条「收礼人有、礼物名空」的行（`失眠了 → 不乖ఇ`），
+   * 说明真礼物帧**到了**、但我们没能从里面解出礼物名——这时候日志里的字段表就是唯一的线索，
+   * 照着它把字段号钉死，比再猜一轮强。
+   */
+  if (!name && nickname) logGiftWithoutName(msg, payload)
   if (!name && !nickname) return nothing()
   const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
   return {
     ...nothing(),
     item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '' },
     users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
+  }
+}
+
+/**
+ * 把帧里（含嵌套，最多 4 层）所有像字符串的字节拿去和目录对名字，第一个对上的就是这件礼物。
+ *
+ * 只在「按字段号解不出名字」时才走这条路；目录里没有同名礼物就返回 undefined。
+ */
+function matchGiftNameInFrame(msg: PbMessage, gifts?: GiftResolver): { name: string; diamonds: number } | undefined {
+  if (!gifts?.resolveByName) return undefined
+  const seen = new Set<string>()
+  const walk = (node: PbMessage, depth: number): { name: string; diamonds: number } | undefined => {
+    for (const list of node.fields.values()) {
+      for (const value of list) {
+        if (value.kind !== 'bytes' || value.value.length === 0) continue
+        const text = value.value.toString('utf8')
+        const valid = Buffer.from(text, 'utf8').equals(value.value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)
+        if (valid && text.length <= 40) {
+          if (seen.has(text)) continue
+          seen.add(text)
+          const hit = gifts.resolveByName?.(text)
+          if (hit?.name) return hit
+        }
+        if (depth > 0 && value.value.length > 1) {
+          const nested = walk(readMessage(value.value), depth - 1)
+          if (nested) return nested
+        }
+      }
+    }
+    return undefined
+  }
+  try {
+    return walk(msg, 3)
+  } catch {
+    return undefined
+  }
+}
+
+/** 解不出礼物名的真礼物帧：原始字段表 + 头部十六进制（每场最多记 5 条，别把日志刷爆） */
+let giftDumpCount = 0
+function logGiftWithoutName(msg: PbMessage, payload: Buffer): void {
+  if (giftDumpCount >= 5) return
+  giftDumpCount += 1
+  try {
+    const dump = (node: PbMessage): string =>
+      [...node.fields.entries()]
+        .map(([no, list]) =>
+          `${no}:${list
+            .map((value) =>
+              value.kind === 'bytes'
+                ? `b(${value.value.length})`
+                : value.kind === 'varint'
+                  ? `v(${value.value})`
+                  : value.kind
+            )
+            .join('|')}`
+        )
+        .join(' ')
+    const gift = getMessage(msg, 15)
+    logger.info(`[douyin-link][gift-unknown] len=${payload.length} 顶层 ${dump(msg)}`)
+    logger.info(`[douyin-link][gift-unknown] field15 ${gift ? dump(gift) : '（没有 field 15）'}`)
+    logger.info(`[douyin-link][gift-unknown] hex=${payload.subarray(0, 512).toString('hex')}`)
+  } catch {
+    /* 诊断失败无所谓 */
   }
 }
 
