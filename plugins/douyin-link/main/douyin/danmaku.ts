@@ -2,6 +2,7 @@ import logger from 'electron-log'
 import type { DanmakuItem, DanmakuPhase, FailureInfo, UserInfo } from '../../shared/types'
 import { decodePushBatch, parseJsonLoose, type JsonDecodedBatch } from './json'
 import { decodeProtoResponse } from './proto-messages'
+import { giftCatalog } from '../gift/catalog'
 
 /**
  * 弹幕采集器：**主进程自己 GET `/webcast/im/fetch/`**，不再建隐藏窗口。
@@ -323,7 +324,7 @@ export class DanmakuCollector {
 
     // protobuf 与 JSON 两种可能的回包都认（服务端偶尔会忽略 resp_content_type）
     if (raw[0] !== 0x7b) {
-      const decoded = decodeProtoResponse(raw)
+      const decoded = decodeProtoResponse(raw, giftCatalog)
       return {
         messages: [],
         proto: raw,
@@ -367,9 +368,9 @@ export class DanmakuCollector {
   /** 解一批消息并上报（解码在 ./json.ts 与 ./proto-messages.ts；单条解不动不影响这一批的其它消息） */
   private consume(result: PollResult): void {
     const decoded: JsonDecodedBatch = result.proto
-      ? decodeProtoResponse(result.proto).batch
+      ? decodeProtoResponse(result.proto, giftCatalog).batch
       : result.messages.length > 0
-        ? decodePushBatch(result.messages)
+        ? decodePushBatch(result.messages, giftCatalog)
         : { items: [], users: [], roomEnded: false, micUserIds: null, methods: {} }
     if (Object.keys(decoded.methods).length > 0) this.pollsDone += 1
     for (const [method, count] of Object.entries(decoded.methods)) {

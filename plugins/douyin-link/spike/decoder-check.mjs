@@ -87,7 +87,7 @@ const giftFrame = ({ nickname = '送礼的人', unit = 10, repeat = 5, name = '�
  * 6.1 = `发送者_歌手_单号_0_歌曲_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）；
  * 6.5.1 = 点唱礼物记录（1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 抖币价、10 礼物名）。
  */
-const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', songId = 13564, price = 99 } = {}) =>
+const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', songId = 13564, price = 99, giftId = 3200 } = {}) =>
   Buffer.concat([
     pbVarint(2, 4),
     pbMessage(
@@ -105,7 +105,7 @@ const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', song
               pbMessage(1, user(7667087264728728634n, singer)),
               pbMessage(2, user(58709692971n, sender)),
               pbString(3, `58709692971_7667087264728728634_10000037694256230482760723_0_${songId}_1_Normal`),
-              pbVarint(5, 3200),
+              pbVarint(5, giftId),
               pbVarint(6, price),
               pbString(10, '点唱礼物')
             ])
@@ -114,6 +114,22 @@ const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', song
       ])
     )
   ])
+
+/**
+ * 假的礼物目录（真目录是 `main/gift/catalog.ts` 从官方接口拉的 1282 件）：
+ * 自检只关心「按 id 查名字与价格」这条链，所以这里给一件真礼物 + 一件虚构礼物。
+ */
+const fakeCatalog = (pairs = {}) => {
+  const warned = []
+  return {
+    warned,
+    resolve: (id) => pairs[id],
+    noteFramePrice: (id, framePrice) => {
+      const hit = pairs[id]
+      if (hit && hit.diamonds !== framePrice) warned.push(`${id}:${framePrice}≠${hit.diamonds}`)
+    }
+  }
+}
 
 /** 一条普通弹幕（用来验证「别的消息不该带出抖币」） */
 const chatFrame = ({ nickname = '说话的人', text = '你好' } = {}) =>
@@ -175,8 +191,8 @@ if (frameArg) {
   console.log('  item :', JSON.stringify(decoded?.item ?? null))
   console.log('  users:', JSON.stringify((decoded?.users ?? []).map((u) => ({ id: u.id, nickname: u.nickname, displayId: u.displayId }))))
   console.log('  原始字段树：')
-  // 深一点（5 层）：点歌那种帧真正的料埋在 6.5.1.x 里，浅了看不到
-  dumpTree(Buffer.from(hex, 'hex'), 1, '', console.log, 5)
+  // 深一点（8 层）：点歌那种帧真正的料埋在 6.5.1.x 里，浅了看不到
+  dumpTree(Buffer.from(hex, 'hex'), 1, '', console.log, 8)
   rmSync(workDir, { recursive: true, force: true })
   // 只做「看一眼」，不是断言：解不出东西（例如点歌的**播放状态变更**帧，见 proto-messages.ts）也退 0
   process.exit(0)
@@ -203,17 +219,34 @@ const priceless = proto.decodeProtoMessage(
 check('礼物没带价格 → 抖币 0', priceless.item.diamonds, 0)
 check('礼物没带价格 → 数量缺省 1', priceless.item.count, 1)
 
-/* 点歌：送礼人/收礼人的 User、礼物名、抖币价都在 6.5.1 那份记录里 */
+/* 点歌：送礼人/收礼人的 User、礼物 id、抖币价都在 6.5.1 那份记录里；
+   名字与价格**以官方目录为准**（帧里只有 id 和场景标签「点唱礼物」） */
 const sing = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99 })
+  orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99, giftId: 3200 })
 )
 check('点歌 → kind', sing.item.kind, 'gift')
-check('点歌 → 礼物名', sing.item.text, '点唱礼物')
 check('点歌 → 送礼人（6.5.1.2 的 User）', [sing.item.user, sing.item.userId], ['少走点弯路', '58709692971'])
 check('点歌 → 收礼人（6.5.1.1 的 User，= 歌手）', [sing.item.toUser, sing.item.toUserId], ['摇尾乞怜', '7667087264728728634'])
-check('点歌 → 抖币价（6.5.1.6）', sing.item.diamonds, 99)
+check('点歌 → 没有目录时退回帧里的标签与价', [sing.item.text, sing.item.diamonds], ['点唱礼物', 99])
 check('点歌 → 送礼人 + 收礼人都进用户库', sing.users.map((u) => u.nickname).sort(), ['少走点弯路', '摇尾乞怜'])
+
+/* 有目录时：名字与价格取自目录（real 例子：id 4353 = 跑车 = 1200 抖币） */
+const catalog = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 }, 4353: { name: '跑车', diamonds: 1200 } })
+const named = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFrame({ giftId: 4353, price: 1200, singer: 'Snow' }),
+  catalog
+)
+check('点歌 + 目录 → 礼物名（不是「点唱礼物」这种场景标签）', named.item.text, '跑车')
+check('点歌 + 目录 → 抖币价', named.item.diamonds, 1200)
+check('点歌 + 目录 → 价格一致时不告警', catalog.warned, [])
+
+/* 帧价与目录不符 → 自检必须报警（这条读法只做过一次交叉核对） */
+const mismatch = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 } })
+const wrong = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ price: 5 }), mismatch)
+check('点歌 + 目录价不符 → 写一条自检告警', mismatch.warned, ['3200:5≠99'])
+check('点歌 + 目录价不符 → 仍以目录为准', wrong.item.diamonds, 99)
 
 /* 没有那份礼物记录的老帧：礼物名/价格留空，送礼人退回单号串第一段，收礼人退回歌手 */
 const oldStyle = proto.decodeProtoMessage(
