@@ -7,13 +7,18 @@ import { ChartBox, EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginP
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
-/** 统计窗口的候选（分钟） */
-export const WINDOWS = [15, 60, 360, 1440] as const
+/**
+ * 统计窗口的候选（分钟）。**0 = 全部**（库里最早一条到现在）——
+ * 固定窗口会把更早的礼物从榜上抹掉，看着就像「礼物不断消失」；默认永久保存之后，
+ * 「全部」才是这套数据的自然口径。
+ */
+export const WINDOWS = [15, 60, 360, 1440, 0] as const
 
 /** 概览多久自动刷一次（监控中是活的，KPI 也要跟着动） */
 const RELOAD_MS = 10000
 
 export function windowLabel(t: Translate, minutes: number): string {
+  if (minutes <= 0) return t('douyin-link.page.windowAll')
   if (minutes <= 15) return t('douyin-link.page.window15')
   if (minutes <= 60) return t('douyin-link.page.window60')
   if (minutes <= 360) return t('douyin-link.page.window6h')
@@ -81,7 +86,17 @@ export function OverviewPanel(props: {
 
   const minutes = windowLabel(t, props.minutes)
   const totals = summary?.totals
-  const rate = summary && summary.windowMinutes > 0 ? summary.messages / summary.windowMinutes : 0
+  /**
+   * 「平均速率」的分母：常规窗口就是窗口分钟数；**全部**模式下按库里首末消息的实际跨度算
+   * （窗口分钟数是 0，直接除会得到 Infinity）。
+   */
+  const spanMinutes =
+    summary && summary.windowMinutes > 0
+      ? summary.windowMinutes
+      : summary && summary.lastAt > summary.firstAt
+        ? (summary.lastAt - summary.firstAt) / 60000
+        : 0
+  const rate = summary && spanMinutes > 0 ? summary.messages / spanMinutes : 0
 
   return (
     <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">

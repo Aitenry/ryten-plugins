@@ -99,6 +99,8 @@ export const DouyinLinkZhCN = {
       window7d: '7 天',
       windowAll: '全部',
       noData: '这个窗口内没有数据（先开始监控，或换个窗口）',
+      loadEarlier: '加载更早的消息',
+      noEarlier: '库里再往前没有更早的了',
       loading: '读取中…',
       noSessions: '还没有监控过这个房间',
       sessionsLine: '最近一次监控 {{time}} 起，跑了 {{duration}}，收 {{count}} 条；共记录 {{total}} 次会话',
@@ -300,8 +302,9 @@ export const DouyinLinkZhCN = {
       realtimeHint:
         '借直播间页面的 websocket 收逐条消息（弹幕/进场/点赞/**礼物**，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落。需要一个隐藏窗口，失败自动降级。',
 
-      retentionLabel: '消息保留天数',
-      retentionHint: '0 = 永久保留；启动与每 6 小时清一次，只删消息流水（用户统计与分钟聚合不动）',
+      retentionLabel: '消息保留',
+      retentionHint:
+        '默认 0 = 永久保存（不自动清理任何内容）。填 N 天才清：超过 N 天的消息流水与分钟聚合会被删掉，用户统计不删。',
       cleanupNow: '立即清理',
       storageHint:
         '数据库：{{rooms}} 个直播间 · {{messages}} 条消息 · {{users}} 条用户记录 · {{minutes}} 个分钟桶 · {{sessions}} 次监控会话。设置存在 userData 的 plugin-state 目录下，数据表归本插件自己。'

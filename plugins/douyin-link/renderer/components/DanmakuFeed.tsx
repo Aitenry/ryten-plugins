@@ -53,11 +53,22 @@ export function DanmakuFeed(props: {
   /** userId → 档案（点昵称看详情要用） */
   users: Map<string, UserProfile>
   onOpenUser: (userId: string) => void
+  /**
+   * 往库里再翻一页更早的消息（列表顶部的「加载更早」）。
+   * 实时列表只有一段，更早的内容都在库里——这就是「内容不会消失」的那条路。
+   */
+  onLoadEarlier?: () => void
+  loadingEarlier?: boolean
+  /** 库里再往前也没有了（按钮变成一句灰字） */
+  earlierDone?: boolean
 }): React.JSX.Element {
   const { t } = useTranslation()
   const palette = usePluginPalette()
   const boxRef = useRef<HTMLDivElement | null>(null)
   const [atBottom, setAtBottom] = useState(true)
+  /** 上一次的高度与首条 id：用来判断「是不是在头部插进了更早的消息」并保持视口不跳 */
+  const prevHeightRef = useRef(0)
+  const firstIdRef = useRef(0)
   const [view, setView] = useState<ViewKey>('chat')
   /** 上次「在底部」时看到的最后一条 id：用来数「中途来了几条」 */
   const seenIdRef = useRef(0)
@@ -100,6 +111,21 @@ export function DanmakuFeed(props: {
     if (!props.autoScroll || !atBottom) return
     box.scrollTop = box.scrollHeight
   }, [lastId, props.autoScroll, atBottom])
+
+  /**
+   * 头部插进更早的消息时**保持视口不跳**：`scrollHeight` 涨了多少，`scrollTop` 就补多少
+   * （只在用户自己往上翻、不是跟随底部时补；尾部追加新消息的情况不补，否则会把视图推下去）。
+   */
+  useEffect(() => {
+    const box = boxRef.current
+    if (!box) return
+    const firstId = props.items[0]?.id ?? 0
+    const headGrew = firstId > 0 && firstIdRef.current > 0 && firstId < firstIdRef.current
+    const grew = box.scrollHeight - prevHeightRef.current
+    if (!atBottom && headGrew && grew > 0) box.scrollTop += grew
+    prevHeightRef.current = box.scrollHeight
+    firstIdRef.current = firstId
+  }, [props.items, atBottom])
 
   // 换分类等于换了一屏内容：直接回到最新，别让用户在上一个分类的位置上迷路
   useEffect(() => {
@@ -184,6 +210,26 @@ export function DanmakuFeed(props: {
           setAtBottom(bottom)
         }}
       >
+        {/*
+          列表顶部：往库里翻更早的消息（内容都在库里，默认永久保存）。
+          没有这个入口时，实时列表一满，前面收到的礼物就只能去「检索」里找——用户看到的就是「礼物不断消失」。
+        */}
+        {props.onLoadEarlier ? (
+          <div className="flex justify-center pb-1">
+            {props.earlierDone ? (
+              <span className="text-[10px] opacity-50">{t('douyin-link.page.noEarlier')}</span>
+            ) : (
+              <Button
+                size="small"
+                type="text"
+                loading={props.loadingEarlier}
+                onClick={props.onLoadEarlier}
+              >
+                {t('douyin-link.page.loadEarlier')}
+              </Button>
+            )}
+          </div>
+        ) : null}
         {visible.length === 0 ? (
           <div key="empty" className="flex h-full items-center justify-center px-3">
             <span className="text-center text-xs opacity-50">

@@ -333,6 +333,8 @@ export async function clearMessages(webRid = ''): Promise<number> {
 
 /** 按保留期清旧消息（返回删了多少条） */
 export async function deleteMessagesBefore(cutoffMs: number): Promise<number> {
+  // 0 / NaN / 负数都当「不清理」：永久保存是默认口径，绝不能让一个坏参数把整张表清空
+  if (!(cutoffMs > 0)) return 0
   await schemaReady
   return withOrm('douyin-link.deleteMessagesBefore', async (db) => {
     const before = await db
@@ -349,6 +351,8 @@ export async function deleteMessagesBefore(cutoffMs: number): Promise<number> {
 
 /** 按保留期清旧分钟桶（趋势图的历史也跟着保留期走） */
 export async function deleteMinutesBefore(minute: number): Promise<number> {
+  // 同 deleteMessagesBefore：非正数一律不清理（永久保存是默认口径）
+  if (!(minute > 0)) return 0
   await schemaReady
   return withOrm('douyin-link.deleteMinutesBefore', async (db) => {
     const rows = await db

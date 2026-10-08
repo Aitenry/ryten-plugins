@@ -59,6 +59,27 @@ const EMPTY_STATS: PlayerStats = {
 }
 
 /**
+ * 实时列表里一次往库里翻多少条 / 内存里最多挂多少条。
+ *
+ * 库里是**全部**（默认永久保存），内存里挂的只是「正在看的这一段」：翻到更早的靠
+ * 「加载更早」继续查库，所以内存上限只用来兜住 DOM 与数组的体量，不影响内容是否还在。
+ */
+const FEED_PAGE = 300
+const FEED_CAP = 5000
+
+/**
+ * 合并两段弹幕（老的在前、新的在后），按 `id` 去重——库里的历史与内存里的实时段会有重叠。
+ *
+ * 超出 `FEED_CAP` 只从**最前面**裁（裁掉的是最早的历史，可以再翻回来），
+ * 绝不裁后面的新消息。
+ */
+function mergeFeed(older: DanmakuItem[], current: DanmakuItem[]): DanmakuItem[] {
+  const seen = new Set(current.map((item) => item.id))
+  const head = older.filter((item) => !seen.has(item.id))
+  return [...head, ...current].slice(-FEED_CAP)
+}
+
+/**
  * 抖音直播分析器 的页面。
  *
  * 三条边界，读代码时先记住：
@@ -88,6 +109,13 @@ export default function Page(): React.JSX.Element {
   const [stats, setStats] = useState<PlayerStats>(EMPTY_STATS)
   const [volume, setVolume] = useState(0.8)
   const [openUser, setOpenUser] = useState('')
+  /**
+   * 「加载更早」的状态（按房间）：`loading` = 正在查库、`done` = 库里再往前没有了。
+   * 实时列表只装得下有限条，更早的内容在库里——这个按钮就是把它翻出来（内容不会消失）。
+   */
+  const [earlierByRoom, setEarlierByRoom] = useState<Map<string, { loading: boolean; done: boolean }>>(
+    () => new Map()
+  )
   /**
    * 礼物榜点开的那一行（`null` = 没开）：这个人 + 方向（他送的 / 他收到的）。
    * 与用户档案弹窗是两个入口，互不干扰。
@@ -163,12 +191,12 @@ export default function Page(): React.JSX.Element {
       api.onMessages((batch) => {
         setItemsByRoom((previous) => {
           const map = new Map(previous)
-          const list = [...(map.get(batch.webRid) ?? []), ...batch.items].slice(-Math.max(50, maxItems))
+          const list = [...(map.get(batch.webRid) ?? []), ...batch.items].slice(-FEED_CAP)
           map.set(batch.webRid, list)
           return map
         })
       }),
-    [maxItems]
+    []
   )
 
   /** 计数心跳：原地改那个房间的计数（不重拉快照） */
@@ -301,16 +329,23 @@ export default function Page(): React.JSX.Element {
     [reload, maxItems]
   )
 
-  /** 切到某个房间时把它的「最近弹幕」与「用户表」拉一次（内存里的，库里的走检索/榜单） */
+  /** 切到某个房间时把它的「最近弹幕」与「用户表」拉一次；弹幕再补一段**库里的**历史 */
   const loadRoomData = useCallback(
     async (webRid: string): Promise<void> => {
-      const [recent, userRows] = await Promise.all([
+      const [recent, userRows, stored] = await Promise.all([
         api.roomRecent(webRid, Math.max(50, maxItems)),
-        api.usersList(webRid, 'recent', '', 300)
+        api.usersList(webRid, 'recent', '', 300),
+        /**
+         * 内存里只有最近 `maxItems` 条，**库里的才是全部**：这里把库里的最近一段也拉进来，
+         * 不然切个房间/重启一次，之前收的礼物就从列表上「消失」了（用户 2026-10-08 反馈
+         * 「怎么礼物会不断消失」）。更早的用列表顶部的「加载更早」继续往库里翻。
+         */
+        api.messagesQuery({ webRid, limit: FEED_PAGE }).catch(() => ({ rows: [], total: 0 }))
       ])
       setItemsByRoom((previous) => {
         const map = new Map(previous)
-        map.set(webRid, recent)
+        const older = [...stored.rows].reverse() as DanmakuItem[]
+        map.set(webRid, mergeFeed(older, map.get(webRid) ?? recent))
         return map
       })
       setUsersByRoom((previous) => {
@@ -351,6 +386,47 @@ export default function Page(): React.JSX.Element {
     },
     [activeRoom, loadRoomData]
   )
+
+  /**
+   * 「加载更早」：按当前列表里**最早那条的时间**往库里再翻一页（老消息在前）。
+   *
+   * 翻到库里没有了就把这个房间标成 `done`，按钮变成「没有更早的了」。
+   * 这是「内容不消失」的兜底：实时列表只有一段，库里的历史永远能翻回来。
+   */
+  const loadEarlier = useCallback((): void => {
+    const webRid = activeRoom
+    if (!webRid) return
+    const list = itemsByRoom.get(webRid) ?? []
+    const oldest = list[0]?.at ?? 0
+    if (oldest <= 0) return
+    setEarlierByRoom((previous) => {
+      const map = new Map(previous)
+      map.set(webRid, { loading: true, done: previous.get(webRid)?.done ?? false })
+      return map
+    })
+    void api
+      .messagesQuery({ webRid, to: oldest - 1, limit: FEED_PAGE })
+      .then((page) => {
+        const older = [...page.rows].reverse() as DanmakuItem[]
+        setItemsByRoom((previous) => {
+          const map = new Map(previous)
+          map.set(webRid, mergeFeed(older, map.get(webRid) ?? []))
+          return map
+        })
+        setEarlierByRoom((previous) => {
+          const map = new Map(previous)
+          map.set(webRid, { loading: false, done: older.length === 0 })
+          return map
+        })
+      })
+      .catch(() => {
+        setEarlierByRoom((previous) => {
+          const map = new Map(previous)
+          map.set(webRid, { loading: false, done: false })
+          return map
+        })
+      })
+  }, [activeRoom, itemsByRoom])
 
   const toggleMonitor = useCallback((webRid: string, on: boolean): void => {
     void api.roomMonitor(webRid, on)
@@ -496,6 +572,9 @@ export default function Page(): React.JSX.Element {
                 autoScroll={settings?.autoScroll ?? true}
                 users={users}
                 onOpenUser={setOpenUser}
+                onLoadEarlier={loadEarlier}
+                loadingEarlier={earlierByRoom.get(activeRoom)?.loading ?? false}
+                earlierDone={earlierByRoom.get(activeRoom)?.done ?? false}
               />
             </div>
           </Panel>

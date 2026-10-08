@@ -94,6 +94,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       window7d: '7 days',
       windowAll: 'All',
       noData: 'No data in this window (start monitoring, or pick another window)',
+      loadEarlier: 'Load earlier messages',
+      noEarlier: 'Nothing earlier in the database',
       loading: 'Loading…',
       noSessions: 'This room has not been monitored yet',
       sessionsLine: 'Latest session started {{time}}, ran {{duration}}, collected {{count}} msgs; {{total}} sessions recorded',
@@ -289,8 +291,9 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       realtimeLabel: 'Realtime channel (experimental)',
       realtimeHint:
         'Captures per-message events from the room page\u2019s websocket (chat / joins / likes / **gifts** \u2014 more realtime than polling). While it is live the HTTP poll is paused and the ws is used; if the ws drops it falls back automatically. Needs a hidden window; degrades automatically on failure.',
-      retentionLabel: 'Message retention (days)',
-      retentionHint: '0 = keep forever; runs on start and every 6 hours, deleting only the message stream',
+      retentionLabel: 'Message retention',
+      retentionHint:
+        '0 (default) keeps everything forever and never cleans up. Set N days to delete the message stream and minute buckets older than N days; user stats are kept.',
       cleanupNow: 'Clean up now',
       storageHint:
         'Database: {{rooms}} rooms · {{messages}} messages · {{users}} user records · {{minutes}} minute buckets · {{sessions}} monitor sessions. Settings live under userData/plugin-state; the tables belong to this plugin.'

@@ -84,6 +84,7 @@ import { and, eq } from 'drizzle-orm'
 import { withOrm, closeOrm } from '@host/main/database/orm'
 import { insertMessages } from './mapper'
 import { giftRankByPerson, queryMessages } from './mapper'
+import { deleteMessagesBefore, deleteMinutesBefore } from './mapper'
 import { douyinLinkMessages } from './schema'
 
 const row = (over) => ({
@@ -165,6 +166,22 @@ await insertMessages([
 const recipients = await giftRankByPerson('108011161837', 'recipient', 0, 1e15)
 const senders = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
 const history = await queryMessages({ webRid: '108011161837', kind: 'gift', toUserId: 'R1' })
+
+/*
+ * 永久保存的兜底（2026-10-08「我需要永久存储」）：
+ * hub 的 cleanup 在保留期为 0 时根本不调这两个函数，但这里再验一层——**非正 cutoff 一律不删**，
+ * 一个坏参数（0 / NaN）不该把整张表清空。
+ */
+const beforeGuard = await queryMessages({ webRid: '108011161837', kind: 'gift' })
+/**
+ * 「加载更早」翻页用的就是同一个查询的时间上界（to，按时间往回翻）：验一下它确实只回更早的行，
+ * 而且 total 只数这一段——界面靠它判断「库里再往前还有没有」。
+ */
+const pageOlder = await queryMessages({ webRid: '108011161837', kind: 'gift', to: 11500, limit: 10 })
+const deletedByZero = await deleteMessagesBefore(0)
+const deletedMinutesByZero = await deleteMinutesBefore(0)
+const deletedByNaN = await deleteMessagesBefore(Number.NaN)
+const afterGuard = await queryMessages({ webRid: '108011161837', kind: 'gift' })
 await closeOrm()
 export default JSON.stringify({
   afterWeak: afterWeak.map((r) => ({ id: String(r.id), content: r.content, diamonds: r.diamonds, atMs: r.atMs })),
@@ -175,7 +192,19 @@ export default JSON.stringify({
   index: indexes.rows.length,
   recipients: recipients.map((r) => ({ userId: r.userId, name: r.name, count: r.count, diamonds: r.diamonds })),
   senders: senders.map((r) => ({ userId: r.userId, count: r.count, diamonds: r.diamonds })),
-  history: { total: history.total, rows: history.rows.map((r) => ({ content: r.text, diamonds: r.diamonds, user: r.user, toUserId: r.toUserId })) }
+  history: { total: history.total, rows: history.rows.map((r) => ({ content: r.text, diamonds: r.diamonds, user: r.user, toUserId: r.toUserId })) },
+  keepGuard: {
+    before: beforeGuard.total,
+    after: afterGuard.total,
+    deletedByZero,
+    deletedMinutesByZero,
+    deletedByNaN
+  },
+  paging: {
+    total: pageOlder.total,
+    ats: pageOlder.rows.map((r) => r.at),
+    contents: pageOlder.rows.map((r) => r.text)
+  }
 })
 `
 
@@ -252,6 +281,17 @@ check('收礼历史：行里带着礼物名与抖币', result.history.rows[0], {
   user: '送礼甲',
   toUserId: 'R1'
 })
+
+/* 永久保存：非正 cutoff 一条都不许删 */
+check('永久保存：cutoff=0 不删任何消息', result.keepGuard.deletedByZero, 0)
+check('永久保存：cutoff=0 不删任何分钟桶', result.keepGuard.deletedMinutesByZero, 0)
+check('永久保存：cutoff=NaN 不删任何消息', result.keepGuard.deletedByNaN, 0)
+check('永久保存：清理跑完后行数不变', [result.keepGuard.before, result.keepGuard.after], [result.keepGuard.before, result.keepGuard.before])
+
+/* 「加载更早」的翻页语义：`to` 只回更早的行，total 也只数这一段 */
+check('翻页：只回 at <= to 的行', result.paging.ats.every((at) => at <= 11500), true)
+check('翻页：包含 to 之前的礼物（10000/11000）', result.paging.contents.slice(-2), ['跑车', '跑车'])
+check('翻页：total 只数这一段', result.paging.total, result.paging.ats.length)
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 
 rmSync(workDir, { recursive: true, force: true })
