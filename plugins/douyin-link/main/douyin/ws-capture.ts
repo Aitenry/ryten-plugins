@@ -214,22 +214,41 @@ export class RoomSocketCapture {
     this.reloadTimer = setTimeout(() => this.reloadPage(), PAGE_RELOAD_MS)
   }
 
+  /**
+   * 定期重启隐藏窗口（见 PAGE_RELOAD_MS）：把页面的累积状态清掉，别让它越跑越拖音频。
+   *
+   * **为什么是「重建窗口」而不是 `webContents.reload()`**（2026-10-08 按用户机器的日志改）：
+   * 那份日志里每次定时刷新都是同一个形状——
+   * `21:12:14 定期刷新` → `21:12:17 页面已连上推送 ws` → **整整 2 分钟一帧都没有** →
+   * `21:15:43 实时通道失败（realtimeChannelLost idle）` → 销毁窗口重开 → `21:15:49` 立刻正常收帧。
+   * 也就是说：**刷新过的那个页面（隐藏窗口 + backgroundThrottling）连上了 ws 却不来帧**，
+   * 而新建的窗口一切正常——那 2 分钟是纯丢消息（每 10 分钟丢一次，一次约 2 分钟）。
+   * 所以这里改走「销毁 + 重开」这条**已被掉线恢复验证过**的路：
+   * 代价与 reload 一样（一次页面加载），但不会再有「连上却不推」的死窗口。
+   */
   private reloadPage(): void {
     this.reloadTimer = null
     const win = this.win
     if (this.stopped || !win || win.isDestroyed()) return
-    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：定期刷新隐藏窗口（防越跑越卡）`)
-    /**
-     * **不要清 socket 映射、也不要再 enable 一次 Network**（2026-10-08 修）。
-     *
-     * 之前的写法是 `this.sockets.clear()` + `Network.enable`：清掉映射之后，只要刷新后页面的 ws
-     * 是「在我们重新 enable 之前」建起来的（`webSocketCreated` 就这么漏掉了），
-     * 那条连接上的**每一帧都会因为「URL 未知」被静默丢掉**——推送还在来，插件却什么都收不到，
-     * 表现就是「同一条点歌消息只有一部分有礼物名/价格」。CDP 的监听是一直挂着的，
-     * 刷新后页面会新建 ws 并重新发 `webSocketCreated`，所以这里什么都不用做。
-     */
-    win.webContents.reload()
-    this.armReloadTimer()
+    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：定期重启隐藏窗口（重建窗口，而不是 reload）`)
+    this.teardownWindow()
+    this.openWindow()
+  }
+
+  /** 收掉当前隐藏窗口（CDP 摘掉 + 销毁），socket 映射与定时器一并清干净 */
+  private teardownWindow(): void {
+    const win = this.win
+    this.win = null
+    this.connectedOnce = false
+    this.clearTimers()
+    this.sockets.clear()
+    if (!win || win.isDestroyed()) return
+    try {
+      if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
+    } catch {
+      /* ignore */
+    }
+    win.destroy()
   }
 
   private attachDebugger(win: BrowserWindow): void {
@@ -362,20 +381,8 @@ export class RoomSocketCapture {
 
   private onDie(reason: string): void {
     if (this.stopped) return
-    // 关掉旧窗口，走重试
-    const win = this.win
-    this.win = null
-    this.connectedOnce = false
-    this.clearTimers()
-    this.sockets.clear()
-    if (win && !win.isDestroyed()) {
-      try {
-        if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
-      } catch {
-        /* ignore */
-      }
-      win.destroy()
-    }
+    // 关掉旧窗口，走重试（与定时重启共用同一套收尾）
+    this.teardownWindow()
     this.fail('realtimeChannelLost', reason)
   }
 
