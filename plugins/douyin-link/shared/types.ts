@@ -162,6 +162,13 @@ export interface DanmakuItem {
   toUser: string
   /** 收礼人 id（礼物才有；空串 = 不知道 / 这条不是礼物） */
   toUserId: string
+  /**
+   * **诊断用**：这条是哪个解码器产出来的（`proto-gift` / `proto-order` / `json-gift`…）。
+   *
+   * 只进内存、不进库：库里出现「礼物名空、收礼人有」这种行时，只有它能说清是谁写的
+   * （2026-10-08 的排查就是卡在这里——两种解码器都能产出空名字，日志里看不出是哪一种）。
+   */
+  trace?: string
   /** 主进程收到的时刻（ms） */
   at: number
 }
