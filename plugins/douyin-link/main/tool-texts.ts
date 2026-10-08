@@ -59,7 +59,9 @@ export const zhCNToolTexts = {
       '- {{user}} | 发言 {{chat}} · 进场 {{enter}} · 点赞 {{like}} · 关注 {{follow}} · 礼物 {{gift}}（{{diamonds}} 抖币） | 荣誉等级 {{honor}} · 粉丝团 {{fans}}',
     danmakuHeader: '消息检索：本页 {{count}} 条（命中 {{total}} 条，新 → 旧）：',
     danmakuEmpty: '没有匹配的消息（换个关键词，或确认这个直播间在监控中）。',
-    line: '- [{{kind}}] {{time}} {{user}}{{text}}',
+    line: '- [{{kind}}] {{time}} {{user}}{{text}}{{to}}',
+    /** `line` 的 {{to}}：礼物的收礼人（谁收到了这份礼物） */
+    lineTo: '（送给 {{to}}）',
     countSuffix: ' ×{{count}}',
     compareHeader: '**多直播间对比**（最近 {{minutes}} 分钟）',
     compareRow:
@@ -117,7 +119,9 @@ export const enUSToolTexts: typeof zhCNToolTexts = {
       '- {{user}} | chat {{chat}} · join {{enter}} · like {{like}} · follow {{follow}} · gift {{gift}} ({{diamonds}} coins) | honor {{honor}} · fan club {{fans}}',
     danmakuHeader: 'Message search: {{count}} rows on this page ({{total}} matches, new → old):',
     danmakuEmpty: 'No matching messages (try another keyword, or make sure the room is being monitored).',
-    line: '- [{{kind}}] {{time}} {{user}}{{text}}',
+    line: '- [{{kind}}] {{time}} {{user}}{{text}}{{to}}',
+    /** {{to}} value of `line`: the gift recipient */
+    lineTo: ' (to {{to}})',
     countSuffix: ' ×{{count}}',
     compareHeader: '**Multi-room comparison** (last {{minutes}} minutes)',
     compareRow:

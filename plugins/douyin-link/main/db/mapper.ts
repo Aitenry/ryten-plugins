@@ -47,6 +47,9 @@ export interface MessageRow {
   count: number
   /** 礼物的抖币总价值（非礼物 0） */
   diamonds: number
+  /** 收礼人（礼物才有） */
+  toUserId: string
+  toUserName: string
   atMs: number
 }
 
@@ -845,6 +848,8 @@ function toStoredMessage(row: {
   content: string
   count: number
   diamonds: number
+  toUserId: string
+  toUserName: string
   atMs: number
   id: number
 }): StoredMessage {
@@ -857,6 +862,8 @@ function toStoredMessage(row: {
     text: row.content,
     count: row.count,
     diamonds: row.diamonds ?? 0,
+    toUser: row.toUserName ?? '',
+    toUserId: row.toUserId ?? '',
     at: row.atMs
   }
   return message

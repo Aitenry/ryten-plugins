@@ -84,9 +84,10 @@ const giftFrame = ({ nickname = '送礼的人', unit = 10, repeat = 5, name = '�
 
 /**
  * `WebcastLinkmicOrderSingMessage`（**实测字段号**）：
- * 6.1 = `发送者_歌手_单号_0_歌曲_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）
+ * 6.1 = `发送者_歌手_单号_0_歌曲_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）；
+ * 6.5.1 = 点唱礼物记录（1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 抖币价、10 礼物名）。
  */
-const orderSingFrame = ({ singer = '唱歌的人', songId = 13564 } = {}) =>
+const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', songId = 13564, price = 99 } = {}) =>
   Buffer.concat([
     pbVarint(2, 4),
     pbMessage(
@@ -95,7 +96,21 @@ const orderSingFrame = ({ singer = '唱歌的人', songId = 13564 } = {}) =>
         pbString(1, `58709692971_7667087264728728634_10000037694256230482760723_0_${songId}_1_Normal`),
         pbVarint(2, 6),
         pbMessage(3, user(7667087264728728634n, singer)),
-        pbVarint(4, 1791458632)
+        pbVarint(4, 1791458632),
+        pbMessage(
+          5,
+          pbMessage(
+            1,
+            Buffer.concat([
+              pbMessage(1, user(7667087264728728634n, singer)),
+              pbMessage(2, user(58709692971n, sender)),
+              pbString(3, `58709692971_7667087264728728634_10000037694256230482760723_0_${songId}_1_Normal`),
+              pbVarint(5, 3200),
+              pbVarint(6, price),
+              pbString(10, '点唱礼物')
+            ])
+          )
+        )
       ])
     )
   ])
@@ -160,7 +175,8 @@ if (frameArg) {
   console.log('  item :', JSON.stringify(decoded?.item ?? null))
   console.log('  users:', JSON.stringify((decoded?.users ?? []).map((u) => ({ id: u.id, nickname: u.nickname, displayId: u.displayId }))))
   console.log('  原始字段树：')
-  dumpTree(Buffer.from(hex, 'hex'), 1)
+  // 深一点（5 层）：点歌那种帧真正的料埋在 6.5.1.x 里，浅了看不到
+  dumpTree(Buffer.from(hex, 'hex'), 1, '', console.log, 5)
   rmSync(workDir, { recursive: true, force: true })
   // 只做「看一眼」，不是断言：解不出东西（例如点歌的**播放状态变更**帧，见 proto-messages.ts）也退 0
   process.exit(0)
@@ -187,15 +203,35 @@ const priceless = proto.decodeProtoMessage(
 check('礼物没带价格 → 抖币 0', priceless.item.diamonds, 0)
 check('礼物没带价格 → 数量缺省 1', priceless.item.count, 1)
 
-/* 点歌：文案用歌手的昵称；**发送者只有单号串里的 id**（帧里没有他的 User）——
-   这个 id 就是「送礼物的人」，昵称由主进程用本场数据/库补，解码器只负责把 id 拿出来 */
-const sing = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ singer: '摇尾乞怜' }))
+/* 点歌：送礼人/收礼人的 User、礼物名、抖币价都在 6.5.1 那份记录里 */
+const sing = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99 })
+)
 check('点歌 → kind', sing.item.kind, 'gift')
-check('点歌 → 文案', sing.item.text, '想听 摇尾乞怜 演唱')
-check('点歌 → 送礼人 id（单号串第一段）', sing.item.userId, '58709692971')
-check('点歌 → 帧里没有昵称（留给中枢补）', sing.item.user, '')
-check('点歌 → 抖币未知', sing.item.diamonds, 0)
-check('点歌 → 把歌手写进用户库', sing.users.map((u) => u.nickname), ['摇尾乞怜'])
+check('点歌 → 礼物名', sing.item.text, '点唱礼物')
+check('点歌 → 送礼人（6.5.1.2 的 User）', [sing.item.user, sing.item.userId], ['少走点弯路', '58709692971'])
+check('点歌 → 收礼人（6.5.1.1 的 User，= 歌手）', [sing.item.toUser, sing.item.toUserId], ['摇尾乞怜', '7667087264728728634'])
+check('点歌 → 抖币价（6.5.1.6）', sing.item.diamonds, 99)
+check('点歌 → 送礼人 + 收礼人都进用户库', sing.users.map((u) => u.nickname).sort(), ['少走点弯路', '摇尾乞怜'])
+
+/* 没有那份礼物记录的老帧：礼物名/价格留空，送礼人退回单号串第一段，收礼人退回歌手 */
+const oldStyle = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  Buffer.concat([
+    pbVarint(2, 4),
+    pbMessage(
+      6,
+      Buffer.concat([
+        pbString(1, '58709692971_7667087264728728634_10000037694256230482760723_0_13564_1_Normal'),
+        pbMessage(3, user(7667087264728728634n, '歌手'))
+      ])
+    )
+  ])
+)
+check('老帧点歌 → 送礼人 id 仍在', oldStyle.item.userId, '58709692971')
+check('老帧点歌 → 没有礼物名/价格', [oldStyle.item.text, oldStyle.item.diamonds], ['', 0])
+check('老帧点歌 → 收礼人退回歌手', oldStyle.item.toUser, '歌手')
 
 /* 单号串第一段不是数字（结构变了/看错了）时，不许写半截垃圾进 userId */
 const weird = proto.decodeProtoMessage(

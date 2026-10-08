@@ -323,17 +323,19 @@ export function decodeMessageJson(method: string, message: Json): JsonDecoded | 
        * 礼物（JSON 这条路只在服务端忽略 `resp_content_type=protobuf` 时才会用到）。
        *
        * 字段名与 protobuf 一一对应：`gift.name` / `gift.describe` / `gift.diamond_count`、
-       * `repeat_count`、`combo_count`。价格取不到就是 0 = **未知**（不编数）。
+       * `repeat_count`、`combo_count`、`to_user`（收礼人）。价格取不到就是 0 = **未知**（不编数）。
        */
       const gift = asObject(pickRaw(message, ['gift']))
       const name = pickText(gift, ['name'], 40) || pickText(gift, ['describe'], 40)
       const unit = pickInt(gift, ['diamond_count', 'diamondCount'])
       const repeat = Math.max(1, pickInt(message, ['repeat_count', 'repeatCount'], 1))
+      const toUser = parseUserJson(pickRaw(message, ['to_user', 'toUser']))
       if (!name && !nickname) return null
+      const base = item('gift', nickname, userId, name, repeat, unit * repeat)
       return {
         ...nothing(),
-        item: item('gift', nickname, userId, name, repeat, unit * repeat),
-        users: user ? [user] : []
+        item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '' },
+        users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
       }
     }
     case 'RoomUserSeqMessage': {
@@ -439,7 +441,8 @@ function item(
   count: number,
   diamonds = 0
 ): DanmakuItem {
-  return { id: nextId++, kind, user, userId, text, count, diamonds, at: Date.now() }
+  // 收礼人只有礼物用得到，先给空串；礼物那条分支再补 `toUser` / `toUserId`
+  return { id: nextId++, kind, user, userId, text, count, diamonds, toUser: '', toUserId: '', at: Date.now() }
 }
 
 /** 测试用：重置自增序号 */

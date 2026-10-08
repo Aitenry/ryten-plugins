@@ -51,6 +51,9 @@ export const douyinLinkMessages = pgTable('douyin_link_messages', {
   count: integer().notNull().default(0),
   /** 礼物的抖币总价值（单价 × 数量）；非礼物消息一律 0，`0` 也表示「官方没给价」 */
   diamonds: integer().notNull().default(0),
+  /** 收礼人（礼物才有：谁收到了这份礼物） */
+  toUserId: text('to_user_id').notNull().default(''),
+  toUserName: text('to_user_name').notNull().default(''),
   atMs: doublePrecision('at_ms').notNull()
 })
 

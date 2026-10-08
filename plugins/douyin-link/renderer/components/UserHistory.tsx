@@ -4,7 +4,7 @@ import { RiArrowLeftLine, RiArrowRightLine, RiRefreshLine } from '@remixicon/rea
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime, StoredMessage } from '../../shared/types'
 import api from '../api'
-import { kindColor } from './DanmakuFeed'
+import { kindColor, giftRecipientText } from './DanmakuFeed'
 import { ScrollStyle, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 
@@ -167,6 +167,9 @@ export function UserHistory(props: {
               {/* 正文可能很长：单行截断 + 原生 title 兜全文（列表要的是「扫一眼」） */}
               <span className="min-w-0 flex-1 truncate" title={row.text}>
                 {row.text || '-'}
+                {giftRecipientText(t, row) ? (
+                  <span className="opacity-60"> {giftRecipientText(t, row)}</span>
+                ) : null}
               </span>
               {row.count > 1 ? <span className="shrink-0 opacity-60">×{row.count}</span> : null}
             </div>

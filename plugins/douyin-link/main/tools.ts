@@ -190,7 +190,9 @@ export function createToolContribution(): {
                 kind: texts.kinds[row.kind] ?? row.kind,
                 time: stamp(row.at),
                 user: row.user ? `${row.user}：` : '',
-                text: `${row.text}${count}`
+                text: `${row.text}${count}`,
+                // 礼物的收礼人（点歌那头是歌手）：模型要能回答「谁收到了礼物」
+                to: row.kind === 'gift' && row.toUser ? mainFormat(t.lineTo, { to: row.toUser }) : ''
               })
             )
           }

@@ -312,7 +312,7 @@ function DanmakuRow(props: {
                 style={{ color: accent }}
                 onClick={() => item.userId && props.onOpenUser(item.userId)}
               >
-                {item.user || user?.nickname || t('douyin-link.page.senderUnknown', { id: item.userId })}
+                {item.user || user?.nickname || t('douyin-link.page.idOnly', { id: item.userId })}
               </span>
             </Tooltip>
             <span className="opacity-70"> </span>
@@ -350,13 +350,30 @@ function lineText(
     case 'social':
       return t('douyin-link.lines.social')
     case 'gift':
-      // 礼物名解不出来（推送里没带 GiftStruct）时也要成句，别显示成「送出了 」
+      // 礼物名解不出来（推送里没带礼物结构）时也要成句，别显示成「送出了 」
       return item.text
-        ? t('douyin-link.lines.giftNamed', { name: item.text })
+        ? // 「送给谁」也是礼物的一部分：点歌那一帧的收礼人就是歌手（谁收到了这份点唱礼物）
+          `${t('douyin-link.lines.giftNamed', { name: item.text })}${giftRecipientText(t, item) ? ` ${giftRecipientText(t, item)}` : ''}`
         : t('douyin-link.lines.gift')
     default:
       return t('douyin-link.lines.like')
   }
+}
+
+/**
+ * 礼物行的「送给 X」那一段（收礼人）。不是礼物、或帧里没带收礼人时返回空串。
+ *
+ * 历史消息（用户档案里的历史弹幕、消息检索）也用它，所以收礼人在库里也存了一份
+ * （`messages.to_user_name` / `to_user_id`），不是只在实时那一屏可见。
+ */
+export function giftRecipientText(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  item: Pick<DanmakuItem, 'kind' | 'toUser' | 'toUserId'>
+): string {
+  if (item.kind !== 'gift' || (!item.toUser && !item.toUserId)) return ''
+  return t('douyin-link.lines.giftTo', {
+    to: item.toUser || t('douyin-link.page.idOnly', { id: item.toUserId })
+  })
 }
 
 /** 抖币数字（万以上折成「1.2万」，弹幕行里放不下长数字） */

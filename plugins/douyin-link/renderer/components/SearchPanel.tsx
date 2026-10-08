@@ -5,6 +5,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import { DANMAKU_KINDS, type DanmakuKind, type RoomRuntime, type StoredMessage } from '../../shared/types'
 import api from '../api'
 import { EmptyHint, FitTable, Panel } from './ui'
+import { giftRecipientText } from './DanmakuFeed'
 import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -192,6 +193,9 @@ export function SearchPanel(props: {
                   render: (_value, row) => (
                     <span className="min-w-0 truncate">
                       {row.text}
+                      {giftRecipientText(t, row) ? (
+                        <span className="opacity-60"> {giftRecipientText(t, row)}</span>
+                      ) : null}
                       {row.count > 1 ? <span className="opacity-60"> ×{row.count}</span> : null}
                     </span>
                   )

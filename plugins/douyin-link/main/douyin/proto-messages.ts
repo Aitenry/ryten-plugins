@@ -205,7 +205,8 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
  * - 正文 = 礼物名（`name`，拿不到退回 `describe`；两个都没有就留空，行上只显示昵称）；
  * - 数量 = `repeatCount`（缺省 1：免费礼物/单发消息常常不带这个字段）；
  * - 抖币价值 = `diamondCount × 数量`；`diamondCount` 拿不到就是 **0 = 未知**，
- *   界面据此显示「价值未知」而不是「0 抖币」。
+ *   界面据此显示「价值未知」而不是「0 抖币」；
+ * - **收礼人** = `8 = toUser`（谁收到了这份礼物）。
  *
  * 连击不单独成一列：`repeatEnd = 0` 的连击服务端会**逐条推增量**，逐条落库本来就是逐条明细，
  * 再合成一列反而会把「这一条到底送了几个」搞乱。
@@ -213,15 +214,16 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
 function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
   const gift = getMessage(msg, 15)
   const nickname = user?.nickname ?? ''
-  const giftUser = user ? [user] : []
+  const toUser = parseProtoUser(getMessage(msg, 8))
   const name = (gift ? (pickString(gift, [16, 2], 40) ?? '') : '').trim()
   const unit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
   const repeat = pickVarintInRange(msg, [5], 1, 100000) ?? 1
   if (!name && !nickname) return nothing()
+  const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
   return {
     ...nothing(),
-    item: item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat),
-    users: giftUser
+    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '' },
+    users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
   }
 }
 
@@ -252,23 +254,41 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
  *   → 「无Wei 送了 想听 困ఇ 演唱」。
  *
  * 三条诚实性约束：
- * - **昵称不在这一帧里**：帧里只有歌手的 `User` 和发送者的 id。所以这里只写 `userId`，
- *   昵称交给中枢用**我们自己的数据**补（本场见过的人 → 库里查；见 `main/monitor/hub.ts` 的
- *   `resolveGiftSenders`），查不到就照实显示 id，不编名字；
- * - 点歌本身推不出抖币价，`diamonds` 一律 0（界面显示「价值未知」，不假装免费）。
- *   同一帧里其实还带一份点唱礼物记录（`6.5.1.10` = 「点唱礼物」，另有两个数字字段含义未实测），
- *   在把价格字段实测钉死之前**不用它算钱**；
+ * - **送礼人的昵称在这一帧里，但要往下挖两层**：`6.5.1.2` 是送礼人的完整 `User`
+ *   （实测：`6.5.1.2.1 = 97531140566`、`6.5.1.2.3 = 「少走点弯路🪀」`，与单号串第一段同一个 id），
+ *   `6.5.1.1` 是**收礼人**（= 歌手，`6.5.1.1.1 = 1249525342678500 = 「VVఇ」`，也就是 `6.3`）。
+ *   两个 `User` 都记下来；万一老帧里没有这份记录，退回单号串第一段当 id，
+ *   昵称再由中枢用我们自己的数据补（`main/monitor/hub.ts` 的 `resolveGiftSenders`）；
+ * - **点唱礼物的名字与价格**在同一份记录里：`6.5.1.10 = 「点唱礼物」`（礼物名）、
+ *   `6.5.1.5 = 3200`（礼物 id）、`6.5.1.6 = 99`（抖币价）。这两个数字**交叉核对过**：
+ *   官方礼物目录（`webcast/gift/list/`，免签名）里 `id = 3200` 的礼物是「爱的纸鹤」，
+ *   价格正好 `diamond_count = 99` —— 帧里的 id/价格与目录逐字一致，所以按「5 = 礼物 id、
+ *   6 = 单个抖币价」读。**这是唯一一次交叉核对**（本房间的两种点歌礼物都是这一件），
+ *   将来若出现「帧里的 6 ≠ 目录里该 id 的价格」，就说明这个读法是错的，要回来改。
+ *   `6.5.2 = { 2: 1000, 3: 4 }` 至今没有对得上的解释，**不用**；
  * - `2 = 5` 那几帧也带同一个单号串，但它们是播放状态变更，不是新的送礼——照旧跳过。
  */
 function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
   const payload = getMessage(msg, 6)
   if (!payload) return nothing()
   const singer = parseProtoUser(getMessage(payload, 3))
-  const nickname = singer?.nickname ?? ''
+  // 6.5 = 这份点歌礼物的记录；6.5.1 = 记录本体
+  // （1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 单个抖币价、10 礼物名）
+  const envelope = getMessage(payload, 5)
+  const record = envelope ? getMessage(envelope, 1) : undefined
+  const recipient = (record ? parseProtoUser(getMessage(record, 1)) : null) ?? singer
+  const sender = record ? parseProtoUser(getMessage(record, 2)) : null
+  const key = (record ? getString(record, 3, 160) : '') || (getString(payload, 1, 160) ?? '')
+  const name = (record ? getString(record, 10, 40) : '') ?? ''
+  const price = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
+  const senderId = sender?.id ?? orderSingSenderId(key)
+  const base = item('gift', sender?.nickname ?? '', senderId, name, 1, price)
+  const users = [sender, recipient, singer].filter((entry): entry is UserInfo => Boolean(entry?.id))
+  const unique = new Map(users.map((entry) => [entry.id, entry]))
   return {
     ...nothing(),
-    item: item('gift', '', orderSingSenderId(payload), nickname ? `想听 ${nickname} 演唱` : '点了一首歌', 1, 0),
-    users: singer ? [singer] : []
+    item: { ...base, toUser: recipient?.nickname ?? '', toUserId: recipient?.id ?? '' },
+    users: [...unique.values()]
   }
 }
 
@@ -276,8 +296,7 @@ function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
  * 单号串 `发送者id_歌手id_点歌单id_0_歌曲id_1_Normal` 的第一段（送出礼物的人）。
  * 只在它**确实是一串数字**时才认（认不出来就返回空串，界面上显示未知用户，而不是写半截垃圾）。
  */
-function orderSingSenderId(payload: PbMessage): string {
-  const key = pickString(payload, [1, 4], 160) ?? ''
+function orderSingSenderId(key: string): string {
   const first = key.split('_')[0] ?? ''
   return /^\d{4,}$/.test(first) ? first : ''
 }
@@ -445,7 +464,8 @@ function item(
   count: number,
   diamonds = 0
 ): DanmakuItem {
-  return { id: nextId++, kind, user, userId, text, count, diamonds, at: Date.now() }
+  // 收礼人只有礼物用得到，先给空串；礼物那两个解码器再补 `toUser` / `toUserId`
+  return { id: nextId++, kind, user, userId, text, count, diamonds, toUser: '', toUserId: '', at: Date.now() }
 }
 
 /** 测试用：重置自增序号 */
