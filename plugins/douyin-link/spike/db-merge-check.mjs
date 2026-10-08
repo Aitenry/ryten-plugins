@@ -83,6 +83,7 @@ const entry = `
 import { and, eq } from 'drizzle-orm'
 import { withOrm, closeOrm } from '@host/main/database/orm'
 import { insertMessages } from './mapper'
+import { giftRankByPerson, queryMessages } from './mapper'
 import { douyinLinkMessages } from './schema'
 
 const row = (over) => ({
@@ -149,6 +150,21 @@ const columns = await withOrm('check.columns', async (db) => db.execute(
 const indexes = await withOrm('check.indexes', async (db) => db.execute(
   \`select indexname from pg_indexes where tablename='douyin_link_messages' and indexname like '%order%'\`
 ))
+
+/*
+ * 收礼物榜 / 送礼物榜 / 收礼历史（2026-10-08 新加的界面数据）：
+ * 三件必须成立的事——① 按「收礼人」聚合能对上（同一人两次 1200 = 2400，件数 2）；
+ * ② 没记收礼人的礼物行**不进收礼榜**（宁可没有，不给错人）；③ 按收礼人查历史能翻出明细。
+ */
+await insertMessages([
+  row({ userId: 'S1', userName: '送礼甲', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 10000 }),
+  row({ userId: 'S1', userName: '送礼甲', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 11000 }),
+  row({ userId: 'S2', userName: '送礼乙', content: '礼花筒', diamonds: 199, toUserId: 'R2', toUserName: '收礼乙', atMs: 12000 }),
+  row({ userId: 'S3', userName: '送礼丙', content: '爱的纸鹤', diamonds: 99, toUserId: '', toUserName: '', atMs: 13000 })
+])
+const recipients = await giftRankByPerson('108011161837', 'recipient', 0, 1e15)
+const senders = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
+const history = await queryMessages({ webRid: '108011161837', kind: 'gift', toUserId: 'R1' })
 await closeOrm()
 export default JSON.stringify({
   afterWeak: afterWeak.map((r) => ({ id: String(r.id), content: r.content, diamonds: r.diamonds, atMs: r.atMs })),
@@ -156,7 +172,10 @@ export default JSON.stringify({
   reversed: reversed.map((r) => ({ content: r.content, diamonds: r.diamonds, atMs: r.atMs })),
   plainRows: plain.length,
   column: columns.rows.length,
-  index: indexes.rows.length
+  index: indexes.rows.length,
+  recipients: recipients.map((r) => ({ userId: r.userId, name: r.name, count: r.count, diamonds: r.diamonds })),
+  senders: senders.map((r) => ({ userId: r.userId, count: r.count, diamonds: r.diamonds })),
+  history: { total: history.total, rows: history.rows.map((r) => ({ content: r.text, diamonds: r.diamonds, user: r.user, toUserId: r.toUserId })) }
 })
 `
 
@@ -209,6 +228,30 @@ check('后到带记录 → 收礼人与送礼人补上', [result.afterRecord[0].
 check('时间仍是先到的那一刻（不是补记录的时间）', result.afterRecord[0].atMs, 1000)
 check('反序：带记录先到 → 礼物名不被「想听 X 演唱」抹掉', [result.reversed[0].content, result.reversed[0].diamonds], ['跑车', 1200])
 check('没单号串的礼物行照旧一行一条', result.plainRows, 2)
+
+/* 收礼物榜 / 送礼物榜 / 收礼历史 */
+check('收礼物榜：按收礼人聚合（同一人两次 1200 → 2400 / 2 件）', result.recipients[0], {
+  userId: 'R1',
+  name: '收礼甲',
+  count: 2,
+  diamonds: 2400
+})
+check('收礼物榜：没记收礼人的礼物不进榜（99 抖币那两件不在）', result.recipients.some((row) => row.diamonds === 99), false)
+check('收礼物榜：另一人也在榜上（按抖币排序）', result.recipients[2], {
+  userId: 'R2',
+  name: '收礼乙',
+  count: 1,
+  diamonds: 199
+})
+check('送礼物榜：按送礼人聚合', result.senders[0], { userId: 'S1', count: 2, diamonds: 2400 })
+check('送礼物榜：三个人各一行', result.senders.length, 3)
+check('收礼历史：按收礼人翻明细（共 2 条、都是 R1）', [result.history.total, result.history.rows.length], [2, 2])
+check('收礼历史：行里带着礼物名与抖币', result.history.rows[0], {
+  content: '跑车',
+  diamonds: 1200,
+  user: '送礼甲',
+  toUserId: 'R1'
+})
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 
 rmSync(workDir, { recursive: true, force: true })

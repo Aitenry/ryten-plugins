@@ -39,6 +39,7 @@ import { RoomRail } from './components/RoomRail'
 import { SearchPanel } from './components/SearchPanel'
 import { UserAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
+import { GiftHistoryModal } from './components/GiftHistory'
 import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
@@ -87,6 +88,13 @@ export default function Page(): React.JSX.Element {
   const [stats, setStats] = useState<PlayerStats>(EMPTY_STATS)
   const [volume, setVolume] = useState(0.8)
   const [openUser, setOpenUser] = useState('')
+  /**
+   * 礼物榜点开的那一行（`null` = 没开）：这个人 + 方向（他送的 / 他收到的）。
+   * 与用户档案弹窗是两个入口，互不干扰。
+   */
+  const [openGifts, setOpenGifts] = useState<{ userId: string; name: string; direction: 'sent' | 'received' } | null>(
+    null
+  )
   /** 「添加直播间」失败时的提示（代码在主进程，文案在这里翻） */
   const [addFailure, setAddFailure] = useState<FailureInfo | null>(null)
 
@@ -430,7 +438,12 @@ export default function Page(): React.JSX.Element {
       label: t('douyin-link.page.tabOverview'),
       children: (
         <Pane>
-          <OverviewPanel room={active} minutes={minutes} onMinutes={setMinutes} />
+          <OverviewPanel
+            room={active}
+            minutes={minutes}
+            onMinutes={setMinutes}
+            onOpenGifts={(target) => setOpenGifts(target)}
+          />
         </Pane>
       )
     },
@@ -606,6 +619,17 @@ export default function Page(): React.JSX.Element {
           userId={openUser}
           rooms={rooms}
           onClose={() => setOpenUser('')}
+        />
+      ) : null}
+
+      {/* 礼物榜点开的历史（他送的 / 他收到的）：与用户档案弹窗是两个入口，互不干扰 */}
+      {openGifts && activeRoom ? (
+        <GiftHistoryModal
+          webRid={activeRoom}
+          userId={openGifts.userId}
+          name={openGifts.name}
+          direction={openGifts.direction}
+          onClose={() => setOpenGifts(null)}
         />
       ) : null}
     </PageShell>

@@ -17,6 +17,7 @@ import type {
   RoomRuntime,
   RoomSummary,
   RoomTick,
+  StoredMessage,
   UserBatch,
   UserProfile,
   UserRankRow
@@ -163,6 +164,8 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
     kinds: asList<RoomSummary['kinds'][number]>(raw.kinds),
     diamonds: asCount(raw.diamonds),
     gifts: asList<RoomSummary['gifts'][number]>(raw.gifts),
+    received: asList<RoomSummary['received'][number]>(raw.received),
+    sent: asList<RoomSummary['sent'][number]>(raw.sent),
     topChat: asList<UserRankRow>(raw.topChat)
   }
 }
@@ -279,6 +282,24 @@ export const api = {
   /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
   userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>
     asList<GiftBreakdownRow>(await invoke(`${PREFIX}user-gifts`, webRid, userId)),
+  /**
+   * 礼物榜点一行后的礼物历史（`sent` = 他送的 / `received` = 他收到的）。
+   * 走消息流水，所以是**明细**：时间、礼物名、件数、抖币、对方。
+   */
+  giftHistory: async (
+    webRid: string,
+    userId: string,
+    direction: 'sent' | 'received',
+    limit = 30,
+    offset = 0
+  ): Promise<MessagePage> => {
+    const raw = await invoke(`${PREFIX}gift-history`, webRid, userId, direction, limit, offset)
+    if (!isRecord(raw)) return { rows: [], total: 0 }
+    return {
+      rows: asList<StoredMessage>(raw.rows),
+      total: asCount(raw.total)
+    }
+  },
   /** 头像 data URL（渲染层 CSP 不许外链图片，主进程下载后按 url 缓存） */
   userAvatar: async (webRid: string, userId: string): Promise<string> =>
     asText(await invoke(`${PREFIX}user-avatar`, webRid, userId)),
