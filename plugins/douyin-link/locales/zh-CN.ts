@@ -202,7 +202,7 @@ export const DouyinLinkZhCN = {
       giftValueUnknown: '价值未知',
       giftReceivedBoard: '收礼物榜',
       giftSentBoard: '送礼物榜',
-      giftReceivedEmpty: '麦上还没有人收到礼物',
+      giftReceivedEmpty: '这段时间里还没有人收到礼物',
       giftSentEmpty: '这个窗口里还没有人送礼物',
       giftRowHint: '点击查看这个人的礼物历史',
       giftHistoryTitle: '礼物历史',
