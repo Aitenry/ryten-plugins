@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Modal, Select, Slider, Switch, Tag } from 'antd'
 import {
   RiDeleteBin6Line,
@@ -24,8 +24,8 @@ import type { PlayerStats } from './audio/player'
 import { ComparePanel } from './components/ComparePanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
 import { OverviewPanel } from './components/OverviewPanel'
+import { PresencePanel } from './components/PresencePanel'
 import {
-  HoverRow,
   PageShell,
   Pane,
   Panel,
@@ -34,7 +34,7 @@ import {
   formModalProps,
   usePluginPalette
 } from './components/ui'
-import type { PillTabItem } from './components/ui'
+import type { PillTabItem, PluginPalette } from './components/ui'
 import { RoomRail } from './components/RoomRail'
 import { SearchPanel } from './components/SearchPanel'
 import { UserAvatar } from './components/UserAvatar'
@@ -43,7 +43,7 @@ import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
-type TabKey = 'overview' | 'live' | 'users' | 'search' | 'compare'
+type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'compare'
 
 const EMPTY_STATS: PlayerStats = {
   state: 'idle',
@@ -405,7 +405,7 @@ export default function Page(): React.JSX.Element {
   const phaseTag = active ? <Tag color={phaseColor(active)}>{phaseText(t, active)}</Tag> : null
 
   /*
-   * 「本场」统计（弹幕 / 礼物 / 进场 / 关注 / 点赞）挂在**房间标题行**上：
+   * 「本场」统计（弹幕 / 进场 / 关注 / 点赞）挂在**房间标题行**上：
    * 它是这个房间当前的运行数字，五个页签都该看得见，不该只住在实时页签的正文里。
    * 字段逐个兜底 —— 主进程刚起来时 counters 可能还没填全，缺个字段不该让整页崩。
    */
@@ -413,10 +413,6 @@ export default function Page(): React.JSX.Element {
   const sessionLine = counters
     ? t('douyin-link.page.interactions', {
         chat: counters.chat ?? 0,
-        gift: counters.gift ?? 0,
-        diamonds: counters.diamonds ?? 0,
-        // 一条礼物消息都没收到时补一句原因：抖音 PC 网页端不下发礼物消息
-        giftNote: (counters.gift ?? 0) === 0 ? t('douyin-link.page.giftNotPushed') : '',
         enter: counters.enter ?? 0,
         follow: counters.follow ?? 0,
         like: counters.like ?? 0
@@ -482,13 +478,22 @@ export default function Page(): React.JSX.Element {
               <DanmakuFeed
                 webRid={activeRoom}
                 items={items}
-                kinds={settings?.kinds ?? ['chat', 'gift', 'member', 'like', 'social', 'stats', 'control']}
+                kinds={settings?.kinds ?? ['chat', 'member', 'like', 'social', 'stats', 'control']}
                 autoScroll={settings?.autoScroll ?? true}
                 users={users}
                 onOpenUser={setOpenUser}
               />
             </div>
           </Panel>
+        </Pane>
+      )
+    },
+    {
+      key: 'presence',
+      label: t('douyin-link.page.tabPresence'),
+      children: (
+        <Pane>
+          <PresencePanel room={active} reloadKey={usersReloadKey} onOpenUser={setOpenUser} />
         </Pane>
       )
     },
@@ -735,6 +740,9 @@ function RoomHeader(props: {
 /**
  * 用户档案弹窗：**库里的累计数字**（本场数字在房间标题行上）+ **这个人发过的历史弹幕**。
  *
+ * 版式（用户反馈「档案太丑、内容一行一行的」）：账号与时间并成点号短句、互动统计用 KPI
+ * 小方块，不再一条明细占一行——原来光这两段就是 11 行，现在两行短句 + 一排方块。
+ *
  * 历史弹幕（`UserHistory`）摆在档案分支**外面**：用户记录被「清空用户记录」清掉之后，
  * 档案查不到了，但消息流水还在——那种时候照样能翻出他说过什么，比一个「没有档案」的空框有用。
  */
@@ -789,10 +797,25 @@ function UserProfileModal(props: {
           <>
             <div className="flex items-center gap-3">
               <UserAvatar webRid={props.webRid} userId={profile.id} nickname={profile.nickname} size={48} />
-              <div className="flex min-w-0 flex-col gap-1">
-                <span className="truncate text-sm font-semibold">
-                  {profile.nickname || t('douyin-link.page.unknownUser')}
-                </span>
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                {/* 荣誉等级 / 粉丝团跟在名字这一行的**最右端**（原来单独占一行，把名字行也拉长了） */}
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 truncate text-sm font-semibold">
+                    {profile.nickname || t('douyin-link.page.unknownUser')}
+                  </span>
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
+                    {profile.honorLevel > 0 ? (
+                      <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+                        {t('douyin-link.users.honor')} {profile.honorLevel}
+                      </Tag>
+                    ) : null}
+                    {profile.fansClubLevel > 0 ? (
+                      <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                        {t('douyin-link.users.fansClub')} {profile.fansClubLevel}
+                      </Tag>
+                    ) : null}
+                  </span>
+                </div>
                 <span className="flex flex-wrap items-center gap-1 text-xs opacity-70">
                   <span>
                     {t('douyin-link.users.displayId')} {profile.displayId || '-'}
@@ -808,18 +831,6 @@ function UserProfileModal(props: {
                     </>
                   ) : null}
                 </span>
-                <span className="flex flex-wrap gap-1">
-                  {profile.honorLevel > 0 ? (
-                    <Tag color="gold" style={{ marginInlineEnd: 0 }}>
-                      {t('douyin-link.users.honor')} {profile.honorLevel}
-                    </Tag>
-                  ) : null}
-                  {profile.fansClubLevel > 0 ? (
-                    <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                      {t('douyin-link.users.fansClub')} {profile.fansClubLevel}
-                    </Tag>
-                  ) : null}
-                </span>
               </div>
             </div>
 
@@ -829,41 +840,35 @@ function UserProfileModal(props: {
               </div>
             ) : null}
 
-            <KeyValues
-              palette={palette}
-              rows={[
-                [t('douyin-link.users.following'), String(profile.following || '-')],
-                [t('douyin-link.users.follower'), String(profile.follower || '-')],
-                [t('douyin-link.users.userId'), profile.id],
-                [t('douyin-link.users.firstSeen'), stamp(profile.firstSeen)],
-                [t('douyin-link.users.lastSeen'), stamp(profile.lastSeen)],
-                [t('douyin-link.users.span'), duration(profile.lastSeen - profile.firstSeen)]
-              ]}
-            />
-
+            {/* 账号与时间：并成两行点号短句（原来一条明细占一行，光这里就是六行） */}
             <div className="flex flex-col gap-1">
-              <span className="text-xs font-medium">{t('douyin-link.users.statsTitle')}</span>
-              <KeyValues
-                palette={palette}
-                rows={[
-                  [t('douyin-link.kinds.chat'), formatNumber(profile.stats.chat)],
-                  [
-                    t('douyin-link.kinds.gift'),
-                    profile.stats.gift > 0
-                      ? t('douyin-link.users.giftStat', {
-                          count: profile.stats.gift,
-                          diamonds: formatNumber(profile.stats.diamonds)
-                        })
-                      : '0'
-                  ],
-                  [t('douyin-link.kinds.member'), formatNumber(profile.stats.enter)],
-                  [t('douyin-link.kinds.like'), formatNumber(profile.stats.like)],
-                  [t('douyin-link.kinds.social'), formatNumber(profile.stats.follow)]
+              <FactLine
+                items={[
+                  `${t('douyin-link.users.following')} ${profile.following > 0 ? formatNumber(profile.following) : '-'}`,
+                  `${t('douyin-link.users.follower')} ${profile.follower > 0 ? formatNumber(profile.follower) : '-'}`,
+                  `${t('douyin-link.users.userId')} ${profile.id}`
+                ]}
+              />
+              <FactLine
+                items={[
+                  `${t('douyin-link.users.firstSeen')} ${stamp(profile.firstSeen)}`,
+                  `${t('douyin-link.users.lastSeen')} ${stamp(profile.lastSeen)}`,
+                  `${t('douyin-link.users.span')} ${duration(profile.lastSeen - profile.firstSeen)}`
                 ]}
               />
             </div>
 
-            <HoverRow className="text-[10px] opacity-50">{t('douyin-link.users.statsHint')}</HoverRow>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium">{t('douyin-link.users.statsTitle')}</span>
+              {/* 数字排成与概览页 KPI 同款的软底小方块：一行四格，扫一眼就有量级感 */}
+              <div className="grid grid-cols-4 gap-1.5">
+                <StatBlock label={t('douyin-link.kinds.chat')} value={formatNumber(profile.stats.chat)} palette={palette} />
+                <StatBlock label={t('douyin-link.kinds.member')} value={formatNumber(profile.stats.enter)} palette={palette} />
+                <StatBlock label={t('douyin-link.kinds.like')} value={formatNumber(profile.stats.like)} palette={palette} />
+                <StatBlock label={t('douyin-link.kinds.social')} value={formatNumber(profile.stats.follow)} palette={palette} />
+              </div>
+              <span className="text-[10px] opacity-50">{t('douyin-link.users.statsHint')}</span>
+            </div>
           </>
         )}
 
@@ -874,19 +879,37 @@ function UserProfileModal(props: {
   )
 }
 
-function KeyValues(props: { rows: Array<[string, string]>; palette: ReturnType<typeof usePluginPalette> }): React.JSX.Element {
+/** 点号短句：一串「标签 值」排成一行，值之间用「·」隔开（档案的账号/时间信息） */
+function FactLine(props: { items: string[] }): React.JSX.Element {
   return (
-    <div className="flex flex-col">
-      {props.rows.map(([key, value]) => (
-        <div
-          key={key}
-          className="flex items-start justify-between gap-3 py-1 text-xs"
-          style={{ borderTop: `1px solid ${props.palette.split}` }}
-        >
-          <span className="shrink-0 opacity-60">{key}</span>
-          <span className="min-w-0 break-all text-right">{value}</span>
-        </div>
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs opacity-70">
+      {props.items.map((item, index) => (
+        <Fragment key={index}>
+          {index > 0 ? <span>·</span> : null}
+          <span className="min-w-0 truncate" title={item}>
+            {item}
+          </span>
+        </Fragment>
       ))}
+    </div>
+  )
+}
+
+/** 档案里的统计小方块：与概览页 KPI 同款软底（label 灰、数字加粗、可选提示/强调色） */
+function StatBlock(props: {
+  label: string
+  value: string
+  hint?: string
+  accent?: string
+  palette: PluginPalette
+}): React.JSX.Element {
+  return (
+    <div className="flex min-w-0 flex-col rounded-md px-1.5 py-1" style={{ backgroundColor: props.palette.soft }}>
+      <span className="truncate text-[10px] opacity-60">{props.label}</span>
+      <span className="truncate text-sm font-semibold leading-5" style={{ color: props.accent }}>
+        {props.value}
+      </span>
+      {props.hint ? <span className="truncate text-[10px] opacity-50">{props.hint}</span> : null}
     </div>
   )
 }

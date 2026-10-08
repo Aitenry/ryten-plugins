@@ -432,7 +432,7 @@ export function PageShell(props: {
 }): React.JSX.Element {
   return (
     <div
-      className={'flex h-full min-h-0 w-full flex-col overflow-hidden px-5 pb-3 pt-4 ' + (props.className ?? '')}
+      className={'flex h-full min-h-0 w-full flex-col overflow-hidden' + (props.className ?? '')}
     >
       {props.header ? <div className="shrink-0 pb-2">{props.header}</div> : null}
       {props.scroll ? (

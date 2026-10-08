@@ -46,10 +46,16 @@ export interface PlayerStats {
   detail: string
 }
 
-/** 目标缓冲：太小会断续，太大就不"直播"了 */
-const LEAD_SECONDS = 0.35
+/**
+ * 目标缓冲：太小会断续，太大就不"直播"了。
+ *
+ * 别再回到 0.35s：主进程按 200ms 一批推帧，加上 IPC/渲染线程的抖动，0.35s 的余量
+ * 经常被一次抖动吃穿 → 时间轴跳到 `now+LEAD` → 听感就是「一卡一卡」。0.7s 的余量能明显
+ * 扛住抖动，对直播音频来说这点延迟可以接受。
+ */
+const LEAD_SECONDS = 0.7
 /** 超过这个领先量就丢帧（说明解码/调度落后了） */
-const MAX_LEAD_SECONDS = 1.6
+const MAX_LEAD_SECONDS = 2.5
 /** 解码队列积压上限：超过就丢帧，别让队列无限涨 */
 const MAX_DECODE_QUEUE = 60
 /** 参数（ASC）还没到就先到的帧最多攒这么多（正常不会用到，FLV 里参数在第一帧之前） */
@@ -63,7 +69,8 @@ export class LiveAudioPlayer {
   private context: AudioContext | null = null
   private gain: GainNode | null = null
   private decoder: AudioDecoder | null = null
-  private sources = new Set<AudioBufferSourceNode>()
+  /** 已排上时间轴的音源 → 它预期播完的上下文时刻（兜底清理用，见 pruneSources） */
+  private sources = new Map<AudioBufferSourceNode, number>()
   private nextTime = 0
   private volume = 0.8
   private config: AudioConfig | null = null
@@ -202,7 +209,7 @@ export class LiveAudioPlayer {
   }
 
   private resetStream(): void {
-    for (const source of this.sources) {
+    for (const source of this.sources.keys()) {
       try {
         source.stop()
       } catch {
@@ -381,16 +388,20 @@ export class LiveAudioPlayer {
       const now = context.currentTime
       if (this.nextTime < now + 0.02) this.nextTime = now + LEAD_SECONDS
       if (this.nextTime > now + MAX_LEAD_SECONDS) {
-        // 已经甩开直播太远：丢掉这一帧，别越播越落后
+        // 已经甩开直播太远：丢掉这一帧，并**把时间轴拉回「现在 + 目标缓冲」**。
+        // 关键：这里必须重置 nextTime。旧版只丢帧不重置，nextTime 会一直吊在超前状态，
+        // 后续每一帧都继续命中这里被丢掉——一次突发（例如泵重连灌进来一大批）就能丢几千帧。
+        this.nextTime = now + LEAD_SECONDS
         this.patch({ dropped: this.stats.dropped + 1 })
         return
       }
       const source = context.createBufferSource()
       source.buffer = buffer
       source.connect(gain)
+      const endAt = this.nextTime + buffer.duration
       source.start(this.nextTime)
-      this.nextTime += buffer.duration
-      this.sources.add(source)
+      this.nextTime = endAt
+      this.sources.set(source, endAt)
       source.onended = () => {
         this.sources.delete(source)
         try {
@@ -426,9 +437,37 @@ export class LiveAudioPlayer {
   private startStatsTimer(): void {
     if (this.statsTimer) return
     this.statsTimer = setInterval(() => {
+      this.pruneSources()
       this.checkWatchdog()
       this.emit()
     }, 500)
+  }
+
+  /**
+   * 兜底清理排过期的音源。
+   *
+   * 正常由 `source.onended` 回收；但如果 onended 因故没触发（上下文被挂起/被提前 stop），
+   * 这些 AudioBufferSourceNode 会一直挂在图上、越积越多——正是「越跑越卡、越跑越占资源」的一种来源。
+   * 这里按「预期播完时刻」定期把过期的收掉，保证节点数与 0.7s 的缓冲量同量级。
+   */
+  private pruneSources(): void {
+    const context = this.context
+    if (!context) return
+    const now = context.currentTime
+    for (const [source, endAt] of this.sources) {
+      if (now <= endAt + 1) continue
+      this.sources.delete(source)
+      try {
+        source.stop()
+      } catch {
+        // 已经结束
+      }
+      try {
+        source.disconnect()
+      } catch {
+        // 忽略
+      }
+    }
   }
 
   /**

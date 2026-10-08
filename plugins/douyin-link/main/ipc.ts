@@ -17,7 +17,7 @@ import type { MainPluginContext } from '@host/main/plugins/context'
  * 抖音直播分析器 的主进程通道（前缀 `plugin:douyin-link:`，否则装载期就抛）。
  *
  * 分工：
- * - **数据进数据库**（房间清单、消息流水、用户统计、分钟桶、会话、礼物目录）；
+ * - **数据进数据库**（房间清单、消息流水、用户统计、分钟桶、会话）；
  * - **设置进 JSON**（userData/plugin-state/douyin-link.json——它是「偏好」不是数据）；
  * - **运行态在内存**（`monitor/hub.ts`：相位、本场计数、最近弹幕）；
  * - 通道里**不做网络与窗口操作**：全部转给 `analyzerHub`，渲染层拿到的永远是同一份状态。
@@ -38,14 +38,21 @@ export function settingsFilePath(): string {
  * 读设置。老版本的文件里有 `room` / `autoConnect` 两个字段（单房间时代的默认房间），
  * 这一版不再有「默认房间」——房间清单在数据库里；所以那两个字段**读出来就丢掉**
  * （否则「一开应用就自己连上原来的直播间」会跟着旧文件复活）。
+ * `saveData`（省流量：弹幕窗口不加载画面）在 0.6.0 也成了历史：主进程直连不再有窗口，
+ * 本来就不会去拉画面，留着它只会让界面有一个不起作用的开关。
  */
 export function loadSettings(): Partial<LiveSettings> {
   try {
     const raw = fs.readFileSync(SETTINGS_FILE(), 'utf-8')
-    const parsed = JSON.parse(raw) as Partial<LiveSettings> & { room?: string; autoConnect?: boolean }
+    const parsed = JSON.parse(raw) as Partial<LiveSettings> & {
+      room?: string
+      autoConnect?: boolean
+      saveData?: boolean
+    }
     if (!parsed || typeof parsed !== 'object') return {}
     delete parsed.room
     delete parsed.autoConnect
+    delete parsed.saveData
     return parsed
   } catch {
     return {}
@@ -99,12 +106,14 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number) =>
       hub.listUsers(
         String(webRid ?? ''),
-        sort === 'chat' || sort === 'gift' ? sort : 'recent',
+        sort === 'chat' ? sort : 'recent',
         String(keyword ?? ''),
         typeof limit === 'number' ? limit : 200
       ),
     'plugin:douyin-link:user-get': (webRid?: string, userId?: string) =>
       hub.userProfile(String(webRid ?? ''), String(userId ?? '')),
+    // 「在线观众」：麦上（聊天室）+ 接口给的房间成员 + 本场活跃，合并成一份列表
+    'plugin:douyin-link:presence-list': (webRid?: string) => hub.presence(String(webRid ?? '')),
     // 头像：渲染层 CSP 不许外链图片，所以由主进程下载成 data URL 再给界面
     'plugin:douyin-link:user-avatar': (webRid?: string, userId?: string) =>
       hub.userAvatar(String(webRid ?? ''), String(userId ?? '')),
@@ -132,7 +141,7 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
 /**
  * 装载期把设置读进来、把库里的房间清单读进内存。
  *
- * **这里不做任何连接**：打开应用只恢复「清单」，不解析、不建窗口、不出声——
+ * **这里不做任何连接**：打开应用只恢复「清单」，不解析、不轮询、不出声——
  * 上一版就是在这里按设置自动连上「上次那个直播间」，用户看到的就是「一开应用又冒出原来的直播间」。
  * 想恢复监控的人在设置里打开「启动时接着监控上次的房间」。
  */

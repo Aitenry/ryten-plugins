@@ -17,7 +17,7 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
  * 现在每个房间有自己的一份档案（同一个人在 A 房与 B 房的发言数当然不同），
  * 而且**关掉应用也不会丢**——它是库里的行，不是内存里的对象。
  *
- * 排序（最近出现 / 发言最多 / 礼物最多）与搜索（昵称 / 抖音号 / 用户 id）都走数据库查询。
+ * 排序（最近出现 / 发言最多）与搜索（昵称 / 抖音号 / 用户 id）都走数据库查询。
  */
 export function UsersPanel(props: {
   room: RoomRuntime | null
@@ -28,7 +28,7 @@ export function UsersPanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
-  const [sort, setSort] = useState<'recent' | 'chat' | 'gift'>('chat')
+  const [sort, setSort] = useState<'recent' | 'chat'>('chat')
   const [keyword, setKeyword] = useState('')
   const [rows, setRows] = useState<UserRankRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -95,11 +95,10 @@ export function UsersPanel(props: {
           <Segmented
             size="small"
             value={sort}
-            onChange={(value) => setSort(value as 'recent' | 'chat' | 'gift')}
+            onChange={(value) => setSort(value as 'recent' | 'chat')}
             options={[
               { value: 'recent', label: t('douyin-link.page.sortRecent') },
-              { value: 'chat', label: t('douyin-link.page.sortChat') },
-              { value: 'gift', label: t('douyin-link.page.sortGift') }
+              { value: 'chat', label: t('douyin-link.page.sortChat') }
             ]}
           />
         </div>
@@ -141,17 +140,6 @@ export function UsersPanel(props: {
                 width: 76,
                 align: 'right',
                 render: (_value, row) => <span>{formatNumber(row.stats.chat)}</span>
-              },
-              {
-                title: t('douyin-link.page.colGift'),
-                dataIndex: 'gift',
-                width: 116,
-                align: 'right',
-                render: (_value, row) => (
-                  <span style={{ color: row.stats.diamonds > 0 ? palette.warn : undefined }}>
-                    {formatNumber(row.stats.gift)} · {formatNumber(row.stats.diamonds)}
-                  </span>
-                )
               },
               {
                 title: t('douyin-link.page.colEnter'),

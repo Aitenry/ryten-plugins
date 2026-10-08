@@ -24,6 +24,14 @@ import { sleep } from '../util/deadline'
 const FLUSH_FRAMES = 24
 /** 或者最多攒这么久（低帧率/断续时靠它兜底） */
 const FLUSH_MS = 200
+/**
+ * 待发帧的**积压上限**（约 3 秒音频）。
+ *
+ * 重连之后可能一次灌进来一大批帧（CDN 抖动/积压），旧版会原样攒着全部推给渲染层，
+ * 渲染层解码器瞬间被灌爆 → 播放器一次丢几千帧（用户实测「突然丢帧 200 到 4000」）。
+ * 直播场景下积压的旧音频没有价值：超过上限就丢**最老**的，只保留最新的。
+ */
+const MAX_PENDING_FRAMES = 150
 /** 连续重连这么多次还连不上就报错收手（每次都换新地址） */
 const MAX_ATTEMPTS = 8
 const CONNECT_TIMEOUT_MS = 15000
@@ -276,6 +284,10 @@ export class AudioPump {
     const data = new Uint8Array(frame.length)
     data.set(frame)
     this.pending.push({ ts, data })
+    // 积压上限：丢最老的，只留最新的（直播里积压的旧音频没有价值）
+    if (this.pending.length > MAX_PENDING_FRAMES) {
+      this.pending.splice(0, this.pending.length - MAX_PENDING_FRAMES)
+    }
     if (this.pending.length >= FLUSH_FRAMES) this.flush()
   }
 

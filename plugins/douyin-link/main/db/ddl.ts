@@ -36,7 +36,6 @@ const DDL: string[] = [
      user_name  TEXT NOT NULL DEFAULT '',
      content    TEXT NOT NULL DEFAULT '',
      count      INTEGER NOT NULL DEFAULT 0,
-     diamonds   INTEGER NOT NULL DEFAULT 0,
      at_ms      DOUBLE PRECISION NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_time ON douyin_link_messages (web_rid, at_ms DESC)`,
@@ -60,8 +59,6 @@ const DDL: string[] = [
      badges          TEXT NOT NULL DEFAULT '[]',
      sec_uid         TEXT NOT NULL DEFAULT '',
      chat            INTEGER NOT NULL DEFAULT 0,
-     gift            INTEGER NOT NULL DEFAULT 0,
-     diamonds        INTEGER NOT NULL DEFAULT 0,
      enter           INTEGER NOT NULL DEFAULT 0,
      likes           INTEGER NOT NULL DEFAULT 0,
      follows         INTEGER NOT NULL DEFAULT 0,
@@ -70,17 +67,14 @@ const DDL: string[] = [
    )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_douyin_link_user_room ON douyin_link_users (web_rid, user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_user_room_chat ON douyin_link_users (web_rid, chat DESC)`,
-  `CREATE INDEX IF NOT EXISTS idx_douyin_link_user_room_diamonds ON douyin_link_users (web_rid, diamonds DESC)`,
   `CREATE TABLE IF NOT EXISTS douyin_link_minutes (
      id       SERIAL PRIMARY KEY,
      web_rid  TEXT NOT NULL,
      minute   INTEGER NOT NULL,
      chat     INTEGER NOT NULL DEFAULT 0,
-     gift     INTEGER NOT NULL DEFAULT 0,
      member   INTEGER NOT NULL DEFAULT 0,
      likes    INTEGER NOT NULL DEFAULT 0,
      social   INTEGER NOT NULL DEFAULT 0,
-     diamonds INTEGER NOT NULL DEFAULT 0,
      messages INTEGER NOT NULL DEFAULT 0,
      users    INTEGER NOT NULL DEFAULT 0
    )`,
@@ -94,19 +88,28 @@ const DDL: string[] = [
      end_reason TEXT NOT NULL DEFAULT ''
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_session_room ON douyin_link_sessions (web_rid, started_at DESC)`,
-  `CREATE TABLE IF NOT EXISTS douyin_link_gifts (
-     id         INTEGER PRIMARY KEY,
-     name       TEXT NOT NULL DEFAULT '',
-     diamonds   INTEGER NOT NULL DEFAULT 0,
-     describe   TEXT NOT NULL DEFAULT '',
-     icon       TEXT NOT NULL DEFAULT '',
-     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
-   )`,
   `CREATE TABLE IF NOT EXISTS douyin_link_meta (
      key        TEXT PRIMARY KEY,
      value      TEXT NOT NULL DEFAULT '',
      updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
-   )`
+   )`,
+  /**
+   * 0.7.0 移除礼物功能的迁移（**幂等**）。
+   *
+   * 为什么必须显式 DROP：`CREATE TABLE IF NOT EXISTS` 对**已存在的旧库完全无效**——
+   * 只把建表语句里的礼物列删掉，旧库里的那些列会一直留着。所以要在这里把旧列/旧表/旧索引用
+   * `IF EXISTS` 真正清掉，并删掉历史 `kind='gift'` 的消息行。
+   */
+  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS diamonds`,
+  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_id`,
+  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_name`,
+  `ALTER TABLE douyin_link_users DROP COLUMN IF EXISTS gift`,
+  `ALTER TABLE douyin_link_users DROP COLUMN IF EXISTS diamonds`,
+  `ALTER TABLE douyin_link_minutes DROP COLUMN IF EXISTS gift`,
+  `ALTER TABLE douyin_link_minutes DROP COLUMN IF EXISTS diamonds`,
+  `DROP INDEX IF EXISTS idx_douyin_link_user_room_diamonds`,
+  `DROP TABLE IF EXISTS douyin_link_gifts`,
+  `DELETE FROM douyin_link_messages WHERE kind = 'gift'`
 ]
 
 /** 建表承诺：mapper / purge 都先 await 它，保证不会有访问跑到建表之前 */
@@ -114,7 +117,7 @@ export const schemaReady: Promise<void> = (async () => {
   await withOrm('douyin-link.ensureSchema', async (db) => {
     for (const statement of DDL) await db.execute(sql.raw(statement))
   })
-  logger.info('[douyin-link] 表结构已就绪（7 张 douyin_link_* 表）')
+  logger.info('[douyin-link] 表结构已就绪（6 张 douyin_link_* 表）')
 })().catch((error) => {
   logger.error('[douyin-link] 建表失败，插件将无法读写数据:', error)
   throw error
@@ -126,7 +129,6 @@ export const PURGE_TABLES = [
   'douyin_link_users',
   'douyin_link_minutes',
   'douyin_link_sessions',
-  'douyin_link_gifts',
   'douyin_link_meta',
   'douyin_link_rooms'
 ]

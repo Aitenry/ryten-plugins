@@ -28,22 +28,18 @@ export interface LiveRoomInfo {
   onlineText: string
   status: 'live' | 'ended' | 'unknown'
   cover: string
+  /**
+   * 语音/聊天室（有麦位的直播间，接口给 `function_type = "radio"`）。
+   * 这类房间的重点是「麦上」那个人，所以在线观众面板会把麦位单列出来。
+   */
+  voice: boolean
 }
 
 /** 弹幕类型：界面按类型配色与过滤 */
-export type DanmakuKind =
-  | 'chat'
-  | 'gift'
-  | 'member'
-  | 'like'
-  | 'social'
-  | 'stats'
-  | 'control'
-  | 'system'
+export type DanmakuKind = 'chat' | 'member' | 'like' | 'social' | 'stats' | 'control' | 'system'
 
 export const DANMAKU_KINDS: DanmakuKind[] = [
   'chat',
-  'gift',
   'member',
   'like',
   'social',
@@ -53,7 +49,7 @@ export const DANMAKU_KINDS: DanmakuKind[] = [
 ]
 
 /** 计数用到的类型（stats/control/system 不入库，它们不是「互动」） */
-export const COUNTED_KINDS: DanmakuKind[] = ['chat', 'gift', 'member', 'like', 'social']
+export const COUNTED_KINDS: DanmakuKind[] = ['chat', 'member', 'like', 'social']
 
 /**
  * 用户在直播间里的静态信息（主进程从弹幕帧里的 `User` 消息解出来，跨进程共用）。
@@ -93,10 +89,6 @@ export interface UserInfo {
 export interface UserStats {
   /** 发言条数 */
   chat: number
-  /** 送礼次数（消息条数） */
-  gift: number
-  /** 送礼额度合计（抖币） */
-  diamonds: number
   /** 进场次数 */
   enter: number
   /** 点赞次数 */
@@ -116,9 +108,6 @@ export interface UserProfile extends UserInfo {
 /** 一个房间的互动计数（内存运行态与库里统计都用它） */
 export interface LiveInteractions {
   chat: number
-  gift: number
-  /** 礼物额度合计（抖币） */
-  diamonds: number
   enter: number
   like: number
   follow: number
@@ -133,12 +122,10 @@ export interface DanmakuItem {
   user: string
   /** 发送者 id（渲染层拿它查用户档案；拿不到时是空串） */
   userId: string
-  /** 正文（chat = 弹幕内容；gift = 礼物名；stats = 人数串） */
+  /** 正文（chat = 弹幕内容；stats = 人数串） */
   text: string
-  /** 计数（点赞数、礼物连发数等，0 = 无） */
+  /** 计数（点赞数等，0 = 无） */
   count: number
-  /** 这一条礼物的额度（抖币 = 单价 × 数量）；只有礼物有，其它是 0 */
-  diamonds: number
   /** 主进程收到的时刻（ms） */
   at: number
 }
@@ -223,7 +210,7 @@ export interface RoomRuntime {
   /** 本次会话出现过的人数 */
   sessionUsers: number
   /** 库里该房间的累计量（KPI 卡片与对比页签用） */
-  stored: { messages: number; users: number; diamonds: number; sessions: number }
+  stored: { messages: number; users: number; sessions: number }
   addedAt: number
   lastActiveAt: number
   lastSeenAt: number
@@ -236,7 +223,6 @@ export interface DbStats {
   users: number
   minutes: number
   sessions: number
-  gifts: number
   /** 库里最早 / 最新一条消息的时间（0 = 空库） */
   firstMessageAt: number
   lastMessageAt: number
@@ -282,11 +268,72 @@ export interface UserBatch {
   users: UserProfile[]
 }
 
+/**
+ * 「在线观众」里的一行。
+ *
+ * 来自三条**不同来源**的合并（谁有数据用谁，互相不覆盖，界面上用标签区分）：
+ * - **麦上**（`seat > 0`）：语音聊天室的麦位表（`RoomLinkmicMicDisplayInfoSyncData`），
+ *   顺序就是麦位序；
+ * - **房间成员**（`listed = true`）：直播间接口（enter）给的房间成员 id 列表
+ *   （实测固定 30 位、几分钟内不随观众进出变化，所以它是成员名单而不是「正在看的人」）；
+ * - **本场**（`lastSeen > 0`）：本次监控里出现在任何一条消息里的人（弹幕/进场/点赞/关注）。
+ *
+ * 昵称/头像只有「我们见过这个人」才有（推送里的 User 或库里上一轮监控留下的档案）；
+ * 只有 id 的行会显示成用户号——不编造名字。
+ */
+export interface PresenceRow {
+  userId: string
+  nickname: string
+  displayId: string
+  avatar: string
+  gender: number
+  honorLevel: number
+  fansClubLevel: number
+  badges: string[]
+  secUid: string
+  /** 麦位序号（1 起；0 = 不在麦上） */
+  seat: number
+  /** 是否主播 */
+  anchor: boolean
+  /** 是否在直播间接口给的房间成员名单里 */
+  listed: boolean
+  /** 本场最后一次出现（ms；0 = 本场没见过） */
+  lastSeen: number
+  /** 本场首次出现（ms） */
+  firstSeen: number
+  /** **本场**互动计数（这次监控开始之后） */
+  session: UserStats
+  /** 库里累计（跨会话；这个人在本房间的历史） */
+  stats: UserStats
+  /** 库里最早的记录时间（ms；0 = 库里没有） */
+  storedFirstSeen: number
+}
+
+/** 一个房间的「在线观众」快照（面板一次拉一份，按需刷新） */
+export interface PresenceSnapshot {
+  webRid: string
+  rows: PresenceRow[]
+  /** 在麦上的人数 */
+  micCount: number
+  /** 接口给的房间成员人数 */
+  listedCount: number
+  /** 本场出现过的人数 */
+  activeCount: number
+  /** 是不是语音/聊天室（有麦位） */
+  voice: boolean
+  /**
+   * 房间信息是否已经解析过（主进程有没有这个房间的运行态）。
+   *
+   * `false` 有两种情形，界面都该显示「正在解析 / 主进程还没就绪」而不是「没有数据」：
+   * 插件刚装上还没连过、或宿主刚升级完插件而主进程的房间清单还是空的。
+   */
+  hasInfo: boolean
+  updatedAt: number
+}
+
 /** 插件的设置（存 userData/plugin-state/douyin-link.json；数据本身进数据库） */
 export interface LiveSettings {
   quality: QualityKey
-  /** 省流量：弹幕窗口里不加载画面（只挂弹幕 websocket） */
-  saveData: boolean
   /** 开始监控/切换房间时自动把声音切过去 */
   audioOnConnect: boolean
   volume: number
@@ -294,9 +341,17 @@ export interface LiveSettings {
   maxItems: number
   /** 要显示的弹幕类型 */
   kinds: DanmakuKind[]
+  /**
+   * 实时通道：借直播间页面自己的 websocket 收**逐条消息**（弹幕/进场/点赞/关注/人数/麦位）。
+   *
+   * 它比 HTTP 轮询（`im/fetch`）更实时；打开它时中枢会**暂停 HTTP 轮询**、
+   * 改用 ws（ws 断了再自动回落到轮询）。它需要**一个隐藏窗口**加载直播间页（推送 ws 有设备指纹闸，
+   * 合成设备连不上），所以是可关闭的实验性开关；任何失败都会自动降级，不影响监听本身。
+   */
+  realtimeStream: boolean
   /** 弹幕列表自动跟随最新 */
   autoScroll: boolean
-  /** 同时监控的房间数上限（每个房间一个隐藏窗口，超了排队） */
+  /** 同时监控的房间数上限（每个房间一路推送连接，超了排队） */
   monitorConcurrency: number
   /** 启动应用时接着监控上次在监控的房间（默认关：打开应用不该自己连上直播间） */
   resumeOnStart: boolean
@@ -317,11 +372,10 @@ export interface RoomSummary {
   firstAt: number
   lastAt: number
   /** 每秒一条的时间序列（按分钟聚合，主进程补齐缺口） */
-  series: Array<{ minute: number; chat: number; gift: number; member: number; like: number; social: number; diamonds: number }>
+  series: Array<{ minute: number; chat: number; member: number; like: number; social: number }>
   /** 类型分布 */
   kinds: Array<{ kind: DanmakuKind; count: number }>
   topChat: UserRankRow[]
-  topGift: UserRankRow[]
 }
 
 /** 榜单 / 用户列表的一行（= 用户档案的「库口径」，统计是跨会话累计的） */
@@ -379,8 +433,6 @@ export interface RoomCompareRow {
   windowMinutes: number
   messages: number
   chat: number
-  gift: number
-  diamonds: number
   member: number
   like: number
   social: number

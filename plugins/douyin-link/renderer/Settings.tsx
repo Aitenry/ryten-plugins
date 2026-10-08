@@ -79,10 +79,6 @@ export default function Settings(): React.JSX.Element {
           />
         </Row>
 
-        <Row label={t('douyin-link.settingsPage.saveDataLabel')} hint={t('douyin-link.settingsPage.saveDataHint')}>
-          <Switch size="small" checked={settings?.saveData ?? true} onChange={(value) => void save({ saveData: value })} />
-        </Row>
-
         <Row
           label={t('douyin-link.settingsPage.audioOnConnectLabel')}
           hint={t('douyin-link.settingsPage.audioOnConnectHint')}
@@ -138,6 +134,14 @@ export default function Settings(): React.JSX.Element {
           />
         </Row>
 
+        <Row label={t('douyin-link.settingsPage.realtimeLabel')} hint={t('douyin-link.settingsPage.realtimeHint')}>
+          <Switch
+            size="small"
+            checked={settings?.realtimeStream ?? true}
+            onChange={(value) => void save({ realtimeStream: value })}
+          />
+        </Row>
+
         <Row label={t('douyin-link.settingsPage.retentionLabel')} hint={t('douyin-link.settingsPage.retentionHint')}>
           <div className="flex items-center gap-2">
             <InputNumber
@@ -173,8 +177,7 @@ export default function Settings(): React.JSX.Element {
               messages: stats.messages,
               users: stats.users,
               minutes: stats.minutes,
-              sessions: stats.sessions,
-              gifts: stats.gifts
+              sessions: stats.sessions
             })}
           </Typography.Text>
         ) : null}

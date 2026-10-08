@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Segmented, Tooltip } from 'antd'
-import { RiArrowDownLine, RiGiftLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine } from '@remixicon/react'
+import { RiArrowDownLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { DanmakuItem, DanmakuKind, UserProfile } from '../../shared/types'
 import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
 import { UserAvatar } from './UserAvatar'
 
 /**
- * 弹幕列表：**分类分开看**（弹幕 / 礼物 / 进场 / 关注 / 点赞），新消息在底部自动跟随。
+ * 弹幕列表：**分类分开看**（弹幕 / 进场 / 关注 / 点赞），新消息在底部自动跟随。
  *
  * 用户反馈过的四件事都在这里解决：
- * 1. 「关注直播间、送礼物（礼物的额度）、进入直播间要分开显示」——顶部一排分类（Segmented），
- *    每类各自一个列表：礼物/进场/关注/点赞走卡片行（类型徽章 + 头像 + 额度），聊天走紧凑行；
+ * 1. 「关注直播间、进入直播间要分开显示」——顶部一排分类（Segmented），
+ *    每类各自一个列表：进场/关注/点赞走卡片行（类型徽章 + 头像），聊天走紧凑行；
  * 2. **不要「全部」那一类**：混排视图去掉后，每屏只有一种消息，行样式也就不用再分两种；
  *    直播状态/系统提示（下播等）数量极少但重要，改成**固定在列表上方的一行notice**，
  *    不再占一个分类，也不会因为没了混排就看不见；
@@ -41,8 +41,8 @@ const NEAR_BOTTOM_PX = 48
  */
 type ViewKey = Exclude<DanmakuKind, 'control' | 'system' | 'stats'>
 
-/** 分类顺序（礼物挨着弹幕，因为这两类是用户最常盯的） */
-const VIEWS: ViewKey[] = ['chat', 'gift', 'member', 'social', 'like']
+/** 分类顺序 */
+const VIEWS: ViewKey[] = ['chat', 'member', 'social', 'like']
 
 export function DanmakuFeed(props: {
   /** 正在看哪个房间（头像按房间缓存） */
@@ -117,11 +117,6 @@ export function DanmakuFeed(props: {
     setAtBottom(true)
   }
 
-  const giftTotal = useMemo(
-    () => visible.reduce((sum, item) => (item.kind === 'gift' ? sum + item.diamonds : sum), 0),
-    [visible]
-  )
-
   const counts = useMemo(() => {
     const map = new Map<ViewKey, number>()
     for (const item of props.items) {
@@ -144,9 +139,6 @@ export function DanmakuFeed(props: {
             label: `${viewLabel(t, key)}${view === key && counts.get(key) ? ` ${counts.get(key)}` : ''}`
           }))}
         />
-        {view === 'gift' && giftTotal > 0 ? (
-          <span className="text-xs opacity-70">{t('douyin-link.page.giftTotal', { count: giftTotal })}</span>
-        ) : null}
       </div>
       {/*
         固定头两行：直播状态/系统提示（notices）+ 最新在线人数（statsLine）。
@@ -188,20 +180,15 @@ export function DanmakuFeed(props: {
         }}
       >
         {visible.length === 0 ? (
-          <div className="flex h-full items-center justify-center px-3">
-            {/* 礼物这一栏单独给一段说明：网页端根本不推礼物消息，空着不是「还没收到」 */}
+          <div key="empty" className="flex h-full items-center justify-center px-3">
             <span className="text-center text-xs opacity-50">
-              {t(
-                view === 'gift'
-                  ? 'douyin-link.page.giftEmpty'
-                  : view === 'chat'
-                    ? 'douyin-link.page.danmakuEmpty'
-                    : 'douyin-link.page.viewEmpty'
-              )}
+              {t(view === 'chat' ? 'douyin-link.page.danmakuEmpty' : 'douyin-link.page.viewEmpty')}
             </span>
           </div>
         ) : (
-          <div className="flex flex-col gap-1.5">
+          // key={view}：换分类时强制整块重挂，避免 React 复用上一个分类的 DOM 节点
+          // （列表行的 key 来自主进程自增 id，跨分类复用可能把上一类的行留在新分类里）
+          <div key={view} className="flex flex-col gap-1.5">
             {visible.map((item) => (
               <DanmakuRow
                 key={item.id}
@@ -227,7 +214,7 @@ export function DanmakuFeed(props: {
   )
 }
 
-/** 事件类消息（礼物/进场/关注/点赞）走卡片行；聊天走紧凑行 */
+/** 事件类消息（进场/关注/点赞）走卡片行；聊天走紧凑行 */
 function DanmakuRow(props: {
   item: DanmakuItem
   /** 正在看哪个房间（卡片行的头像按房间缓存） */
@@ -266,6 +253,9 @@ function DanmakuRow(props: {
               <span className="opacity-70">{t('douyin-link.lines.stats')} </span>
               <span style={{ color: accent }}>{item.text}</span>
             </>
+          ) : item.kind === 'system' ? (
+            // 房间级系统提示（`WebcastRoomMessage`，如进房欢迎语）：原文照显，不当成状态变化
+            <span style={{ color: accent }}>{item.text}</span>
           ) : (
             <span style={{ color: accent }}>
               {item.text === 'ended' ? t('douyin-link.lines.controlEnded') : t('douyin-link.lines.controlChanged')}
@@ -277,13 +267,11 @@ function DanmakuRow(props: {
   }
 
   const badge =
-    item.kind === 'gift'
-      ? t('douyin-link.kinds.gift')
-      : item.kind === 'member'
-        ? t('douyin-link.kinds.member')
-        : item.kind === 'social'
-          ? t('douyin-link.kinds.social')
-          : t('douyin-link.kinds.like')
+    item.kind === 'member'
+      ? t('douyin-link.kinds.member')
+      : item.kind === 'social'
+        ? t('douyin-link.kinds.social')
+        : t('douyin-link.kinds.like')
 
   return (
     <div data-rb-row="" className="flex min-w-0 items-center gap-2 rounded-md px-1.5 py-1">
@@ -305,18 +293,8 @@ function DanmakuRow(props: {
           </span>
         </Tooltip>
         <span className="opacity-70"> {lineText(t, item)}</span>
-        {item.kind === 'gift' && item.text ? <span>{item.count > 1 ? '' : ''}</span> : null}
       </span>
-      {item.kind === 'gift' ? (
-        <span className="flex shrink-0 items-center gap-1">
-          <RiGiftLine size={12} style={{ color: accent }} />
-          <span className="text-xs" style={{ color: palette.warn }}>
-            {item.diamonds > 0
-              ? t('douyin-link.page.giftDiamonds', { count: item.diamonds })
-              : t('douyin-link.page.giftNoPrice')}
-          </span>
-        </span>
-      ) : item.count > 1 ? (
+      {item.count > 1 ? (
         <span className="shrink-0 text-xs opacity-60">×{item.count}</span>
       ) : null}
     </div>
@@ -329,10 +307,6 @@ function lineText(
   item: DanmakuItem
 ): string {
   switch (item.kind) {
-    case 'gift':
-      return item.text
-        ? t('douyin-link.lines.giftWith', { name: item.text, count: item.count })
-        : t('douyin-link.lines.giftPlain')
     case 'member':
       return t('douyin-link.lines.member')
     case 'social':
@@ -360,8 +334,6 @@ function viewLabel(t: (key: string) => string, view: ViewKey): string {
 /** 类型 → 颜色（一律取调色板，不写字面量色值；用户档案里的历史弹幕也用这一份） */
 export function kindColor(kind: DanmakuKind, palette: PluginPalette): string {
   switch (kind) {
-    case 'gift':
-      return palette.warn
     case 'member':
       return palette.accent
     case 'like':
@@ -380,8 +352,6 @@ export function kindColor(kind: DanmakuKind, palette: PluginPalette): string {
 /** 事件类型的小图标（用户列表里也用） */
 export function kindIcon(kind: DanmakuKind, size = 12): React.JSX.Element {
   switch (kind) {
-    case 'gift':
-      return <RiGiftLine size={size} />
     case 'member':
       return <RiLoginCircleLine size={size} />
     case 'social':
