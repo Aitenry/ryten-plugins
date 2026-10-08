@@ -187,7 +187,7 @@ function handleMessages(messages, viaLabel) {
     counts.set(method, (counts.get(method) ?? 0) + 1)
     if (!samples.has(method)) samples.set(method, { body, at: Date.now(), via: viaLabel })
     const limit = method.includes('Gift') || method.includes('OrderSing') ? 3 : 1
-    if ((dumpCount.get(method) ?? 0) < limit && /Gift|Contribute|Rank|OrderSing/.test(method)) {
+    if ((dumpCount.get(method) ?? 0) < limit && /Gift|Contribute|Rank|OrderSing|Notify/.test(method)) {
       dumpCount.set(method, (dumpCount.get(method) ?? 0) + 1)
       console.log(`\n=== ${viaLabel} dump #${dumpCount.get(method)} ${method} len=${body.length} ===`)
       // 礼物/点歌这类要能整帧回喂给 `decoder-check.mjs --frame=`，所以 hex 不截断

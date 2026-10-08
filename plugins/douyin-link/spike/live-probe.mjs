@@ -36,11 +36,13 @@ const DEFAULT_DUMP = [
   'WebcastGiftBroadcastMessage',
   'WebcastBindingGiftMessage',
   'WebcastGiftSortMessage',
+  // 礼物图标闪烁：真礼物送出时会推（2026-10-08 在 HTTP 通道上抓到过），也一起 dump 看它带不带礼物 id
+  'WebcastGiftIconFlashMessage',
   'WebcastRoomRankMessage',
   'WebcastLinkerContributeMessage',
   'WebcastGuestBattleMessage',
   'WebcastRanklistHourEntranceMessage',
-  'WebcastLinkmicOrderSingScoreMessage'
+  'WebcastLinkmicOrderSingMessage'
 ]
 
 const args = process.argv.slice(2)
