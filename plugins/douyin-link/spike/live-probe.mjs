@@ -47,6 +47,8 @@ const DEFAULT_DUMP = [
 
 const args = process.argv.slice(2)
 const verbose = args.includes('-v') || args.includes('--verbose')
+/** --dump-all：每个见过的 method 都 dump 一次（找新消息类型时用） */
+const dumpAll = args.includes('--dump-all')
 const dumpArg = args.find((a) => a.startsWith('--dump='))
 const stopOnArg = args.find((a) => a.startsWith('--stop-on='))
 const STOP_ON = stopOnArg ? stopOnArg.slice('--stop-on='.length) : ''
@@ -199,7 +201,12 @@ async function poll(webRid, roomId, cookie, cursor, internalExt) {
   if (!response.ok) return { error: `HTTP ${response.status}` }
   const raw = Buffer.from(await response.arrayBuffer())
   if (raw.length === 0) return { error: 'empty body' }
-  if (raw[0] === 0x7b) return { error: 'JSON body (服务端忽略了 resp_content_type)' }
+  if (raw[0] === 0x7b) {
+    // 服务端偶尔会忽略 resp_content_type 回 JSON：把原文打出来（前 2000 字），JSON 那条路的字段名要和它对齐
+    console.log(`\n=== JSON 回包 len=${raw.length} ===`)
+    console.log(raw.toString('utf8').slice(0, 2000))
+    return { json: raw.toString('utf8') }
+  }
   const root = readMessage(raw)
   const messages = []
   for (const payload of getBytesAll(root, 1)) {
@@ -287,6 +294,7 @@ while (Date.now() < deadline && !hit) {
     continue
   }
   polls += 1
+  if (result.json) { await sleep(3000); continue }
   cursor = result.cursor || cursor
   internalExt = result.internalExt || internalExt
   items += result.messages.length
@@ -300,7 +308,7 @@ while (Date.now() < deadline && !hit) {
       const preview = asText(body) ? `"${asText(body)}"` : `${body.length}B`
       console.log(`  ${method} ${preview}`)
     }
-    if (DUMP.has(method) && (dumpCount.get(method) ?? 0) < DUMP_LIMIT) {
+    if ((DUMP.has(method) || dumpAll) && (dumpCount.get(method) ?? 0) < (dumpAll && !DUMP.has(method) ? 1 : DUMP_LIMIT)) {
       dumpCount.set(method, (dumpCount.get(method) ?? 0) + 1)
       console.log(`\n=== dump #${dumpCount.get(method)} ${method} len=${body.length} ===`)
       console.log(`hex=${body.toString('hex').slice(0, HEX_PREFIX * 2)}`)

@@ -178,7 +178,12 @@ const chatFrame = ({ nickname = '说话的人', text = '你好' } = {}) =>
 const stubPath = join(workDir, 'electron-log-stub.mjs')
 writeFileSync(
   stubPath,
-  'const noop = () => {}\nexport default { info: noop, warn: noop, error: noop, debug: noop }\n',
+  // 日志不是空壳而是**探针**：诊断日志有没有真的打出来，靠它来断言（别只信「代码里写了」）。
+  // 用 globalThis 存调用记录：esbuild 可能把这个 stub 内联进 bundle，那样「另一个实例」就看不到记录了。
+  `const calls = (globalThis.__DOUYIN_LOG_CALLS__ ??= [])\n` +
+    `export { calls }\n` +
+    `const push = (level) => (...args) => { calls.push([level, args.map((a) => String(a)).join(' ')]) }\n` +
+    `export default { info: push('info'), warn: push('warn'), error: push('error'), debug: push('debug') }\n`,
   'utf8'
 )
 
@@ -202,6 +207,11 @@ async function bundle(entry) {
     ]
   })
   return import(pathToFileURL(outfile).href)
+}
+
+/** 取日志探针记下的行（诊断断言用；stub 把记录挂在 globalThis 上，内联与否都看得到） */
+async function logCalls() {
+  return globalThis.__DOUYIN_LOG_CALLS__ ?? []
 }
 
 /* -------------------------------------------------------------------- 断言 */
@@ -295,6 +305,37 @@ check('未知结构的真礼物 → 送礼人/收礼人照旧', [unknown.item.us
 /* 目录里没有这件礼物的名字：不许编，正文留空（界面显示「礼物名未知」） */
 const unknownNoCatalog = proto.decodeProtoMessage('WebcastGiftMessage', unknownGiftFrame(), fakeCatalog({}))
 check('目录对不上名字 → 不编名字', unknownNoCatalog.item.text, '')
+check('真礼物 → trace=proto-gift', unknownNoCatalog.item.trace, 'proto-gift')
+
+/* 诊断日志必须**真的打出来**（探针记录；别只信代码里写了） */
+const giftLogs = (await logCalls()).filter(([, text]) => text.includes('gift-unknown'))
+check('真礼物解不出名字 → 写了 [gift-unknown] 日志', giftLogs.length >= 2, true)
+check('日志里有原始帧 hex', giftLogs.some(([, text]) => text.includes('hex=')), true)
+
+/* 点歌帧解不出礼物名时也要留证据（这条以前是静默的）：
+   送礼人/歌手都只有 id、没有昵称，记录里也没有礼物信息 → 名字必然是空 */
+proto.__resetProtoIds()
+proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  Buffer.concat([
+    pbVarint(2, 4),
+    pbMessage(
+      6,
+      Buffer.concat([
+        pbString(1, '58709692971_7667087264728728634_55500000000000000000000009_0_13564_1_Normal'),
+        pbMessage(3, pbVarint(1, 7667087264728728634n))
+      ])
+    )
+  ])
+)
+const orderLogs = (await logCalls()).filter(([, text]) => text.includes('gift-empty-order'))
+check('点歌解不出名字 → 写了 [gift-empty-order] 日志', orderLogs.length >= 2, true)
+check(
+  '点歌日志带 giftId/label + 原始帧 hex',
+  orderLogs.some(([, text]) => text.includes('giftId=') && text.includes('label=')) &&
+    orderLogs.some(([, text]) => text.includes('hex=')),
+  true
+)
 
 /* 同一个点歌单的后续帧（没有礼物记录）必须被丢掉：否则库里会出现「同一单两行、一行没名字」 */
 proto.__resetProtoIds()

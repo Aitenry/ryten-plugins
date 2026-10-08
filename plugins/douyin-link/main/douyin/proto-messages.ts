@@ -159,7 +159,7 @@ export function decodeProtoMessage(
       return decodeProtoGift(msg, user, gifts, payload)
     case 'WebcastLinkmicOrderSingMessage':
       // 语音房「点歌」：房间里显示成「X 送了 想听 Y 演唱」，归到礼物这一类（见下面的解码器）
-      return decodeProtoOrderSing(msg, gifts)
+      return decodeProtoOrderSing(msg, gifts, payload)
     case 'WebcastRoomStatsMessage': {
       // 在线人数（JSON 模式根本收不到这条）：4 是展示串（"31在线观众"），5 是数字
       const total = pickVarintInRange(msg, [5, 9], 0, 100000000) ?? 0
@@ -251,7 +251,7 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResol
   const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
   return {
     ...nothing(),
-    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '' },
+    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'proto-gift' },
     users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
   }
 }
@@ -360,7 +360,7 @@ function logGiftWithoutName(msg: PbMessage, payload: Buffer): void {
  *   `6.5.2 = { 2: 1000, 3: 4 }` 至今没有对得上的解释，**不用**；
  * - `2 = 5` 那几帧也带同一个单号串，但它们是播放状态变更，不是新的送礼——照旧跳过。
  */
-function decodeProtoOrderSing(msg: PbMessage, gifts?: GiftResolver): ProtoDecoded {
+function decodeProtoOrderSing(msg: PbMessage, gifts: GiftResolver | undefined, raw: Buffer): ProtoDecoded {
   const payload = getMessage(msg, 6)
   if (!payload) return nothing()
   const singer = parseProtoUser(getMessage(payload, 3))
@@ -399,14 +399,34 @@ function decodeProtoOrderSing(msg: PbMessage, gifts?: GiftResolver): ProtoDecode
   const name = hit?.name || label || (recipient?.nickname ? `想听 ${recipient.nickname} 演唱` : '')
   const unit = hit?.diamonds || frameUnit
   const senderId = sender?.id ?? orderSingSenderId(key)
+  /**
+   * 名字还是空的：**这一条将来在库里就是「礼物名未知」，而且再也补不回来**，
+   * 所以把原始帧记下来（限 5 条）——排查「明明有礼物却只有个空名字」时只有它说得清。
+   */
+  if (!name) logOrderSingWithoutName(raw, { key, label, giftId, senderId, recipient: recipient?.nickname ?? '' })
   const base = item('gift', sender?.nickname ?? '', senderId, name, 1, unit)
   const users = [sender, recipient, singer].filter((entry): entry is UserInfo => Boolean(entry?.id))
   const unique = new Map(users.map((entry) => [entry.id, entry]))
   return {
     ...nothing(),
-    item: { ...base, toUser: recipient?.nickname ?? '', toUserId: recipient?.id ?? '' },
+    item: { ...base, toUser: recipient?.nickname ?? '', toUserId: recipient?.id ?? '', trace: 'proto-order' },
     users: [...unique.values()]
   }
+}
+
+/** 点歌帧解不出礼物名时的诊断（原始 payload 前 512 字节 + 关键字段） */
+let orderDumpCount = 0
+function logOrderSingWithoutName(
+  payload: Buffer,
+  info: { key: string; label: string; giftId: number; senderId: string; recipient: string }
+): void {
+  if (orderDumpCount >= 5) return
+  orderDumpCount += 1
+  logger.info(
+    `[douyin-link][gift-empty-order] len=${payload.length} key=${info.key} label=${info.label || '（空）'}` +
+      ` giftId=${info.giftId} senderId=${info.senderId} recipient=${info.recipient || '（空）'}`
+  )
+  logger.info(`[douyin-link][gift-empty-order] hex=${payload.subarray(0, 512).toString('hex')}`)
 }
 
 /** 「最近见过的点歌单号串」的上限（只为去重，一场直播几千单也不至于涨到哪去） */

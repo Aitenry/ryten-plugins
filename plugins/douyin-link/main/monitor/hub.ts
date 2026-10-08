@@ -79,6 +79,8 @@ export const TICKS_EVENT = 'plugin:douyin-link:ticks'
 
 /** 一个房间在内存里最多留多少条最近弹幕 */
 const RECENT_CAP = 400
+/** 「名字空的礼物行」最多记几条日志（见 noteEmptyGifts） */
+const EMPTY_GIFT_LOG_LIMIT = 20
 /** flush 间隔与「房间列表」推送节流 */
 const FLUSH_INTERVAL_MS = 2000
 const ROOMS_PUSH_THROTTLE_MS = 1000
@@ -212,6 +214,8 @@ export class AnalyzerHub {
    * 给送礼人补昵称要查库（异步），串起来才能保证批次不会互相超车。
    */
   private readonly ingestChain = new Map<string, Promise<void>>()
+  /** 「名字空的礼物行」已经记了几条（见 noteEmptyGifts；别把日志刷爆） */
+  private emptyGiftLogged = 0
   private pushTimer: ReturnType<typeof setTimeout> | null = null
   private usersPushAt = 0
   private pendingUsers: UserBatch[] = []
@@ -969,8 +973,31 @@ export class AnalyzerHub {
     return found
   }
 
+  /**
+   * 「名字空的礼物行」在这里现形：**所有礼物行都要经过 `applyItems`**，所以它是唯一可靠的哨点。
+   *
+   * 为什么必须有它（2026-10-08 实战）：用户库里出现过一条 `content='' / to_user_name='ok绷.ఇ'` 的行，
+   * 而各解码器自己的诊断日志一条都没打——光看代码和日志推不出是哪条路写的。
+   * 这里把 `trace`（哪个解码器）、通道（ws / HTTP）、以及这条行的关键字段一次记全，
+   * 下一行「礼物名未知」出现时，日志里就能直接看到凶手。
+   */
+  private noteEmptyGifts(state: RoomState, items: DanmakuItem[]): void {
+    if (this.emptyGiftLogged >= EMPTY_GIFT_LOG_LIMIT) return
+    for (const item of items) {
+      if (item.kind !== 'gift' || item.text) continue
+      if (this.emptyGiftLogged >= EMPTY_GIFT_LOG_LIMIT) return
+      this.emptyGiftLogged += 1
+      logger.warn(
+        `[douyin-link][gift-empty] trace=${item.trace ?? '(未标)'} channel=${state.wsLive ? 'ws' : 'http'}` +
+          ` user=${item.user || '(空)'}/${item.userId || '(空)'} to=${item.toUser || '(空)'}/${item.toUserId || '(空)'}` +
+          ` count=${item.count} diamonds=${item.diamonds} at=${new Date(item.at).toISOString()}`
+      )
+    }
+  }
+
   /** 把一批消息真正吃进去（计数/落库/推界面）；送礼人昵称补好之后由 `handleItems` 调这里 */
   private applyItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
+    this.noteEmptyGifts(state, items)
     const touched = state.recorder.ingest(items, users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)
 
