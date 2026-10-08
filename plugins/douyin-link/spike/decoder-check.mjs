@@ -84,18 +84,24 @@ const giftFrame = ({ nickname = '送礼的人', unit = 10, repeat = 5, name = '�
 
 /**
  * `WebcastLinkmicOrderSingMessage`（**实测字段号**）：
- * 6.1 = `发送者_歌手_单号_0_歌曲_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）；
- * 6.5.1 = 点唱礼物记录（1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 抖币价、10 礼物名）。
+ * 6.1 = `发送者_歌手_单号_0_<礼物 id>_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）；
+ * 6.5.1 = 点唱礼物记录（1 收礼人 User、2 送礼人 User、3 单号串、5 **房间固定的点唱礼物 id**、
+ * 6 它的价、10 场景标签）。
+ *
+ * 两个礼物来源**不是一回事**（2026-10-08 扫 40 条真帧才发现，见 `main/douyin/proto-messages.ts`
+ * 的 `orderSingGiftId`）：`keyGift`（单号串第 5 段）才是用户**实际送的那件**，
+ * `recordGift` 实测永远是 3200（爱的纸鹤 99 = 点唱服务费）。所以 fixture 两个都给，
+ * 默认让它们一致（3200），要测「不一致时听谁的」就显式传两个不同的值。
  */
 const orderSingFrame = ({
   sender = '送礼的人',
   singer = '唱歌的人',
-  songId = 13564,
+  keyGift = 3200,
+  recordGift = 3200,
   price = 99,
-  giftId = 3200,
   orderId = '10000037694256230482760723'
 } = {}) => {
-  const key = `58709692971_7667087264728728634_${orderId}_0_${songId}_1_Normal`
+  const key = `58709692971_7667087264728728634_${orderId}_0_${keyGift}_1_Normal`
   return Buffer.concat([
     pbVarint(2, 4),
     pbMessage(
@@ -113,7 +119,7 @@ const orderSingFrame = ({
               pbMessage(1, user(7667087264728728634n, singer)),
               pbMessage(2, user(58709692971n, sender)),
               pbString(3, key),
-              pbVarint(5, giftId),
+              pbVarint(5, recordGift),
               pbVarint(6, price),
               pbString(10, '点唱礼物')
             ])
@@ -125,13 +131,17 @@ const orderSingFrame = ({
 }
 
 /** 同一单号串的「后一条」帧：只有单号串与歌手，没有 6.5 礼物记录（实测服务端会这么重复推） */
-const orderSingFollowUpFrame = ({ singer = '唱歌的人', orderId = '10000037694256230482760723' } = {}) =>
+const orderSingFollowUpFrame = ({
+  singer = '唱歌的人',
+  orderId = '10000037694256230482760723',
+  keyGift = 13564
+} = {}) =>
   Buffer.concat([
     pbVarint(2, 4),
     pbMessage(
       6,
       Buffer.concat([
-        pbString(1, `58709692971_7667087264728728634_${orderId}_0_13564_1_Normal`),
+        pbString(1, `58709692971_7667087264728728634_${orderId}_0_${keyGift}_1_Normal`),
         pbVarint(2, 3),
         pbMessage(3, user(7667087264728728634n, singer))
       ])
@@ -269,28 +279,48 @@ const priceless = proto.decodeProtoMessage(
 check('礼物没带价格 → 抖币 0', priceless.item.diamonds, 0)
 check('礼物没带价格 → 数量缺省 1', priceless.item.count, 1)
 
-/* 点歌：送礼人/收礼人的 User、礼物 id、抖币价都在 6.5.1 那份记录里；
-   名字与价格**以官方目录为准**（帧里只有 id 和场景标签「点唱礼物」） */
+/* 点歌：送礼人/收礼人的 User 在 6.5.1 那份记录里；名字与价格**以官方目录为准** */
 const sing = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99, giftId: 3200 })
+  orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99, recordGift: 3200, keyGift: 3200 })
 )
 check('点歌 → kind', sing.item.kind, 'gift')
 check('点歌 → 送礼人（6.5.1.2 的 User）', [sing.item.user, sing.item.userId], ['少走点弯路', '58709692971'])
 check('点歌 → 收礼人（6.5.1.1 的 User，= 歌手）', [sing.item.toUser, sing.item.toUserId], ['摇尾乞怜', '7667087264728728634'])
-check('点歌 → 没有目录时退回帧里的标签与价', [sing.item.text, sing.item.diamonds], ['点唱礼物', 99])
+check('点歌 → 没有目录时退回房间的说法（不拿场景标签当礼物名）', [sing.item.text, sing.item.diamonds], ['想听 摇尾乞怜 演唱', 99])
 check('点歌 → 送礼人 + 收礼人都进用户库', sing.users.map((u) => u.nickname).sort(), ['少走点弯路', '摇尾乞怜'])
 
 /* 有目录时：名字与价格取自目录（real 例子：id 4353 = 跑车 = 1200 抖币） */
 const catalog = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 }, 4353: { name: '跑车', diamonds: 1200 } })
-const named = proto.decodeProtoMessage(
+
+/*
+ * 用户 2026-10-08 反馈的核心场景：房间里有人送「跑车」，插件显示未知/爱的纸鹤。
+ * 真帧里「跑车」写在**单号串第 5 段**（4353），而记录里的 5 永远是 3200（点唱礼物 99）。
+ * 两条断言：只有记录帧时要认跑车；**连记录都没有**（占大多数的那条推送）也要认跑车。
+ */
+const keyWins = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ giftId: 4353, price: 1200, singer: 'Snow' }),
+  orderSingFrame({ keyGift: 4353, recordGift: 3200, price: 99, singer: 'Snow' }),
   catalog
 )
-check('点歌 + 目录 → 礼物名（不是「点唱礼物」这种场景标签）', named.item.text, '跑车')
-check('点歌 + 目录 → 抖币价', named.item.diamonds, 1200)
-check('点歌 + 目录 → 价格一致时不告警', catalog.warned, [])
+check('点歌 → 用户送的礼物以单号串为准（跑车，不是记录里的爱的纸鹤）', [keyWins.item.text, keyWins.item.diamonds], ['跑车', 1200])
+check('点歌 → 价格也按单号串那件查（不是记录里的 99）', keyWins.item.diamonds, 1200)
+
+const noRecordKeyGift = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000077', keyGift: 4353 }),
+  catalog
+)
+check('没有礼物记录的帧 → 也能从单号串认出跑车与价', [noRecordKeyGift.item.text, noRecordKeyGift.item.diamonds], ['跑车', 1200])
+check('没有礼物记录的帧 → 记录标记仍是 false（落库时不许覆盖）', noRecordKeyGift.item.giftRecord, false)
+
+/* 单号串第 5 段认不出来（不在目录里）→ 退回记录里那份，而不是显示一个查不到的 id */
+const recordFallback = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFrame({ keyGift: 13564, recordGift: 4353, price: 1200, singer: 'Snow' }),
+  catalog
+)
+check('单号串那段不在目录里 → 退回记录里的礼物', [recordFallback.item.text, recordFallback.item.diamonds], ['跑车', 1200])
 
 /* 帧价与目录不符 → 自检必须报警（这条读法只做过一次交叉核对） */
 const mismatch = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 } })
@@ -346,7 +376,7 @@ check(
   '同一单的后续帧 → 丢弃（不重复记一行）',
   proto.decodeProtoMessage(
     'WebcastLinkmicOrderSingMessage',
-    orderSingFollowUpFrame({ orderId: '55500000000000000000000001' })
+    orderSingFollowUpFrame({ orderId: '55500000000000000000000001', keyGift: 3200 })
   )?.item ?? null,
   null
 )
@@ -400,11 +430,11 @@ check('点歌 → 单号串认不出来时 userId 为空', weird.item.userId, ''
 const sameOrderId = '55500000000000000000000005'
 const weak = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
-  orderSingFollowUpFrame({ orderId: sameOrderId, singer: 'Snow' })
+  orderSingFollowUpFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353 })
 )
 const strong = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ orderId: sameOrderId, singer: 'Snow', giftId: 4353, price: 1200 }),
+  orderSingFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353, recordGift: 4353, price: 1200 }),
   catalog
 )
 check('同一单两帧 → 单号串一致且非空', weak.item.orderKey === strong.item.orderKey && weak.item.orderKey.length > 0, true)
