@@ -81,6 +81,13 @@ function mergeFeed(older: DanmakuItem[], current: DanmakuItem[]): DanmakuItem[] 
   return [...head, ...current].slice(-FEED_CAP)
 }
 
+/** 本地日期串 `YYYY-MM-DD`（与主进程 `dayRecords` 的分天口径一致） */
+function localDay(at: number): string {
+  const date = new Date(at)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
 /**
  * 抖音直播分析器 的页面。
  *
@@ -170,32 +177,56 @@ export default function Page(): React.JSX.Element {
     }
   }, [])
 
-  /** 进度条的两端：库里最早一条 → 最近一条（没有数据时 null，界面给空态） */
-  const bounds = useMemo(() => {
-    const rows = days.filter((day) => day.firstAt > 0)
-    if (rows.length === 0) return null
-    let first = rows[0].firstAt
-    let last = rows[0].lastAt
-    for (const day of rows) {
-      if (day.firstAt < first) first = day.firstAt
-      if (day.lastAt > last) last = day.lastAt
-    }
-    // 「今天」的右端跟着现在走：看今天的详情时数据是活的
+  /**
+   * **时间进度条只在一天之内**（用户 2026-10-08：「时间范围只在今天的时间范围，不能跨天」）。
+   *
+   * 所以先定「看的是哪一天」：`daySel` 空 = 今天。这一天的 00:00 → 现在（历史的日子是
+   * 00:00 → 24:00）就是进度条的两端，拖把手只能在这一天里选一段，永远跨不到昨天去。
+   * 想看别的日子就点左侧「每日记录」里那一天。
+   */
+  const today = localDay(Date.now())
+  const activeDay = daySel || today
+  const dayRow = useMemo(() => days.find((day) => day.day === activeDay) ?? null, [days, activeDay])
+  const dayBounds = useMemo(() => {
+    const start = new Date(`${activeDay}T00:00:00`).getTime()
+    if (!Number.isFinite(start)) return null
+    const end = start + 86400000 - 1
     const now = Date.now()
-    if (now - last < 5 * 60000) last = now
-    return { first, last }
-  }, [days])
+    // 今天还没有数据时也给一条进度条（用户可以先看空态，数据一到就动起来）
+    return { first: start, last: Math.min(end, now) }
+  }, [activeDay])
 
-  /** 点「每日记录」里的一天：把详情切到那一天（今天则右端跟着现在走） */
+  /**
+   * 生效的时间范围：用户拖出来的那一段**夹在这一天之内**；没拖过就是「这一天的全部数据」
+   * （今天 = 00:00 或第一条 → 现在，历史的日子 = 那天的第一条 → 最后一条）。
+   */
+  const effectiveRange = useMemo(() => {
+    if (!dayBounds) return null
+    const clamp = (value: number): number => Math.min(Math.max(value, dayBounds.first), dayBounds.last)
+    if (range) {
+      const from = clamp(range.from)
+      const to = clamp(range.to)
+      return to > from ? { from, to } : { from: dayBounds.first, to: dayBounds.last }
+    }
+    const from = dayRow && dayRow.firstAt > 0 ? Math.max(dayBounds.first, dayRow.firstAt) : dayBounds.first
+    const to =
+      activeDay === today
+        ? dayBounds.last
+        : dayRow && dayRow.lastAt > 0
+          ? Math.min(dayBounds.last, dayRow.lastAt)
+          : dayBounds.last
+    return to > from ? { from, to } : { from: dayBounds.first, to: dayBounds.last }
+  }, [range, dayBounds, dayRow, activeDay, today])
+
+  /** 点「每日记录」里的一天：把详情切到那一天（`range` 归零 = 用那一天的默认整段） */
   const pickDay = useCallback((day: DayRecordRow): void => {
-    const start = new Date(`${day.day}T00:00:00`).getTime()
-    const today = new Date().toDateString() === new Date(start).toDateString()
     setDaySel(day.day)
-    setRange({
-      // 两端各留 1 秒余量：那一天收尾的消息不至于被边界卡掉
-      from: day.firstAt > 0 ? day.firstAt - 1000 : start,
-      to: today ? Date.now() : day.lastAt > 0 ? day.lastAt + 1000 : start + 86400000 - 1
-    })
+    setRange(null)
+  }, [])
+
+  /** 进度条拖动：只改这一段，看的是哪一天不变（所以它跨不出这一天） */
+  const changeRange = useCallback((next: { from: number; to: number } | null): void => {
+    setRange(next)
   }, [])
 
   /* ------------------------------------------------------- 初始与推送 */
@@ -594,13 +625,9 @@ export default function Page(): React.JSX.Element {
           <OverviewPanel
             room={active}
             minutes={minutes}
-            range={range}
-            onRange={(next) => {
-              setRange(next)
-              // 拖进度条 = 自己选一段：不再高亮任何一天
-              if (next) setDaySel('')
-            }}
-            bounds={bounds}
+            range={effectiveRange}
+            onRange={changeRange}
+            bounds={dayBounds}
             onOpenGifts={(target) => setOpenGifts(target)}
           />
         </Pane>
