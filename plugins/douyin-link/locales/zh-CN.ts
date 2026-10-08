@@ -101,7 +101,7 @@ export const DouyinLinkZhCN = {
       window7d: '7 天',
       windowAll: '全部',
       rangeSpan: '时长 {{duration}}',
-      rangeLatest: '回到最近 {{window}}',
+      rangeWholeDay: '这一天全部',
       rangeEmpty: '还没有数据（先开始监控）',
       dayRecords: '每日记录（{{count}} 天）',
       dayRecordsEmpty: '还没有记录过这个房间',

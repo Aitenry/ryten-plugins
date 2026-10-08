@@ -95,12 +95,15 @@ export function OverviewPanel(props: {
   if (!props.room) return <EmptyHint text={t('douyin-link.page.noActive')} />
 
   /**
-   * 标题上的「看的是哪一段」：拖了进度条/点了某一天就写实际区间，否则写预设窗口名。
-   * 区间里如果是今天，那么右端跟着「现在」走（看今天的详情时是活的）。
+   * 标题上的「看的是哪一段」：**同一天**只写一次日期（`10-09 00:00 → 00:23`）——
+   * 进度条只在一天之内，所以跨天那种写法基本见不到（真跨了就两段都带日期，不藏信息）。
    */
+  const sameDay = rangeFrom > 0 && new Date(rangeFrom).toDateString() === new Date(rangeTo).toDateString()
   const rangeText =
     rangeFrom > 0 && rangeTo > rangeFrom
-      ? `${stamp(rangeFrom)} → ${stamp(rangeTo)}`
+      ? sameDay
+        ? `${stamp(rangeFrom)} → ${clock(rangeTo)}`
+        : `${stamp(rangeFrom)} → ${stamp(rangeTo)}`
       : t('douyin-link.page.kpiRecent', { window: windowLabel(t, props.minutes) })
   const totals = summary?.totals
   /**
@@ -231,9 +234,10 @@ export function OverviewPanel(props: {
                 <span className="text-[10px] opacity-50">
                   {t('douyin-link.page.rangeSpan', { duration: duration((rangeTo || props.bounds.last) - (rangeFrom || props.bounds.first)) })}
                 </span>
+                {/* 重置 = 「这一天全部」（时间范围不跨天，所以回到的不是「最近 N 分钟」而是整段这一天） */}
                 {props.range ? (
                   <Button size="small" type="text" onClick={() => props.onRange(null)}>
-                    {t('douyin-link.page.rangeLatest', { window: windowLabel(t, props.minutes) })}
+                    {t('douyin-link.page.rangeWholeDay')}
                   </Button>
                 ) : null}
               </div>
