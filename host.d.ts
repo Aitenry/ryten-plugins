@@ -114,6 +114,21 @@ declare module '@host/main/plugins/tool-contract' {
   }
 }
 
+declare module '@host/main/plugins/app-hooks' {
+  /** 应用级生命周期钩子（多值贡献点：插件 `ctx.contribute(KEY, hook)`，随 dispose 摘除） */
+  export interface AppHook {
+    run: (reason?: string, exitCode?: number) => void | Promise<void>
+    /** 只用于日志 */
+    label: string
+  }
+  /** 退出前：core 的 before-quit 清理阶段（收掉隐藏窗口、后台拉流一类的资源） */
+  export const APP_BEFORE_QUIT: string
+  /** 加载页：应用初始化完成后、主窗口交接前的预取时机 */
+  export const APP_PRELOAD: string
+  /** 渲染进程异常退出（崩溃/OOM）时落诊断快照的时机 */
+  export const APP_RENDERER_MEMORY_DUMP: string
+}
+
 declare module '@host/renderer/i18n' {
   /** 宿主 i18n 的 react 绑定 */
   export function useTranslation(): {

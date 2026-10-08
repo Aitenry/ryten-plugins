@@ -1,0 +1,1256 @@
+import { BrowserWindow } from 'electron'
+import logger from 'electron-log'
+import { safeSend } from '@host/main/safe-send'
+import {
+  QUALITY_KEYS,
+  parseWebRid,
+  type AnalyzerSnapshot,
+  type AudioMessage,
+  type DanmakuItem,
+  type DanmakuStatus,
+  type DbStats,
+  type FailureInfo,
+  type LiveRoomInfo,
+  type LiveSettings,
+  type MessageBatch,
+  type MessagePage,
+  type MessageQuery,
+  type MonitorPhase,
+  type MonitorSession,
+  type QualityKey,
+  type RoomCompareRow,
+  type RoomRuntime,
+  type RoomSummary,
+  type RoomTick,
+  type UserInfo,
+  type UserProfile,
+  type UserRankRow,
+  type UserBatch
+} from '../../shared/types'
+import * as store from '../db/mapper'
+import type { MessageRow } from '../db/mapper'
+import { AudioPump } from '../audio/pump'
+import { DanmakuCollector } from '../douyin/danmaku'
+import { ResolveFailure, resolveLiveRoom } from '../douyin/room'
+import { giftCatalog } from '../gift/catalog'
+import { avatarCache } from '../avatar'
+import { RoomRecorder, minuteOf } from './recorder'
+import { since, withTimeout } from '../util/deadline'
+import { isGuardedWindow } from '../window-guard'
+
+/**
+ * 分析中枢：**所有网络、窗口与数据都在这里**（渲染层只是视图）。
+ *
+ * 这一版与上一版的根本区别：不再有「全局唯一的那一个直播间」，而是
+ * **一张房间清单 + 每房间一个采集器**：
+ *
+ * | 能力 | 落点 |
+ * |------|------|
+ * | 同时监控多个房间 | 每个房间一个隐藏窗口 + 一个 `DanmakuCollector`（各自独立会话分区） |
+ * | 音频只跟「最新选中的房间」 | 全局最多一个 `AudioPump`，切房间时先停旧泵再起新泵 |
+ * | 历史与分析数据 | 全部落数据库（`main/db/mapper.ts`），中枢只维护「本场」的内存数字 |
+ * | 打开应用不该自己连上直播间 | 装载时**只读房间清单**，不解析、不建窗口、不出声 |
+ *
+ * 数据流（改代码前先认这一张图）：
+ *   采集器 → recorder（本场计数 + 最近弹幕 + 三类增量）→ 事件推界面（节流）
+ *                                          ↘ 每 2 秒 flush：消息流水 / 分钟桶 / 用户统计 → 数据库
+ */
+
+/** 主进程 → 渲染层：房间列表（相位、计数、库里累计）变了 */
+export const ROOMS_EVENT = 'plugin:douyin-link:rooms'
+/** 主进程 → 渲染层：某个房间来了新消息（一批） */
+export const MESSAGES_EVENT = 'plugin:douyin-link:messages'
+/** 主进程 → 渲染层：音频消息（只会是正在响的那个房间） */
+export const AUDIO_EVENT = 'plugin:douyin-link:audio'
+/** 主进程 → 渲染层：某个房间的用户档案有更新 */
+export const USERS_EVENT = 'plugin:douyin-link:users'
+/**
+ * 主进程 → 渲染层：本场计数的**实时心跳**（一秒一跳，只带几个数字）。
+ *
+ * 为什么不复用 ROOMS 事件：房间列表节流到 2 秒、还带着库里的累计量；
+ * 界面上「本场：弹幕 12 · 礼物 3 次 520 抖币」这条统计行要跟手，
+ * 所以单开一条只带数字的通道，页面原地合并即可（不重拉快照）。
+ */
+export const TICKS_EVENT = 'plugin:douyin-link:ticks'
+
+/** 每个房间一个会话分区（媒体拦截与 Cookie 都按房间隔离；别共用一个分区） */
+const PARTITION_PREFIX = 'persist:douyin-link-room-'
+/** 一个房间在内存里最多留多少条最近弹幕 */
+const RECENT_CAP = 400
+/** flush 间隔与「房间列表」推送节流 */
+const FLUSH_INTERVAL_MS = 2000
+const ROOMS_PUSH_THROTTLE_MS = 1000
+const USERS_PUSH_THROTTLE_MS = 1500
+/** 库里累计量的缓存时长（房间列表每秒推一次，不必每次都去 count(*)） */
+const STORE_CACHE_MS = 5000
+const DB_STATS_CACHE_MS = 15000
+/** 推给界面的合批间隔（见 schedulePush）：太快淹掉渲染层，太慢界面不跟手 */
+const PUSH_INTERVAL_MS = 250
+/** 一个房间一批最多推多少条（超了丢老的：界面已经跟不上了，硬塞只会更卡） */
+const MESSAGES_BUFFER_CAP = 600
+/** 解析与「采集器启动」的死线：绝不许把一次点击变成永久转圈 */
+const RESOLVE_DEADLINE_MS = 20000
+const DANMAKU_START_DEADLINE_MS = 15000
+/** 掉线后自动重试的间隔与上限（监控是长期的，中断要自己爬起来） */
+const RETRY_DELAY_MS = 25000
+const RETRY_LIMIT = 12
+/** 保留期清理的节流 */
+const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+export const DEFAULT_SETTINGS: LiveSettings = {
+  // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
+  quality: 'SD2',
+  saveData: true,
+  audioOnConnect: true,
+  volume: 0.8,
+  maxItems: 200,
+  kinds: ['chat', 'gift', 'member', 'like', 'social', 'stats', 'control'],
+  autoScroll: true,
+  // 同时监控 3 个房间（每个房间一个隐藏窗口，约 200MB 级内存，别贪）
+  monitorConcurrency: 3,
+  // 默认**开**：开关开着 = 就在监控（2026-10 用户实测反馈：开关显示开着、实际没在跑，
+  // 还得点两次开关才动）。关掉它则「打开应用只恢复清单」，此时启动会把监控勾选一并清掉，
+  // 免得开关撒谎（见 init()）。
+  resumeOnStart: true,
+  retentionDays: 7
+}
+
+const idleDanmaku = (): DanmakuStatus => ({ phase: 'off', failure: null, since: 0, received: 0 })
+
+/** 一个房间的全部运行态（内存部分；库里那部分按需查） */
+interface RoomState {
+  webRid: string
+  /** 解析用的目标（链接形式，交给 resolveLiveRoom） */
+  target: string
+  info: LiveRoomInfo | null
+  title: string
+  anchor: string
+  cover: string
+  onlineText: string
+  status: 'live' | 'ended' | 'unknown'
+  note: string
+  /** 期望监控（用户勾的） */
+  monitor: boolean
+  phase: MonitorPhase
+  failure: FailureInfo | null
+  danmaku: DanmakuStatus
+  qualities: QualityKey[]
+  quality: QualityKey | null
+  streams: Partial<Record<QualityKey, string>>
+  /** 当前音频泵在用的地址（重连会换签名；界面看到的仍是 streamUrl 的语义） */
+  sourceUrl: string
+  recorder: RoomRecorder
+  collector: DanmakuCollector | null
+  /**
+   * 启动令牌（0 = 没有启动在进行中）。**防重入的关键**。
+   *
+   * 为什么必须有：`startMonitor()` 要 `await` 解析直播间（约 1 秒）之后才把 `collector`
+   * 赋上，而 `reconcile()` 只看 `collector`——这 1 秒里任何一次 reconcile（切房间、点开关、
+   * 刷新、设置生效）都会给**同一个房间**再起一个隐藏窗口与采集器，两边把同一批弹幕各推
+   * 一次，界面上每条弹幕就出现两遍。真机日志为证（同一房间、相隔 700ms）：
+   * `03:56:35.611 开始监控 646268856760` / `03:56:36.303 开始监控 646268856760`。
+   */
+  startToken: number
+  sessionId: number
+  attempts: number
+  addedAt: number
+  lastActiveAt: number
+  lastSeenAt: number
+}
+
+export class AnalyzerHub {
+  private states = new Map<string, RoomState>()
+  private settings: LiveSettings = { ...DEFAULT_SETTINGS }
+  private activeRoom = ''
+  private audioRoom = ''
+  private pump: AudioPump | null = null
+  private audioSeq = 0
+  private flushTimer: ReturnType<typeof setInterval> | null = null
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private roomsDirty = false
+  private roomsPushedAt = 0
+  /** 启动令牌自增（见 RoomState.startToken） */
+  private startSeq = 0
+  /** 攒着还没推给界面的弹幕与心跳（见 schedulePush：逐帧广播会把界面和主进程一起淹掉） */
+  private pendingMessages = new Map<string, DanmakuItem[]>()
+  private pendingTicks = new Map<string, RoomTick>()
+  private pushTimer: ReturnType<typeof setTimeout> | null = null
+  private usersPushAt = 0
+  private pendingUsers: UserBatch[] = []
+  private storeCache = { at: 0, data: new Map<string, store.RoomStore>() }
+  private dbCache = { at: 0, data: null as DbStats | null }
+  private started = false
+
+  /* ------------------------------------------------------------ 生命周期 */
+
+  /** 装载：把库里的房间清单读进内存，按保留期清一次旧数据。**不自动连接** */
+  async init(settings: Partial<LiveSettings>): Promise<void> {
+    this.settings = { ...DEFAULT_SETTINGS, ...settings }
+    const rooms = await store.listRooms()
+    for (const room of rooms) {
+      this.states.set(room.webRid, this.createState(room))
+    }
+    logger.info(
+      `[douyin-link] 分析中枢已就绪：库里 ${rooms.length} 个直播间（监控中 ${rooms.filter((room) => room.monitor).length} 个）` +
+        `、并发上限 ${this.settings.monitorConcurrency}、保留 ${this.settings.retentionDays} 天`
+    )
+    this.startTimers()
+    void giftCatalog.ensure()
+    void this.cleanup()
+    if (this.settings.resumeOnStart) {
+      // **开关开着 = 就在监控**：库里勾着监控的房间直接接着跑（用户 2026-10 明确要的行为）
+      const wanted = [...this.states.values()].filter((state) => state.monitor).length
+      if (wanted > 0) logger.info(`[douyin-link] 打开应用接着监控 ${wanted} 个房间（可在设置里关掉）`)
+      this.reconcile()
+    } else {
+      // 不接着监控：那勾选也得跟着归零——**开关不许撒谎**。
+      // 旧版这里只 emitRooms，于是「显示开着却没人跑」，用户得点两次开关才动。
+      let cleared = 0
+      for (const state of this.states.values()) {
+        if (!state.monitor) continue
+        state.monitor = false
+        cleared += 1
+        void store.setRoomMonitor(state.webRid, false)
+      }
+      if (cleared > 0) {
+        logger.info(`[douyin-link] 打开应用不接着监控：已清掉 ${cleared} 个房间的监控勾选（开关如实显示为关）`)
+      }
+      this.emitRooms(true)
+    }
+  }
+
+  /** 插件停用/卸载：窗口、泵与定时器全收干净（不留后台窗口） */
+  dispose(): void {
+    for (const state of this.states.values()) this.stopState(state, 'pluginDisabled')
+    this.stopAudio()
+    if (this.flushTimer) clearInterval(this.flushTimer)
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    if (this.pushTimer) clearTimeout(this.pushTimer)
+    this.pushTimer = null
+    this.pendingMessages.clear()
+    this.pendingTicks.clear()
+    for (const timer of this.retryTimers.values()) clearTimeout(timer)
+    this.retryTimers.clear()
+    this.flushTimer = null
+    this.cleanupTimer = null
+    this.started = false
+    avatarCache.dispose()
+    logger.info('[douyin-link] 分析中枢已停止（采集窗口与音频泵都收掉了）')
+  }
+
+  /**
+   * 宿主主窗口没了（用户关掉窗口 / 应用正在退出）：把**所有带窗口与带后台流的东西**收掉，
+   * 但**保留**房间清单、设置与定时器（宿主还有可能在同一个进程里重建窗口，收得太狠会半死）。
+   *
+   * 为什么必须收（2026-10-08 用户实测「关掉应用再打开，看到的是抖音直播间画面」）：
+   * 隐藏采集窗口只要还活着，宿主的 `window-all-closed → app.quit()` 就永远不触发
+   * （用户以为关掉了，进程其实还在后台拉直播间页面）；而再次启动应用时，宿主的
+   * second-instance 处理器会把「第一个活着的窗口」`show()` 出来——主窗口已没了的时候，
+   * 活着的只剩我们的采集窗口。收掉它，退出流程才能走到最后一刻。
+   * 完整分析见 `./window-guard.ts`。
+   */
+  suspend(reason: string): void {
+    let collected = 0
+    for (const state of this.states.values()) {
+      if (state.collector || state.sessionId) collected += 1
+      this.stopState(state, reason)
+    }
+    for (const timer of this.retryTimers.values()) clearTimeout(timer)
+    this.retryTimers.clear()
+    this.stopAudio()
+    logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 个采集窗口与音频泵，房间清单与设置保持不变`)
+    this.emitRooms(true)
+  }
+
+  getSettings(): LiveSettings {
+    return { ...this.settings }
+  }
+
+  /** 改设置（ipc 负责落盘；会影响采集器的那部分走 applySettingsEffects） */
+  updateSettings(patch: Partial<LiveSettings>): LiveSettings {
+    const next: LiveSettings = { ...this.settings }
+    if (patch.quality && (QUALITY_KEYS as string[]).includes(patch.quality)) next.quality = patch.quality
+    if (typeof patch.saveData === 'boolean') next.saveData = patch.saveData
+    if (typeof patch.audioOnConnect === 'boolean') next.audioOnConnect = patch.audioOnConnect
+    if (typeof patch.volume === 'number' && Number.isFinite(patch.volume)) {
+      next.volume = Math.min(1, Math.max(0, patch.volume))
+    }
+    if (typeof patch.maxItems === 'number' && Number.isFinite(patch.maxItems)) {
+      next.maxItems = Math.min(1000, Math.max(50, Math.round(patch.maxItems)))
+    }
+    if (Array.isArray(patch.kinds)) next.kinds = patch.kinds
+    if (typeof patch.autoScroll === 'boolean') next.autoScroll = patch.autoScroll
+    if (typeof patch.monitorConcurrency === 'number' && Number.isFinite(patch.monitorConcurrency)) {
+      next.monitorConcurrency = Math.min(8, Math.max(1, Math.round(patch.monitorConcurrency)))
+    }
+    if (typeof patch.resumeOnStart === 'boolean') next.resumeOnStart = patch.resumeOnStart
+    if (typeof patch.retentionDays === 'number' && Number.isFinite(patch.retentionDays)) {
+      next.retentionDays = Math.min(365, Math.max(0, Math.round(patch.retentionDays)))
+    }
+    this.settings = next
+    for (const state of this.states.values()) state.recorder.setCap(next.maxItems)
+    return this.getSettings()
+  }
+
+  /** 设置里「影响正在跑的采集器/音频泵」的那部分变化（ipc 落盘后调用） */
+  async applySettingsEffects(previous: LiveSettings): Promise<void> {
+    if (previous.saveData !== this.settings.saveData) {
+      for (const state of this.states.values()) {
+        if (!state.collector) continue
+        logger.info(`[douyin-link] 省流量模式切换，重启 ${state.webRid} 的弹幕采集窗口`)
+        try {
+          await state.collector.restart(state.webRid, { saveData: this.settings.saveData })
+        } catch (error) {
+          logger.warn('[douyin-link] 重启采集窗口失败:', describe(error))
+        }
+      }
+    }
+    if (previous.quality !== this.settings.quality && this.pump && this.audioRoom) {
+      logger.info(`[douyin-link] 档位切到 ${this.settings.quality}，重启 ${this.audioRoom} 的音频泵`)
+      const state = this.states.get(this.audioRoom)
+      if (state) {
+        this.restartAudio(state)
+        this.emitRooms(true)
+      }
+    }
+    if (previous.monitorConcurrency !== this.settings.monitorConcurrency) this.reconcile()
+  }
+
+  /* --------------------------------------------------------------- 快照 */
+
+  async snapshot(): Promise<AnalyzerSnapshot> {
+    const rooms = await this.buildRooms()
+    const state = this.activeRoom ? this.states.get(this.activeRoom) : undefined
+    return {
+      rooms,
+      activeRoom: this.activeRoom,
+      audioRoom: this.audioRoom,
+      settings: this.getSettings(),
+      recent: state ? state.recorder.recent.slice(-this.settings.maxItems).reverse() : [],
+      db: await this.databaseStats(),
+      updatedAt: Date.now()
+    }
+  }
+
+  private async buildRooms(): Promise<RoomRuntime[]> {
+    const stores = await this.roomStores()
+    const list = [...this.states.values()]
+    list.sort((a, b) => {
+      // 分析中的房间永远在最上（用户刚点的那个），其余按最近活跃
+      if (a.webRid === this.activeRoom) return -1
+      if (b.webRid === this.activeRoom) return 1
+      return b.lastActiveAt - a.lastActiveAt
+    })
+    return list.map((state) => {
+      const stored = stores.get(state.webRid) ?? { messages: 0, users: 0, diamonds: 0, sessions: 0 }
+      return {
+        webRid: state.webRid,
+        title: state.info?.title || state.title,
+        anchor: state.info?.anchor || state.anchor,
+        cover: state.info?.cover || state.cover,
+        onlineText: state.info?.onlineText || state.onlineText,
+        status: state.status,
+        note: state.note,
+        monitor: state.monitor,
+        phase: state.phase,
+        failure: state.failure,
+        danmaku: { ...state.danmaku },
+        quality: state.quality,
+        qualities: [...state.qualities],
+        audio: this.audioRoom === state.webRid,
+        sessionId: state.sessionId,
+        counters: { ...state.recorder.counters },
+        received: state.recorder.received,
+        rate: state.recorder.rate,
+        sessionUsers: state.recorder.users,
+        stored: { ...stored },
+        addedAt: state.addedAt,
+        lastActiveAt: state.lastActiveAt,
+        lastSeenAt: state.lastSeenAt
+      } satisfies RoomRuntime
+    })
+  }
+
+  private async roomStores(): Promise<Map<string, store.RoomStore>> {
+    const now = Date.now()
+    if (now - this.storeCache.at < STORE_CACHE_MS) return this.storeCache.data
+    const data = await store.roomStores()
+    this.storeCache = { at: now, data }
+    return data
+  }
+
+  async databaseStats(): Promise<DbStats> {
+    const now = Date.now()
+    if (this.dbCache.data && now - this.dbCache.at < DB_STATS_CACHE_MS) return this.dbCache.data
+    const data = await store.dbStats()
+    this.dbCache = { at: now, data }
+    return data
+  }
+
+  /* ---------------------------------------------------------- 房间增删改 */
+
+  /** 加一个直播间（链接或房间号）：解析一次 → 落库 → 成为分析中的房间 */
+  async addRoom(input: string): Promise<{ ok: boolean; webRid?: string; failure?: FailureInfo }> {
+    const webRid = parseWebRid(input)
+    if (!webRid) return { ok: false, failure: { code: 'badInput', detail: String(input ?? '').slice(0, 60) } }
+    const startedAt = Date.now()
+    try {
+      const resolved = await withTimeout(resolveLiveRoom(`https://live.douyin.com/${webRid}`), RESOLVE_DEADLINE_MS, 'addRoom')
+      const existing = this.states.get(webRid)
+      const state = existing ?? this.createState({ webRid, addedAt: Date.now() })
+      this.applyResolved(state, resolved.room, resolved.flv)
+      if (!existing) this.states.set(webRid, state)
+      await store.upsertRoom(resolved.room)
+      await store.touchRoom(webRid, { active: true, seen: true })
+      state.lastActiveAt = Date.now()
+      logger.info(
+        `[douyin-link] 已加入直播间 ${webRid}《${resolved.room.title}》主播=${resolved.room.anchor} ` +
+          `状态=${resolved.room.status}（${since(startedAt)}）`
+      )
+      this.activeRoom = webRid
+      this.emitRooms(true)
+      return { ok: true, webRid }
+    } catch (error) {
+      const failure: FailureInfo =
+        error instanceof ResolveFailure
+          ? { code: error.code, detail: error.detail || undefined }
+          : { code: 'resolveFailed', detail: describe(error) }
+      logger.warn('[douyin-link] 加入直播间失败:', failure.code, failure.detail ?? '')
+      return { ok: false, failure }
+    }
+  }
+
+  /** 移除一个房间（`purge` = 连它的历史数据一起删） */
+  async removeRoom(webRid: string, purge = true): Promise<boolean> {
+    const state = this.states.get(webRid)
+    if (!state) return false
+    this.stopState(state, 'removed')
+    if (this.audioRoom === webRid) this.stopAudio()
+    this.states.delete(webRid)
+    if (this.activeRoom === webRid) this.activeRoom = ''
+    if (purge) await store.forgetRoom(webRid)
+    this.storeCache.at = 0
+    this.dbCache.at = 0
+    this.emitRooms(true)
+    return true
+  }
+
+  /** 勾上/取消监控（queued 与并发上限都在 reconcile 里处理） */
+  async setMonitor(webRid: string, on: boolean): Promise<boolean> {
+    const state = this.states.get(webRid)
+    if (!state) return false
+    state.monitor = on
+    await store.setRoomMonitor(webRid, on)
+    if (on) {
+      await store.touchRoom(webRid, { active: true })
+      state.lastActiveAt = Date.now()
+      // 监控谁就把分析焦点切到谁：用户点「开始监控」之后想看的就是它
+      this.activeRoom = webRid
+    }
+    this.reconcile()
+    return true
+  }
+
+  /** 全部开/关（一键） */
+  async monitorAll(on: boolean): Promise<boolean> {
+    for (const state of this.states.values()) {
+      state.monitor = on
+      await store.setRoomMonitor(state.webRid, on)
+    }
+    this.reconcile()
+    return true
+  }
+
+  /** 选中某个房间做分析（音频跟着它走；这就是「音频只能切到最新的那个」） */
+  async selectRoom(webRid: string): Promise<boolean> {
+    const state = this.states.get(webRid)
+    if (!state) return false
+    this.activeRoom = webRid
+    state.lastActiveAt = Date.now()
+    await store.touchRoom(webRid, { active: true })
+    if (this.audioRoom && this.audioRoom !== webRid) {
+      await this.startAudio(webRid)
+    }
+    this.emitRooms(true)
+    return true
+  }
+
+  /** 重新解析房间（标题/在线人数/开播状态/拉流地址） */
+  async refreshRoom(webRid: string): Promise<boolean> {
+    const state = this.states.get(webRid)
+    if (!state) return false
+    try {
+      const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'refreshRoom')
+      this.applyResolved(state, resolved.room, resolved.flv)
+      await store.upsertRoom(resolved.room)
+      state.failure = null
+      if (state.phase === 'ended' && resolved.room.status === 'live' && state.monitor) this.reconcile()
+      this.emitRooms(true)
+      return true
+    } catch (error) {
+      state.failure =
+        error instanceof ResolveFailure
+          ? { code: error.code, detail: error.detail || undefined }
+          : { code: 'resolveFailed', detail: describe(error) }
+      if (!state.collector) state.phase = 'error'
+      this.emitRooms(true)
+      return false
+    }
+  }
+
+  /** 备注（自由文本，存在库里） */
+  async noteRoom(webRid: string, note: string): Promise<boolean> {
+    const state = this.states.get(webRid)
+    if (!state) return false
+    state.note = note.slice(0, 200)
+    await store.setRoomNote(webRid, state.note)
+    this.emitRooms(true)
+    return true
+  }
+
+  /* --------------------------------------------------------------- 音频 */
+
+  /**
+   * 开始推音频（默认给「分析中的房间」）。
+   *
+   * **全局只响一个房间**：已经有别的房间在响就先把它停掉——这就是
+   * 「音频只能切到最新的那个，其他房间只监听」的落点。
+   */
+  async startAudio(webRid?: string): Promise<boolean> {
+    const target = String(webRid ?? this.activeRoom ?? '').trim()
+    const state = target ? this.states.get(target) : undefined
+    if (!state) {
+      this.emitAudio({ type: 'status', webRid: target, phase: 'error', failure: { code: 'notConnected' } })
+      return false
+    }
+    if (this.audioRoom && this.audioRoom !== state.webRid) {
+      logger.info(`[douyin-link] 音频切到 ${state.webRid}（${this.audioRoom} 转为只监听）`)
+      this.stopPump()
+    }
+    this.activeRoom = state.webRid
+    if (this.pump && this.audioRoom === state.webRid) return true
+
+    // 拉流地址可能还没有（房间从没解析过、或地址过期）：现解析一次
+    const quality = this.pickQuality(state)
+    let url = state.streams[quality] ?? ''
+    if (!url) {
+      try {
+        const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startAudio')
+        this.applyResolved(state, resolved.room, resolved.flv)
+        await store.upsertRoom(resolved.room)
+        url = state.streams[this.pickQuality(state)] ?? ''
+      } catch (error) {
+        state.failure = { code: 'resolveFailed', detail: describe(error) }
+        this.emitRooms(true)
+        this.emitAudio({
+          type: 'status',
+          webRid: state.webRid,
+          phase: 'error',
+          failure: { code: error instanceof ResolveFailure ? error.code : 'resolveFailed' }
+        })
+        return false
+      }
+    }
+    if (!url) {
+      this.emitAudio({ type: 'status', webRid: state.webRid, phase: 'error', failure: { code: 'noAudioStream' } })
+      return false
+    }
+    this.audioRoom = state.webRid
+    state.sourceUrl = url
+    state.quality = this.pickQuality(state)
+    this.startPump(state)
+    logger.info(`[douyin-link] 开始推送音频：${state.webRid}（档位 ${state.quality}）`)
+    this.emitRooms(true)
+    return true
+  }
+
+  stopAudio(): boolean {
+    if (this.audioRoom) logger.info(`[douyin-link] 停止推送音频：${this.audioRoom}`)
+    const room = this.audioRoom
+    this.stopPump()
+    if (room) this.emitAudio({ type: 'status', webRid: room, phase: 'idle', failure: null })
+    this.emitRooms(true)
+    return true
+  }
+
+  private restartAudio(state: RoomState): void {
+    this.stopPump()
+    this.audioRoom = state.webRid
+    this.startPump(state)
+  }
+
+  private startPump(state: RoomState): void {
+    const pump = new AudioPump({
+      onStatus: (phase, failure) => {
+        if (phase === 'error') {
+          logger.warn(`[douyin-link] 音频流失败（${state.webRid}）:`, failure?.code, failure?.detail ?? '')
+        }
+        this.emitAudio({ type: 'status', webRid: state.webRid, phase, failure })
+      },
+      onConfig: (config) => this.emitAudio({ type: 'config', webRid: state.webRid, config }),
+      onFrames: (frames) => {
+        this.audioSeq += 1
+        this.emitAudio({ type: 'frames', webRid: state.webRid, seq: this.audioSeq, frames })
+      }
+    })
+    this.pump = pump
+    pump.start(state.sourceUrl || null, async () => {
+      // 地址过期时重解析（签名带 t=）；**不改界面状态**，音频自己换地址即可
+      logger.info(`[douyin-link] 重新解析音频地址（${state.webRid}）`)
+      const resolved = await resolveLiveRoom(state.target)
+      this.applyResolved(state, resolved.room, resolved.flv)
+      const url = state.streams[this.pickQuality(state)] ?? ''
+      if (!url) throw new ResolveFailure('enterFailed', 'no flv url')
+      state.sourceUrl = url
+      return url
+    })
+  }
+
+  private stopPump(): void {
+    if (this.pump) {
+      this.pump.stop()
+      this.pump = null
+    }
+    const state = this.audioRoom ? this.states.get(this.audioRoom) : undefined
+    if (state) state.sourceUrl = ''
+    this.audioRoom = ''
+  }
+
+  private pickQuality(state: RoomState): QualityKey {
+    const preferred = this.settings.quality
+    if (state.streams[preferred]) return preferred
+    for (const key of QUALITY_KEYS) if (state.streams[key]) return key
+    return preferred
+  }
+
+  /* ------------------------------------------------------- 监控调度 */
+
+  /** 按「期望监控」与并发上限，把该跑的跑起来、该停的停掉、超出的排队 */
+  reconcile(): void {
+    const wanted = [...this.states.values()].filter((state) => state.monitor)
+    wanted.sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    const cap = this.settings.monitorConcurrency
+    const running = wanted.filter((state) => state.collector).length
+    let slots = Math.max(0, cap - running)
+
+    for (const state of wanted) {
+      if (state.collector) {
+        // 正在跑的：相位由采集器回调驱动，只在它还没上报过状态时给个「连接中」
+        if (state.phase === 'off' || state.phase === 'queued') state.phase = 'connecting'
+        continue
+      }
+      // 正在启动中的也算「已经有人管了」：少这一条，解析那 1 秒里的第二次 reconcile
+      // 就会给同一个房间起第二个采集器 → 每条弹幕推两次（见 RoomState.startToken）
+      if (state.startToken) continue
+      if (slots > 0) {
+        slots -= 1
+        void this.startMonitor(state)
+      } else {
+        state.phase = 'queued'
+        state.failure = null
+      }
+    }
+    for (const state of this.states.values()) {
+      if (!state.monitor && state.collector) this.stopState(state, 'stopped')
+      else if (!state.monitor && state.phase !== 'off') {
+        state.phase = 'off'
+        state.failure = null
+        state.danmaku = idleDanmaku()
+      }
+    }
+    this.emitRooms(true)
+  }
+
+  private async startMonitor(state: RoomState): Promise<void> {
+    if (state.collector || state.startToken || this.states.get(state.webRid) !== state) return
+    const token = (this.startSeq += 1)
+    state.startToken = token
+    /**
+     * 每个 `await` 之后都问一次「还能不能继续」：令牌没被换掉、房间还在清单里、
+     * 而且用户没把开关关掉。解析与开会话都可能要一两秒，这期间用户完全可能取消监控
+     * 或把房间删掉——那种情况下**绝不能**再把采集器装上去（否则关掉的房间会自己跑起来）。
+     */
+    const alive = (): boolean =>
+      state.startToken === token && state.monitor && this.states.get(state.webRid) === state
+    state.phase = 'resolving'
+    state.failure = null
+    this.emitRooms(true)
+    const startedAt = Date.now()
+    try {
+      const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startMonitor')
+      if (!alive()) return
+      this.applyResolved(state, resolved.room, resolved.flv)
+      await store.upsertRoom(resolved.room)
+      if (!alive()) return
+      await store.touchRoom(state.webRid, { active: true, seen: true })
+      if (!alive()) return
+      if (resolved.room.status === 'ended') {
+        state.phase = 'ended'
+        state.sessionId = 0
+        logger.info(`[douyin-link] ${state.webRid} 当前没在直播，暂停监控`)
+        this.emitRooms(true)
+        return
+      }
+      const sessionId = await store.openSession(state.webRid)
+      if (!alive()) {
+        // 会话已经开出来了但这次启动被取消了：关掉它，别在库里留一条空会话
+        void store.closeSession(sessionId, 0, 'aborted')
+        return
+      }
+      state.sessionId = sessionId
+      state.recorder.begin(sessionId, this.settings.maxItems)
+      state.danmaku = { phase: 'connecting', failure: null, since: Date.now(), received: 0 }
+      const collector = new DanmakuCollector(`${PARTITION_PREFIX}${state.webRid}`, {
+        onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
+        onStatus: (status) => this.handleDanmakuStatus(state, status.phase, status.failure)
+      })
+      state.collector = collector
+      state.phase = 'connecting'
+      this.emitRooms(true)
+      logger.info(`[douyin-link] 开始监控 ${state.webRid}《${state.title}》`)
+      await withTimeout(collector.start(state.webRid, { saveData: this.settings.saveData }), DANMAKU_START_DEADLINE_MS, 'danmaku.start')
+      logger.info(`[douyin-link] ${state.webRid} 弹幕窗口已开始加载（${since(startedAt)}）`)
+    } catch (error) {
+      if (!alive()) return
+      const failure: FailureInfo =
+        error instanceof ResolveFailure
+          ? { code: error.code, detail: error.detail || undefined }
+          : { code: 'windowFailed', detail: describe(error) }
+      state.phase = 'error'
+      state.failure = failure
+      logger.warn(`[douyin-link] 监控 ${state.webRid} 启动失败:`, failure.code, failure.detail ?? '')
+      this.scheduleRetry(state)
+      this.emitRooms(true)
+    } finally {
+      // 令牌一定要还回去：否则这个房间从此再也起不来（reconcile 会一直跳过它）
+      if (state.startToken === token) state.startToken = 0
+    }
+  }
+
+  private stopState(state: RoomState, reason: string): void {
+    // 让进行中的启动立刻失效（见 RoomState.startToken）：它会在下一个 await 处退出
+    state.startToken = 0
+    const timer = this.retryTimers.get(state.webRid)
+    if (timer) {
+      clearTimeout(timer)
+      this.retryTimers.delete(state.webRid)
+    }
+    if (state.collector) {
+      state.collector.stop()
+      state.collector = null
+      logger.info(`[douyin-link] 停止监控 ${state.webRid}（${reason}）`)
+    }
+    if (state.sessionId) {
+      const id = state.sessionId
+      const messages = state.recorder.received
+      state.sessionId = 0
+      void store.closeSession(id, messages, reason)
+    }
+    state.phase = 'off'
+    state.danmaku = idleDanmaku()
+    state.failure = null
+  }
+
+  /** 掉线自动重试（监控是长期的，中断要自己爬起来） */
+  private scheduleRetry(state: RoomState): void {
+    if (!state.monitor || this.retryTimers.has(state.webRid)) return
+    if (state.attempts >= RETRY_LIMIT) {
+      logger.warn(`[douyin-link] ${state.webRid} 重试 ${state.attempts} 次仍未成功，停止自动重试`)
+      return
+    }
+    state.attempts += 1
+    this.retryTimers.set(
+      state.webRid,
+      setTimeout(() => {
+        this.retryTimers.delete(state.webRid)
+        if (!state.monitor) return
+        if (this.states.get(state.webRid) !== state) return
+        state.collector?.stop()
+        state.collector = null
+        this.reconcile()
+      }, RETRY_DELAY_MS)
+    )
+  }
+
+  /* --------------------------------------------------------- 采集回调 */
+
+  private handleItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
+    if (items.length === 0 && users.length === 0) return
+    const touched = state.recorder.ingest(items, users, this.settings.maxItems)
+    if (touched.length > 0) this.queueUsers(state, touched)
+
+    if (items.length > 0) {
+      state.danmaku = {
+        ...state.danmaku,
+        phase: 'live',
+        failure: null,
+        received: state.danmaku.received + items.length
+      }
+      state.phase = 'live'
+      state.attempts = 0
+      // **攒着推，不逐帧推**：弹幕一秒可能几十帧，逐帧往界面广播（还顺手带一份心跳）
+      // 会把渲染层的 React 更新与主进程的 IPC 都排满——宿主自己的流式输出（助手回复）
+      // 就是被这么挤停的（用户实测：「监控一开，对话输出卡到一半不动」）。
+      const buffer = this.pendingMessages.get(state.webRid) ?? []
+      buffer.push(...items)
+      this.pendingMessages.set(
+        state.webRid,
+        buffer.length > MESSAGES_BUFFER_CAP ? buffer.slice(-MESSAGES_BUFFER_CAP) : buffer
+      )
+      this.pendingTicks.set(state.webRid, {
+        webRid: state.webRid,
+        counters: { ...state.recorder.counters },
+        received: state.recorder.received,
+        rate: state.recorder.rate,
+        sessionUsers: state.recorder.users
+      })
+      this.schedulePush()
+    }
+
+    if (roomEnded) {
+      state.status = 'ended'
+      state.info = state.info ? { ...state.info, status: 'ended' } : null
+      logger.info(`[douyin-link] ${state.webRid} 收到下播消息，停止监控`)
+      this.stopState(state, 'ended')
+      state.phase = 'ended'
+      state.monitor = false
+      void store.setRoomMonitor(state.webRid, false)
+    }
+    this.roomsDirty = true
+  }
+
+  private handleDanmakuStatus(state: RoomState, phase: DanmakuStatus['phase'], failure: FailureInfo | null): void {
+    const changed = phase !== state.danmaku.phase
+    const since = changed ? Date.now() : state.danmaku.since
+    state.danmaku = { ...state.danmaku, phase, failure, since }
+    if (phase === 'live') {
+      state.phase = 'live'
+      state.failure = null
+      state.attempts = 0
+    } else if (phase === 'error') {
+      state.phase = 'error'
+      state.failure = failure
+      this.scheduleRetry(state)
+    } else if (phase === 'retrying') {
+      state.phase = 'retrying'
+      state.failure = failure
+    } else if (phase === 'connecting' && state.phase !== 'live') {
+      state.phase = 'connecting'
+    }
+    if (changed) {
+      const detail = failure ? `（${failure.code}${failure.detail ? ': ' + failure.detail : ''}）` : ''
+      logger.info(`[douyin-link] ${state.webRid} 弹幕通道：${phase}${detail}`)
+    }
+    this.roomsDirty = true
+    this.pushRoomsThrottled()
+  }
+
+  private queueUsers(state: RoomState, touched: string[]): void {
+    const force = touched.length > 0 && Date.now() - this.usersPushAt >= USERS_PUSH_THROTTLE_MS
+    if (!force) return
+    const changed = state.recorder.takeTouched(120)
+    if (changed.length === 0) return
+    this.usersPushAt = Date.now()
+    this.pendingUsers.push({ webRid: state.webRid, users: changed })
+    for (const batch of this.pendingUsers) this.broadcast(USERS_EVENT, batch)
+    this.pendingUsers = []
+  }
+
+  /* --------------------------------------------------------- 定时任务 */
+
+  private startTimers(): void {
+    if (this.started) return
+    this.started = true
+    this.flushTimer = setInterval(() => void this.flush(), FLUSH_INTERVAL_MS)
+    this.cleanupTimer = setInterval(() => void this.cleanup(), CLEANUP_INTERVAL_MS)
+  }
+
+  /** 攒批落库：消息流水 / 分钟桶 / 用户统计（三类增量一次 flush 写完） */
+  private async flush(): Promise<void> {
+    for (const state of this.states.values()) {
+      const recorder = state.recorder
+      const messages = recorder.takeMessages()
+      const minutes = recorder.takeMinutes()
+      const users = recorder.takeUserDeltas()
+      if (messages.length === 0 && minutes.length === 0 && users.length === 0) continue
+      try {
+        await store.insertMessages(messages)
+        await store.bumpMinutes(minutes)
+        await store.upsertUserDeltas(users)
+        this.addFlushedDeltas(state, messages)
+      } catch (error) {
+        logger.warn(`[douyin-link] ${state.webRid} 落库失败（这批增量会丢）:`, describe(error))
+      }
+      // 每写完一个房间就让出事件循环一拍：宿主自己的 IPC 与流式输出（助手回复）要能插进来。
+      // PGlite 跑在宿主进程里，连着几个 await 不让步就会把别人的输出挤停。
+      await yieldToLoop()
+    }
+    this.pushRoomsThrottled(true)
+  }
+
+  /** 按保留期清旧数据（启动与每 6 小时一次） */
+  async cleanup(): Promise<number> {
+    const days = this.settings.retentionDays
+    if (days <= 0) return 0
+    try {
+      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+      const removed = await store.deleteMessagesBefore(cutoff)
+      await store.deleteMinutesBefore(minuteOf(cutoff))
+      if (removed > 0) {
+        logger.info(`[douyin-link] 保留期清理：删掉 ${removed} 条超过 ${days} 天的消息`)
+        this.storeCache.at = 0
+        this.dbCache.at = 0
+      }
+      return removed
+    } catch (error) {
+      logger.warn('[douyin-link] 保留期清理失败:', describe(error))
+      return 0
+    }
+  }
+
+  /**
+   * 落库之后**不能**把「库里累计量」缓存整份作废（旧版就是 `storeCache.at = 0`）。
+   *
+   * 后果：下一次房间列表推送（≤1 秒一次）会重跑三条**全表聚合**——
+   * messages `count(*)` + `sum(diamonds)`、users `count(*)`、sessions `count(*)`。
+   * 这些查询跑在宿主的 PGlite 上，房间一多就是每秒几轮全表扫描，宿主自己的写入与
+   * 助手流式输出会被卡住（用户实测：「监控一开，对话输出卡到一半不动」）。
+   *
+   * 现在只把刚写进去的增量加到缓存上；users / sessions 这种「不能简单相加」的量
+   * 交给 STORE_CACHE_MS 的 TTL 去刷（累计量晚几秒看到没关系，界面上的「本场」数字走心跳）。
+   */
+  private addFlushedDeltas(state: RoomState, rows: MessageRow[]): void {
+    const cached = this.storeCache.data.get(state.webRid)
+    if (!cached || rows.length === 0) return
+    cached.messages += rows.length
+    for (const row of rows) cached.diamonds += row.diamonds
+  }
+
+  private pushRoomsThrottled(force = false): void {
+    if (!force && Date.now() - this.roomsPushedAt < ROOMS_PUSH_THROTTLE_MS) {
+      this.roomsDirty = true
+      return
+    }
+    this.emitRooms(force)
+  }
+
+  /** 推房间列表（异步，因为要带库里的累计量；节流由调用方保证） */
+  private emitRooms(force = false): void {
+    this.roomsPushedAt = Date.now()
+    this.roomsDirty = false
+    void this.buildRooms()
+      .then((rooms) => {
+        this.broadcast(ROOMS_EVENT, { rooms, activeRoom: this.activeRoom, audioRoom: this.audioRoom })
+      })
+      .catch((error) => logger.warn('[douyin-link] 推房间列表失败:', describe(error)))
+  }
+
+  private emitAudio(message: AudioMessage): void {
+    this.broadcast(AUDIO_EVENT, message)
+  }
+
+  /**
+   * 事件只发给**界面窗口**：跳过我们自己的隐藏采集窗口。
+   *
+   * 采集窗口加载的是抖音页面，里面没有插件界面——给它发事件纯属白花主进程的时间
+   * （每个监控的房间一个窗口，多房间时更明显）。
+   */
+  private broadcast(channel: string, payload: unknown): void {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed() || isGuardedWindow(win)) continue
+      safeSend(win.webContents, channel, payload)
+    }
+  }
+
+  /** 安排一次合批推送（已经安排过就不重复安排） */
+  private schedulePush(): void {
+    if (this.pushTimer) return
+    this.pushTimer = setTimeout(() => this.flushPush(), PUSH_INTERVAL_MS)
+  }
+
+  /** 把攒下的弹幕与心跳一次推给界面 */
+  private flushPush(): void {
+    this.pushTimer = null
+    for (const [webRid, items] of this.pendingMessages) {
+      if (items.length === 0) continue
+      const batch: MessageBatch = { webRid, items }
+      this.broadcast(MESSAGES_EVENT, batch)
+    }
+    this.pendingMessages.clear()
+    for (const tick of this.pendingTicks.values()) this.broadcast(TICKS_EVENT, tick)
+    this.pendingTicks.clear()
+  }
+
+  /* --------------------------------------------------------- 分析查询 */
+
+  /** 概览：窗口内的 KPI + 分钟序列（补齐缺口）+ 类型分布 + 两个榜单 */
+  async summary(webRid: string, windowMinutes = 60): Promise<RoomSummary> {
+    const minutes = Math.min(Math.max(5, Math.round(windowMinutes)), 1440)
+    const toMs = Date.now()
+    const fromMs = toMs - minutes * 60000
+    const { totals, messages } = await store.windowTotals(webRid, fromMs, toMs)
+    const breakdown = await store.kindBreakdown(webRid, fromMs, toMs)
+    const rows = await store.minuteSeries(webRid, minuteOf(fromMs), minuteOf(toMs))
+    const buckets = new Map(rows.map((row) => [row.minute, row]))
+    const series: RoomSummary['series'] = []
+    for (let minute = minuteOf(fromMs); minute <= minuteOf(toMs); minute += 1) {
+      const row = buckets.get(minute)
+      series.push({
+        minute: minute * 60000,
+        chat: row?.chat ?? 0,
+        gift: row?.gift ?? 0,
+        member: row?.member ?? 0,
+        like: row?.likes ?? 0,
+        social: row?.social ?? 0,
+        diamonds: row?.diamonds ?? 0
+      })
+    }
+    const [topChat, topGift] = await Promise.all([
+      store.listUsers(webRid, 'chat', '', 10),
+      store.listUsers(webRid, 'gift', '', 10)
+    ])
+    return {
+      webRid,
+      windowMinutes: minutes,
+      totals,
+      messages,
+      users: breakdown.users,
+      firstAt: breakdown.firstAt,
+      lastAt: breakdown.lastAt,
+      series,
+      kinds: breakdown.kinds,
+      topChat,
+      topGift
+    }
+  }
+
+  /** 多房间对比（窗口内的量 + 相位/音频状态） */
+  async compare(windowMinutes = 60): Promise<RoomCompareRow[]> {
+    const minutes = Math.min(Math.max(5, Math.round(windowMinutes)), 1440)
+    const toMs = Date.now()
+    const fromMs = toMs - minutes * 60000
+    const aggregates = await store.windowAggregates(fromMs, toMs)
+    const active = await store.activeMinutes(minuteOf(fromMs), minuteOf(toMs))
+    const stores = await this.roomStores()
+    const rows: RoomCompareRow[] = []
+    for (const state of this.states.values()) {
+      const base = aggregates.get(state.webRid)
+      const stored = stores.get(state.webRid)
+      const row: RoomCompareRow = base ?? {
+        webRid: state.webRid,
+        title: '',
+        anchor: '',
+        status: 'unknown',
+        phase: 'off',
+        audio: false,
+        activeMinutes: 0,
+        windowMinutes: minutes,
+        messages: 0,
+        chat: 0,
+        gift: 0,
+        diamonds: 0,
+        member: 0,
+        like: 0,
+        social: 0,
+        users: 0,
+        perMinute: 0,
+        totalMessages: 0
+      }
+      rows.push({
+        ...row,
+        title: state.info?.title || state.title,
+        anchor: state.info?.anchor || state.anchor,
+        status: state.status,
+        phase: state.phase,
+        audio: this.audioRoom === state.webRid,
+        activeMinutes: active.get(state.webRid) ?? 0,
+        windowMinutes: minutes,
+        perMinute: Math.round((row.messages / minutes) * 10) / 10,
+        totalMessages: stored?.messages ?? row.messages
+      })
+    }
+    rows.sort((a, b) => b.messages - a.messages)
+    return rows
+  }
+
+  /** 消息检索（走数据库；跨房间也行） */
+  async queryMessages(query: MessageQuery): Promise<MessagePage> {
+    return store.queryMessages(query)
+  }
+
+  async listUsers(webRid: string, sort: store.UserSort, keyword: string, limit: number): Promise<UserRankRow[]> {
+    return store.listUsers(webRid, sort, keyword, limit)
+  }
+
+  /** 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并） */
+  async userProfile(webRid: string, userId: string): Promise<UserProfile | null> {
+    if (!userId) return null
+    const row = await store.getUser(webRid, userId)
+    const session = webRid ? this.states.get(webRid)?.recorder.profile(userId) : undefined
+    const source = row
+    if (!source && !session) return null
+    if (!source && session) return session
+    const base = source!
+    return {
+      id: base.userId,
+      displayId: base.displayId,
+      // 静态字段：库里的是跨会话最全的一份，本场解出来的补空（且优先用本场的头像地址，
+      // 它可能是这个房间刚换过的）
+      nickname: base.nickname || session?.nickname || '',
+      gender: base.gender || session?.gender || 0,
+      signature: base.signature || session?.signature || '',
+      city: base.city || session?.city || '',
+      avatar: base.avatar || session?.avatar || '',
+      following: base.following || session?.following || 0,
+      follower: base.follower || session?.follower || 0,
+      honorLevel: base.honorLevel || session?.honorLevel || 0,
+      fansClubLevel: base.fansClubLevel || session?.fansClubLevel || 0,
+      badges: base.badges.length > 0 ? base.badges : (session?.badges ?? []),
+      secUid: base.secUid || session?.secUid || '',
+      // 时间是「库里最早 / 本场最近」：档案里两个都要（跨度才有意义）
+      firstSeen: base.firstSeen || session?.firstSeen || 0,
+      lastSeen: Math.max(base.lastSeen, session?.lastSeen ?? 0),
+      stats: base.stats
+    }
+  }
+
+  /** 头像 → data URL（渲染层 CSP 不许外链图片，所以这一步在主进程做） */
+  async userAvatar(webRid: string, userId: string): Promise<string> {
+    if (!userId) return ''
+    const session = webRid ? this.states.get(webRid)?.recorder.profile(userId) : undefined
+    const url = session?.avatar || (await store.getUser(webRid, userId))?.avatar || ''
+    return url ? avatarCache.dataUrl(url) : ''
+  }
+
+  async clearUsers(webRid = ''): Promise<void> {
+    await store.clearUsers(webRid)
+    this.storeCache.at = 0
+    this.dbCache.at = 0
+    this.emitRooms(true)
+  }
+
+  async clearMessages(webRid = ''): Promise<number> {
+    const removed = await store.clearMessages(webRid)
+    this.storeCache.at = 0
+    this.dbCache.at = 0
+    this.emitRooms(true)
+    return removed
+  }
+
+  clearRecent(webRid: string): boolean {
+    const state = this.states.get(webRid)
+    if (state) state.recorder.clearRecent()
+    this.emitRooms(true)
+    return true
+  }
+
+  recentFor(webRid: string, limit = 100): DanmakuItem[] {
+    const state = this.states.get(webRid)
+    if (!state) return []
+    const size = Math.min(Math.max(1, Math.round(limit)), RECENT_CAP * 3)
+    return state.recorder.recent.slice(-size).reverse()
+  }
+
+  async sessions(webRid: string, limit = 20): Promise<MonitorSession[]> {
+    return store.listSessions(webRid, limit)
+  }
+
+  /* ----------------------------------------------------------- 内部工具 */
+
+  private createState(room: {
+    webRid: string
+    roomId?: string
+    title?: string
+    anchor?: string
+    cover?: string
+    onlineText?: string
+    status?: 'live' | 'ended' | 'unknown'
+    note?: string
+    monitor?: boolean
+    addedAt?: number
+    lastActiveAt?: number
+    lastSeenAt?: number
+  }): RoomState {
+    return {
+      webRid: room.webRid,
+      target: `https://live.douyin.com/${room.webRid}`,
+      info: null,
+      title: room.title ?? '',
+      anchor: room.anchor ?? '',
+      cover: room.cover ?? '',
+      onlineText: room.onlineText ?? '',
+      status: room.status ?? 'unknown',
+      note: room.note ?? '',
+      monitor: room.monitor ?? false,
+      phase: 'off',
+      failure: null,
+      danmaku: idleDanmaku(),
+      qualities: [],
+      quality: null,
+      streams: {},
+      sourceUrl: '',
+      recorder: new RoomRecorder(room.webRid),
+      collector: null,
+      startToken: 0,
+      sessionId: 0,
+      attempts: 0,
+      addedAt: room.addedAt ?? Date.now(),
+      lastActiveAt: room.lastActiveAt ?? 0,
+      lastSeenAt: room.lastSeenAt ?? 0
+    }
+  }
+
+  private applyResolved(state: RoomState, info: LiveRoomInfo, streams: Partial<Record<QualityKey, string>>): void {
+    state.info = info
+    state.title = info.title
+    state.anchor = info.anchor
+    state.cover = info.cover
+    state.onlineText = info.onlineText
+    state.status = info.status
+    state.streams = streams
+    state.qualities = QUALITY_KEYS.filter((key) => Boolean(streams[key]))
+    if (!state.quality || !streams[state.quality]) state.quality = this.pickQuality(state)
+  }
+}
+
+/** 单例：install 时装，停用时 dispose（宿主 LIFO 回滚） */
+export const analyzerHub = new AnalyzerHub()
+
+/** 本插件自带的死线提示文案里用到的失败代码表（新增代码记得补词条） */
+export const FAILURE_CODES = [
+  'noRoom',
+  'badInput',
+  'network',
+  'pageFailed',
+  'roomNotFound',
+  'enterFailed',
+  'resolveFailed',
+  'windowFailed',
+  'windowClosed',
+  'loadFailed',
+  'noSocket',
+  'silent',
+  'retryWithoutSaveData',
+  'reloadLimit',
+  'renderGone',
+  'notConnected',
+  'audioUnsupported',
+  'noAudioStream',
+  'streamEnded',
+  'streamFailed',
+  'fetchFailed',
+  'badStream',
+  'noAudio',
+  'httpError',
+  'decodeFailed',
+  'unsupported'
+]
+
+/** 让出事件循环一拍（PGlite 与宿主同进程，不让步就会把别人的流式输出挤停） */
+const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+function describe(error: unknown): string {
+  if (error instanceof Error) return error.message.slice(0, 160)
+  return String(error).slice(0, 160)
+}
