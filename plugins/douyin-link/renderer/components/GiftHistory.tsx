@@ -30,6 +30,13 @@ export function GiftHistoryModal(props: {
   name?: string
   webRid: string
   direction: 'sent' | 'received'
+  /**
+   * **与榜单同一段时间范围**（默认就是「今天这一场」）。
+   * 用户 2026-10-08：「点开显示礼物历史送内容，不能直接显示之前的内容，只能是当前的，
+   * 今天的历史礼物」——所以这里不给「全部历史」，只翻这一段；榜上写 ×2 / 1,299 抖币，
+   * 点开就正好是那两条。
+   */
+  range: { from: number; to: number } | null
   onClose: () => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
@@ -44,7 +51,7 @@ export function GiftHistoryModal(props: {
 
   useEffect(() => {
     setPage(0)
-  }, [props.userId, props.direction, props.webRid])
+  }, [props.userId, props.direction, props.webRid, props.range?.from, props.range?.to])
 
   useEffect(() => {
     if (!props.userId) {
@@ -55,7 +62,7 @@ export function GiftHistoryModal(props: {
     let alive = true
     setLoading(true)
     void api
-      .giftHistory(props.webRid, props.userId, props.direction, PAGE_SIZE, page * PAGE_SIZE)
+      .giftHistory(props.webRid, props.userId, props.direction, PAGE_SIZE, page * PAGE_SIZE, props.range)
       .then((result) => {
         if (!alive) return
         setRows(result.rows)
@@ -68,7 +75,7 @@ export function GiftHistoryModal(props: {
     return () => {
       alive = false
     }
-  }, [props.webRid, props.userId, props.direction, page, tick])
+  }, [props.webRid, props.userId, props.direction, props.range?.from, props.range?.to, page, tick])
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   // 数据变少（旧消息超了保留期）时把页码收回来，别停在空页上
@@ -108,6 +115,16 @@ export function GiftHistoryModal(props: {
               )}
               {' · '}
               {t('douyin-link.page.total', { count: formatNumber(total) })}
+              {/* 写清这一页翻的是哪一段（今天这一场 / 选中的那一段），免得以为是全部历史 */}
+              {props.range && props.range.to > props.range.from ? (
+                <span className="opacity-70">
+                  {' · '}
+                  {t('douyin-link.page.giftHistoryRange', {
+                    from: stamp(props.range.from),
+                    to: stamp(props.range.to)
+                  })}
+                </span>
+              ) : null}
             </span>
           </span>
           <Button

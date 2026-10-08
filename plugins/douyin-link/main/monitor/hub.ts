@@ -1525,19 +1525,26 @@ export class AnalyzerHub {
    * `direction`：`sent` = 这个人送出去的、`received` = 这个人收到的——两者都走消息流水
    * （`queryMessages` 的 `userId` / `toUserId` 过滤），所以看到的是**明细**：
    * 时间、礼物名、件数、抖币、对方是谁。分页与「共 N 条」由界面管。
+   *
+   * `range` **必须跟榜单一致**（用户 2026-10-08 追加：「点开显示礼物历史送内容，不能直接显示
+   * 之前的内容，只能是当前的，今天的历史礼物」）：榜单是按那天（或进度条选的那一段）算的，
+   * 明细就得是同一段——否则榜上写「×2 1,299 抖币」，点开却翻出一堆前几天的礼物，
+   * 数字对不上、而且用户要的是「今天这一场」。时间范围由调用方给（前端把同一段 range 传下来）。
    */
   async giftHistory(
     webRid: string,
     userId: string,
     direction: 'sent' | 'received',
     limit = 30,
-    offset = 0
+    offset = 0,
+    range?: { from: number; to: number }
   ): Promise<MessagePage> {
     if (!userId) return { rows: [], total: 0 }
     return store.queryMessages({
       webRid,
       kind: 'gift',
       ...(direction === 'received' ? { toUserId: userId } : { userId }),
+      ...(range && range.to > range.from ? { from: range.from, to: range.to } : {}),
       limit,
       offset
     })

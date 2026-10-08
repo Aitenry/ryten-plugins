@@ -136,19 +136,25 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:user-gifts': (webRid?: string, userId?: string) =>
       hub.userGifts(String(webRid ?? ''), String(userId ?? '')),
     // 礼物榜点一行：这个人的礼物历史（sent = 他送的 / received = 他收到的），明细分页
+    // `from`/`to` 是榜单当时那段范围（前端把同一段传下来）——明细必须与榜单同一段：今天就是今天
     'plugin:douyin-link:gift-history': (
       webRid?: string,
       userId?: string,
       direction?: string,
       limit?: number,
-      offset?: number
+      offset?: number,
+      from?: number,
+      to?: number
     ) =>
       hub.giftHistory(
         String(webRid ?? ''),
         String(userId ?? ''),
         direction === 'received' ? 'received' : 'sent',
         typeof limit === 'number' ? limit : 30,
-        typeof offset === 'number' ? offset : 0
+        typeof offset === 'number' ? offset : 0,
+        typeof from === 'number' && typeof to === 'number' && Number.isFinite(from) && Number.isFinite(to) && to > from
+          ? { from, to }
+          : undefined
       ),
     // 「在线观众」：麦上（聊天室）+ 接口给的房间成员 + 本场活跃，合并成一份列表
     'plugin:douyin-link:presence-list': (webRid?: string) => hub.presence(String(webRid ?? '')),

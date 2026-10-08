@@ -814,13 +814,14 @@ export default function Page(): React.JSX.Element {
         />
       ) : null}
 
-      {/* 礼物榜点开的历史（他送的 / 他收到的）：与用户档案弹窗是两个入口，互不干扰 */}
+      {/* 礼物榜点开的历史（他送的 / 他收到的）：与榜单同一段范围——今天就是今天，不翻旧账 */}
       {openGifts && activeRoom ? (
         <GiftHistoryModal
           webRid={activeRoom}
           userId={openGifts.userId}
           name={openGifts.name}
           direction={openGifts.direction}
+          range={effectiveRange}
           onClose={() => setOpenGifts(null)}
         />
       ) : null}

@@ -196,6 +196,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       giftHistoryTitle: 'Gift history',
       giftHistoryReceived: 'received',
       giftHistorySent: 'sent',
+      giftHistoryRange: 'range {{from}} -> {{to}}',
       giftHistoryEmpty: 'No gifts recorded yet',
       giftBoardEmpty: 'No gifts in this window yet',
       giftNameUnknown: '(gift name unknown)',
