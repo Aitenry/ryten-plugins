@@ -3,11 +3,9 @@ import { Button, InputNumber, Select, Switch, Typography } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import {
   DANMAKU_KINDS,
-  QUALITY_KEYS,
   type DanmakuKind,
   type DbStats,
-  type LiveSettings,
-  type QualityKey
+  type LiveSettings
 } from '../shared/types'
 import api from './api'
 
@@ -56,16 +54,6 @@ export default function Settings(): React.JSX.Element {
       </Typography.Paragraph>
 
       <div className="flex max-w-[640px] flex-col gap-4">
-        <Row label={t('douyin-link.settingsPage.qualityLabel')} hint={t('douyin-link.settingsPage.qualityHint')}>
-          <Select
-            size="small"
-            style={{ width: 120 }}
-            value={settings?.quality ?? 'SD2'}
-            onChange={(value) => void save({ quality: value as QualityKey })}
-            options={QUALITY_KEYS.map((key) => ({ value: key, label: t(`douyin-link.page.quality${qualitySuffix(key)}`) }))}
-          />
-        </Row>
-
         <Row label={t('douyin-link.settingsPage.concurrencyLabel')} hint={t('douyin-link.settingsPage.concurrencyHint')}>
           <InputNumber
             size="small"
@@ -76,17 +64,6 @@ export default function Settings(): React.JSX.Element {
             onChange={(value) => {
               if (typeof value === 'number') void save({ monitorConcurrency: value })
             }}
-          />
-        </Row>
-
-        <Row
-          label={t('douyin-link.settingsPage.audioOnConnectLabel')}
-          hint={t('douyin-link.settingsPage.audioOnConnectHint')}
-        >
-          <Switch
-            size="small"
-            checked={settings?.audioOnConnect ?? true}
-            onChange={(value) => void save({ audioOnConnect: value })}
           />
         </Row>
 
@@ -202,15 +179,3 @@ function Row(props: { label: string; hint?: string; children: React.ReactNode })
   )
 }
 
-function qualitySuffix(quality: QualityKey): string {
-  switch (quality) {
-    case 'FULL_HD1':
-      return 'FullHd'
-    case 'HD1':
-      return 'Hd'
-    case 'SD1':
-      return 'Sd1'
-    default:
-      return 'Sd2'
-  }
-}

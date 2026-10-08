@@ -1,12 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Modal, Select, Slider, Switch, Tag } from 'antd'
-import {
-  RiDeleteBin6Line,
-  RiPauseLine,
-  RiPlayLine,
-  RiRefreshLine,
-  RiTeamLine
-} from '@remixicon/react'
+import { Button, Modal, Tag } from 'antd'
+import { RiDeleteBin6Line, RiTeamLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
@@ -14,14 +8,10 @@ import type {
   DayRecordRow,
   FailureInfo,
   LiveSettings,
-  QualityKey,
   RoomRuntime,
   UserProfile
 } from '../shared/types'
-import { QUALITY_KEYS } from '../shared/types'
 import api, { normalizeSnapshot } from './api'
-import { LiveAudioPlayer } from './audio/player'
-import type { PlayerStats } from './audio/player'
 import { ComparePanel } from './components/ComparePanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
 import { OverviewPanel } from './components/OverviewPanel'
@@ -47,18 +37,6 @@ import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'compare'
-
-const EMPTY_STATS: PlayerStats = {
-  state: 'idle',
-  sampleRate: 0,
-  channels: 0,
-  received: 0,
-  dropped: 0,
-  buffer: 0,
-  decoded: 0,
-  errorCode: '',
-  detail: ''
-}
 
 /**
  * 实时列表里一次往库里翻多少条 / 内存里最多挂多少条。
@@ -107,7 +85,6 @@ export default function Page(): React.JSX.Element {
 
   const [rooms, setRooms] = useState<RoomRuntime[]>([])
   const [activeRoom, setActiveRoom] = useState('')
-  const [audioRoom, setAudioRoom] = useState('')
   const [settings, setSettings] = useState<LiveSettings | null>(null)
   const [itemsByRoom, setItemsByRoom] = useState<Map<string, DanmakuItem[]>>(() => new Map())
   const [usersByRoom, setUsersByRoom] = useState<Map<string, Map<string, UserProfile>>>(() => new Map())
@@ -115,8 +92,6 @@ export default function Page(): React.JSX.Element {
   const [tab, setTab] = useState<TabKey>('overview')
   const [minutes, setMinutes] = useState(60)
   const [busy, setBusy] = useState(false)
-  const [stats, setStats] = useState<PlayerStats>(EMPTY_STATS)
-  const [volume, setVolume] = useState(0.8)
   const [openUser, setOpenUser] = useState('')
   /**
    * 时间范围（概览看的是哪一段）：`null` = 最近 `minutes` 分钟的预设。
@@ -144,14 +119,11 @@ export default function Page(): React.JSX.Element {
   /** 「添加直播间」失败时的提示（代码在主进程，文案在这里翻） */
   const [addFailure, setAddFailure] = useState<FailureInfo | null>(null)
 
-  const playerRef = useRef<LiveAudioPlayer | null>(null)
-  const audioRoomRef = useRef('')
   const settingsRef = useRef<LiveSettings | null>(null)
   /** 当前页签（事件回调里要用到，但不想因为切页签重订阅事件通道） */
   const tabRef = useRef<TabKey>('overview')
   /** 「用户榜需要刷新」的欠账：不在用户页签时不查库，切回去补一次 */
   const usersReloadPending = useRef(false)
-  const supported = useMemo(() => LiveAudioPlayer.isSupported(), [])
   const maxItems = settings?.maxItems ?? 200
 
   const active = useMemo(() => rooms.find((room) => room.webRid === activeRoom) ?? null, [rooms, activeRoom])
@@ -238,11 +210,8 @@ export default function Page(): React.JSX.Element {
     const next = normalizeSnapshot(raw)
     setRooms(next.rooms)
     setActiveRoom(next.activeRoom)
-    setAudioRoom(next.audioRoom)
-    audioRoomRef.current = next.audioRoom
     setSettings(next.settings)
     settingsRef.current = next.settings
-    setVolume(next.settings.volume)
     if (next.activeRoom && next.recent.length > 0) {
       setItemsByRoom((previous) => {
         const map = new Map(previous)
@@ -282,9 +251,6 @@ export default function Page(): React.JSX.Element {
         // 推送形状不信任（api 层挡过一道，这里再挡 undefined 的房间号）
         setRooms(Array.isArray(push.rooms) ? push.rooms : [])
         setActiveRoom(typeof push.activeRoom === 'string' ? push.activeRoom : '')
-        const audio = typeof push.audioRoom === 'string' ? push.audioRoom : ''
-        setAudioRoom(audio)
-        audioRoomRef.current = audio
       }),
     []
   )
@@ -355,58 +321,6 @@ export default function Page(): React.JSX.Element {
     usersReloadPending.current = false
     setUsersReloadKey((previous) => previous + 1)
   }, [tab])
-
-  /* --------------------------------------------------------------- 音频 */
-
-  useEffect(() => {
-    const player = new LiveAudioPlayer()
-    player.onStats = (next) => setStats(next)
-    playerRef.current = player
-    return () => {
-      playerRef.current = null
-      player.dispose()
-      // 页面走了就别让主进程继续拉流（拉流在主进程，不主动停会一直耗流量）
-      void api.audioStop()
-    }
-  }, [])
-
-  /** 音频消息：**只放正在响的那个房间的帧**（切房间时旧泵已经停了，这里再兜一层） */
-  useEffect(
-    () =>
-      api.onAudio((message) => {
-        if (audioRoomRef.current && message.webRid !== audioRoomRef.current) return
-        playerRef.current?.handleMessage(message)
-      }),
-    []
-  )
-
-  /** 主进程停了声音（比如房间下播）→ 播放器也收干净 */
-  useEffect(() => {
-    if (audioRoom || !playerRef.current) return
-    playerRef.current.stopStream()
-  }, [audioRoom])
-
-  const toggleAudio = useCallback(async (): Promise<void> => {
-    const player = playerRef.current
-    if (!player || !activeRoom) return
-    if (audioRoomRef.current === activeRoom && stats.state === 'playing') {
-      player.pause()
-      await api.audioStop()
-      return
-    }
-    // 播放：让主进程开始推音频，然后在自己这个点击手势里把 AudioContext 解出来
-    player.begin()
-    const ok = await api.audioStart(activeRoom)
-    if (!ok) {
-      player.stopStream()
-      return
-    }
-    audioRoomRef.current = activeRoom
-    setAudioRoom(activeRoom)
-    await player
-      .resume()
-      .catch(() => undefined)
-  }, [activeRoom, stats.state])
 
   /* ----------------------------------------------------------- 房间操作 */
 
@@ -743,7 +657,6 @@ export default function Page(): React.JSX.Element {
           <RoomRail
             rooms={rooms}
             activeRoom={activeRoom}
-            audioRoom={audioRoom}
             busy={busy}
             onAdd={(input) => void addRoom(input)}
             onSelect={selectRoom}
@@ -782,21 +695,6 @@ export default function Page(): React.JSX.Element {
             <RoomHeader
               room={active}
               t={t}
-              palette={palette}
-              settings={settings}
-              stats={stats}
-              volume={volume}
-              playing={audioRoom === activeRoom && stats.state === 'playing'}
-              supported={supported}
-              onToggleAudio={() => void toggleAudio()}
-              onVolume={(value) => {
-                setVolume(value)
-                playerRef.current?.setVolume(value)
-              }}
-              onVolumeCommit={(value) => void saveSettings({ volume: value })}
-              onQuality={(quality) => void saveSettings({ quality }).then(() => void reload())}
-              onToggleMonitor={(on) => active && toggleMonitor(active.webRid, on)}
-              onRefresh={() => active && refreshRoom(active.webRid)}
               tabBar={<PillTabBar items={tabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />}
             />
           </Panel>
@@ -829,26 +727,22 @@ export default function Page(): React.JSX.Element {
   )
 }
 
-/** 房间头：信息 + 监控开关 + 声音（播放/档位/音量）+ 刷新 */
+/**
+ * 房间头：**只有信息行 + 页签条**。
+ *
+ * 用户 2026-10-08 的要求：「移除播放音频内容，以及监控开关，移除上面图片的内容」——
+ * 原来那一条工具行（监控开关 / 播放 / 清晰度 / 音量 / 刷新信息）整条去掉了：
+ * - 监控开关在**左侧房间行**上（每个房间一个）+「全部监控/全部停止」，这里重复一个没有意义；
+ * - 播放音频（含清晰度、音量）整体下线：这个插件是**采集分析**用的，不出声；
+ * - 刷新信息在房间行的「⋯」菜单里（`RoomRail` 的 refresh 项），功能没丢、只是不再有第二个入口。
+ */
 function RoomHeader(props: {
   room: RoomRuntime | null
   t: Translate
-  palette: ReturnType<typeof usePluginPalette>
-  settings: LiveSettings | null
-  stats: PlayerStats
-  volume: number
-  playing: boolean
-  supported: boolean
-  onToggleAudio: () => void
-  onVolume: (value: number) => void
-  onVolumeCommit: (value: number) => void
-  onQuality: (quality: QualityKey) => void
-  onToggleMonitor: (on: boolean) => void
-  onRefresh: () => void
   /** 页签的胶囊条：挂在最后一行（「条/分 · 本场 N 人 · 本场 N 条」）的右端；不传就不渲染 */
   tabBar?: React.ReactNode
 }): React.JSX.Element {
-  const { room, t, palette } = props
+  const { room, t } = props
   if (!room) {
     /* 没有选中房间时这一行也要在：**胶囊页签不能跟着一起消失**——检索 / 对比这两个页签
        不需要房间也能看，所以这里退化成「一句空态 + 右端的胶囊条」。 */
@@ -886,48 +780,8 @@ function RoomHeader(props: {
         </span>
       </div>
 
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Switch
-          size="small"
-          checked={room.monitor}
-          onChange={props.onToggleMonitor}
-          checkedChildren={t('douyin-link.page.monitor')}
-          unCheckedChildren={t('douyin-link.page.monitor')}
-        />
-        <Button
-          size="small"
-          type={props.playing ? 'default' : 'primary'}
-          disabled={!props.supported || room.status === 'ended'}
-          icon={props.playing ? <RiPauseLine size={14} /> : <RiPlayLine size={14} />}
-          onClick={props.onToggleAudio}
-        >
-          {props.playing ? t('douyin-link.page.audioPause') : t('douyin-link.page.audioPlay')}
-        </Button>
-        <Select
-          size="small"
-          style={{ width: 92 }}
-          value={props.settings?.quality ?? 'SD2'}
-          onChange={(value) => props.onQuality(value as QualityKey)}
-          options={QUALITY_KEYS.map((key) => ({ value: key, label: qualityLabel(t, key) }))}
-        />
-        <span className="text-xs opacity-60">{t('douyin-link.page.volume')}</span>
-        <Slider
-          className="min-w-[80px] flex-1"
-          min={0}
-          max={100}
-          value={Math.round(props.volume * 100)}
-          tooltip={{ open: false }}
-          onChange={(value) => props.onVolume(value / 100)}
-          onChangeComplete={(value) => props.onVolumeCommit(value / 100)}
-        />
-        <Button size="small" type="text" icon={<RiRefreshLine size={14} />} onClick={props.onRefresh}>
-          {t('douyin-link.page.refresh')}
-        </Button>
-      </div>
-
-      {/* 最后一行：速率 / 本场人数 / 本场条数 + 声音状态，**右端挂胶囊页签**
-          （用户要求：「0 条/分 · 本场 N 人 · 本场 N 条 这个内容的右边放胶囊 tab」）。
-          左边那一串是暗色小字，所以胶囊条单独放在不压暗的容器里。 */}
+      {/* 最后一行：速率 / 本场人数 / 本场条数，**右端挂胶囊页签**
+          （用户要求：「0 条/分 · 本场 N 人 · 本场 N 条 这个内容的右边放胶囊 tab」）。 */}
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] opacity-60">
           <span>
@@ -935,18 +789,6 @@ function RoomHeader(props: {
             {t('douyin-link.page.sessionUsers', { count: room.sessionUsers })} ·{' '}
             {t('douyin-link.page.sessionReceived', { count: room.received })}
           </span>
-          <span>{audioStateText(t, props.stats, room)}</span>
-          {props.stats.sampleRate > 0 ? (
-            <span>
-              {t('douyin-link.page.audioStats', {
-                rate: props.stats.sampleRate,
-                channels: props.stats.channels,
-                buffer: props.stats.buffer.toFixed(2),
-                dropped: props.stats.dropped
-              })}
-            </span>
-          ) : null}
-          {!props.supported ? <span style={{ color: palette.down }}>{t('douyin-link.page.audioUnsupported')}</span> : null}
           {room.failure ? <FailureLine failure={room.failure} /> : null}
         </div>
         {props.tabBar ? <div className="ml-auto flex min-w-0 shrink-0 items-center">{props.tabBar}</div> : null}
@@ -1185,32 +1027,6 @@ function phaseColor(room: RoomRuntime): string | undefined {
     default:
       return undefined
   }
-}
-
-function qualityLabel(t: Translate, quality: QualityKey): string {
-  switch (quality) {
-    case 'FULL_HD1':
-      return t('douyin-link.page.qualityFullHd')
-    case 'HD1':
-      return t('douyin-link.page.qualityHd')
-    case 'SD1':
-      return t('douyin-link.page.qualitySd1')
-    default:
-      return t('douyin-link.page.qualitySd2')
-  }
-}
-
-function audioStateText(t: Translate, stats: PlayerStats, room: RoomRuntime): string {
-  if (stats.state === 'error') {
-    const key = `douyin-link.failure.${stats.errorCode || 'audioUnsupported'}`
-    const text = t(key, { detail: stats.detail })
-    return `${t('douyin-link.failure.title')}：${text.startsWith('douyin-link.') ? stats.errorCode : text}`
-  }
-  if (stats.state === 'blocked') return t('douyin-link.page.audioBlocked')
-  if (stats.state === 'playing') return t('douyin-link.page.audioPlaying')
-  if (stats.state === 'paused') return t('douyin-link.page.audioPaused')
-  if (stats.state === 'connecting') return t('douyin-link.page.audioConnecting')
-  return room.audio ? t('douyin-link.page.audioIdle') : t('douyin-link.page.audioSwitched')
 }
 
 function genderText(t: Translate, gender: number): string {
