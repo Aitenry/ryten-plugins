@@ -342,7 +342,7 @@ export function decodeMessageJson(method: string, message: Json, gifts?: GiftRes
       const base = item('gift', nickname, userId, name, repeat, unit * repeat)
       return {
         ...nothing(),
-        item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'json-gift' },
+        item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'json-gift', giftRecord: true },
         users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
       }
     }

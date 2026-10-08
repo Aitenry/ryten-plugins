@@ -39,6 +39,7 @@ const DDL: string[] = [
      diamonds   INTEGER NOT NULL DEFAULT 0,
      to_user_id   TEXT NOT NULL DEFAULT '',
      to_user_name TEXT NOT NULL DEFAULT '',
+     order_key    TEXT NOT NULL DEFAULT '',
      at_ms      DOUBLE PRECISION NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_time ON douyin_link_messages (web_rid, at_ms DESC)`,
@@ -118,6 +119,12 @@ const DDL: string[] = [
   `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS to_user_id TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS to_user_name TEXT NOT NULL DEFAULT ''`,
+  /**
+   * 点歌单号（0.7.8 起）：同一单会推好几帧——不带礼物记录的先到（只能解出「想听 X 演唱」），
+   * 带记录的后到（有礼物名/价格）——两帧的**单号完全相同**，靠它合并成一行（见 `mapper.insertMessages`）。
+   */
+  `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS order_key TEXT NOT NULL DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_order ON douyin_link_messages (web_rid, order_key)`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,

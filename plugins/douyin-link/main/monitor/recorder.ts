@@ -82,6 +82,11 @@ export class RoomRecorder {
   private presence = new Map<string, PresenceEntry>()
   /** 麦位：用户 id → 麦位序号（1 起）。聊天室才有，重连后由推送刷新 */
   private micSeats = new Map<string, number>()
+  /**
+   * 点歌单号 → 这一单**已经算进本场数字**的抖币。同一个单会推两次（先没记录、后带记录），
+   * 本场礼物条数只能算一次，抖币按差额补（见 `orderContribution`）。
+   */
+  private orderGifts = new Map<string, number>()
 
   constructor(webRid: string) {
     this.webRid = webRid
@@ -103,6 +108,7 @@ export class RoomRecorder {
     this.minuteUsers.clear()
     this.presence.clear()
     this.micSeats.clear()
+    this.orderGifts.clear()
   }
 
   /**
@@ -209,8 +215,10 @@ export class RoomRecorder {
       const counted = COUNTED.includes(item.kind)
       if (!counted) continue
       this.rateMarks.push(item.at)
-      this.bumpCounters(item)
-      this.pushMinute(item)
+      /** 点歌一单推两次 → 本场数字只算一次（见 `orderContribution`） */
+      const order = this.orderContribution(item)
+      this.bumpCounters(item, order)
+      this.pushMinute(item, order)
       this.messages.push({
         webRid: this.webRid,
         sessionId: this.sessionId,
@@ -222,6 +230,8 @@ export class RoomRecorder {
         diamonds: item.diamonds,
         toUserId: item.toUserId,
         toUserName: item.toUser,
+        orderKey: item.orderKey ?? '',
+        giftRecord: item.giftRecord ?? false,
         atMs: item.at
       })
       const user = item.userId ? this.userMap.get(item.userId) : undefined
@@ -240,8 +250,8 @@ export class RoomRecorder {
             user.delta.follow += 1
             break
           case 'gift':
-            user.delta.gift += 1
-            user.delta.diamonds += item.diamonds
+            user.delta.gift += order.count
+            user.delta.diamonds += order.diamonds
             break
           default:
             break
@@ -375,7 +385,27 @@ export class RoomRecorder {
     this.presence.set(userId, { userId, firstSeen: at, lastSeen: at })
   }
 
-  private bumpCounters(item: DanmakuItem): void {
+  /**
+   * 这一条消息**该给本场数字加多少**（礼物条数 / 抖币）。
+   *
+   * 只有点歌那一类要特殊处理：同一个单会推两次（先一条没礼物记录的、后一条带记录的，
+   * 见 `../gift/merge.ts`），而界面上「本场礼物」是照礼物榜的行数核对的——
+   * 一单算两次，KPI 就比榜单多出一条。所以：**条数只算第一帧，抖币按差额补**
+   * （记录帧迟到时把 0 → 99 的差价补上；万一先来的那条数字更大，只补差额不为负）。
+   */
+  private orderContribution(item: DanmakuItem): { count: number; diamonds: number } {
+    const key = item.kind === 'gift' ? (item.orderKey ?? '') : ''
+    if (!key) return { count: 1, diamonds: item.diamonds }
+    const before = this.orderGifts.get(key)
+    if (before === undefined) {
+      this.orderGifts.set(key, item.diamonds)
+      return { count: 1, diamonds: item.diamonds }
+    }
+    if (item.diamonds > before) this.orderGifts.set(key, item.diamonds)
+    return { count: 0, diamonds: Math.max(0, item.diamonds - before) }
+  }
+
+  private bumpCounters(item: DanmakuItem, order: { count: number; diamonds: number }): void {
     switch (item.kind) {
       case 'chat':
         this.counters.chat += 1
@@ -390,14 +420,14 @@ export class RoomRecorder {
         this.counters.follow += 1
         break
       case 'gift':
-        this.counters.gift += 1
+        this.counters.gift += order.count
         break
       default:
         break
     }
   }
 
-  private pushMinute(item: DanmakuItem): void {
+  private pushMinute(item: DanmakuItem, order: { count: number; diamonds: number }): void {
     const minute = minuteOf(item.at)
     const row =
       this.minutes.get(minute) ??
@@ -428,8 +458,8 @@ export class RoomRecorder {
         row.social += 1
         break
       case 'gift':
-        row.gift += 1
-        row.diamonds += item.diamonds
+        row.gift += order.count
+        row.diamonds += order.diamonds
         break
       default:
         break
