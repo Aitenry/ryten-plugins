@@ -330,7 +330,9 @@ export function decodeMessageJson(method: string, message: Json, gifts?: GiftRes
       const frameName = pickText(gift, ['name'], 40) || pickText(gift, ['describe'], 40)
       const frameUnit = pickInt(gift, ['diamond_count', 'diamondCount'])
       const giftId = pickInt(gift, ['id']) || pickInt(message, ['gift_id', 'giftId'])
-      const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+      let hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+      // 与 protobuf 那条路同一套兜底：帧里出现了目录里的礼物名就直接认它
+      if (!frameName && !hit) hit = matchGiftNameInJson(message, gifts)
       if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
       const name = frameName || hit?.name || ''
       const unit = frameUnit || hit?.diamonds || 0
@@ -437,6 +439,30 @@ function isSeatEntry(entry: PbMessage): boolean {
   if (!meta) return false
   if (getVarint(meta, 1) !== undefined) return false
   return true
+}
+
+/** 深度优先找「某个目录礼物名」：JSON 版的 `matchGiftNameInFrame`（只在按字段名解不出名字时走） */
+function matchGiftNameInJson(value: unknown, gifts?: GiftResolver, depth = 3): { name: string; diamonds: number } | undefined {
+  if (!gifts?.resolveByName || depth < 0) return undefined
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (text.length === 0 || text.length > 40) return undefined
+    return gifts.resolveByName(text)
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const hit = matchGiftNameInJson(entry, gifts, depth - 1)
+      if (hit) return hit
+    }
+    return undefined
+  }
+  if (value && typeof value === 'object') {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      const hit = matchGiftNameInJson(entry, gifts, depth - 1)
+      if (hit) return hit
+    }
+  }
+  return undefined
 }
 
 function item(
