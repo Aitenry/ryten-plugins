@@ -179,6 +179,7 @@ export const DouyinLinkZhCN = {
       newMessages: '{{count}} 条新消息',
       clickUser: '点开看这个人的档案与历史弹幕',
       unknownUser: '（未知用户）',
+      senderUnknown: 'ID {{id}}',
       giftDiamonds: '{{count}} 抖币',
       giftValueUnknown: '价值未知',
       interactions:

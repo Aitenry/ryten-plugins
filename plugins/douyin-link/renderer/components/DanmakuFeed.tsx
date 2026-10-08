@@ -300,8 +300,9 @@ function DanmakuRow(props: {
       </span>
       <span className="min-w-0 flex-1 truncate text-xs">
         {/*
-          点歌（也走 gift 这一类）那一帧里**没有发送者的 User**（只有个 id 片段），
-          所以昵称那一段整个省掉，而不是显示成「（未知用户）」——宁可少一段，不写废话。
+          点歌/礼物那一类，帧里只有发送者的 id：昵称由主进程用我们自己的数据补
+          （本场见过的人 → 库里查），所以这里优先用记录里的名字、其次是刚推过来的档案；
+          两个都没有就照实显示 id（可点开查档案），绝不编一个名字出来。
         */}
         {item.user || item.userId ? (
           <>
@@ -311,7 +312,7 @@ function DanmakuRow(props: {
                 style={{ color: accent }}
                 onClick={() => item.userId && props.onOpenUser(item.userId)}
               >
-                {item.user || t('douyin-link.page.unknownUser')}
+                {item.user || user?.nickname || t('douyin-link.page.senderUnknown', { id: item.userId })}
               </span>
             </Tooltip>
             <span className="opacity-70"> </span>

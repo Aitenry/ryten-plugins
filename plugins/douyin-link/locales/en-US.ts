@@ -169,6 +169,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       newMessages: '{{count}} new messages',
       clickUser: 'Open this user\u2019s profile and message history',
       unknownUser: '(unknown user)',
+      senderUnknown: 'ID {{id}}',
       giftDiamonds: '{{count}} coins',
       giftValueUnknown: 'value unknown',
       interactions:
