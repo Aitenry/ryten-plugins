@@ -4,6 +4,7 @@ import * as zlib from 'node:zlib'
 import type { DanmakuItem, UserInfo } from '../../shared/types'
 import { getBytes, readMessage } from './protobuf'
 import { decodeProtoResponse } from './proto-messages'
+import { giftCatalog } from '../gift/catalog'
 import type { DanmakuHooks, DanmakuTarget } from './danmaku'
 
 /**
@@ -292,7 +293,7 @@ export class RoomSocketCapture {
     let micUserIds: string[] | null = null
     let methodsSeen: Record<string, number> = {}
     try {
-      const batch = decodeProtoResponse(body).batch
+      const batch = decodeProtoResponse(body, giftCatalog).batch
       items = batch.items
       users = batch.users
       roomEnded = batch.roomEnded

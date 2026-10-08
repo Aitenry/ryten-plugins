@@ -1,5 +1,6 @@
 import * as zlib from 'node:zlib'
 import type { DanmakuItem, DanmakuKind, UserInfo } from '../../shared/types'
+import type { GiftResolver } from '../gift/catalog'
 import {
   getMessage,
   getMessages,
@@ -253,7 +254,7 @@ export interface JsonDecodedBatch {
 }
 
 /** 一批 `im/fetch` 的 `data` 数组 → 界面要显示的东西（永不抛错） */
-export function decodePushBatch(rawMessages: unknown[]): JsonDecodedBatch {
+export function decodePushBatch(rawMessages: unknown[], gifts?: GiftResolver): JsonDecodedBatch {
   const items: DanmakuItem[] = []
   const users = new Map<string, UserInfo>()
   const methods: Record<string, number> = {}
@@ -267,7 +268,7 @@ export function decodePushBatch(rawMessages: unknown[]): JsonDecodedBatch {
     if (!method) continue
     methods[method] = (methods[method] ?? 0) + 1
     try {
-      const decoded = decodeMessageJson(method, message)
+      const decoded = decodeMessageJson(method, message, gifts)
       if (!decoded) continue
       for (const user of decoded.users) if (user.id) users.set(user.id, user)
       if (decoded.roomEnded) roomEnded = true
@@ -290,7 +291,7 @@ interface JsonDecoded {
 const nothing = (): JsonDecoded => ({ item: null, users: [], roomEnded: false, micUserIds: null })
 
 /** 单条消息 → 一行 + 里面的用户；不认识的 method 返回 null */
-export function decodeMessageJson(method: string, message: Json): JsonDecoded | null {
+export function decodeMessageJson(method: string, message: Json, gifts?: GiftResolver): JsonDecoded | null {
   // 推送里的 method 是 `WebcastChatMessage` 这种全名；SDK 内部用的是去前缀的短名。两者都认
   const name = method.startsWith('Webcast') ? method.slice(7) : method
   const user = parseUserJson(pickRaw(message, ['user']))
@@ -326,8 +327,13 @@ export function decodeMessageJson(method: string, message: Json): JsonDecoded | 
        * `repeat_count`、`combo_count`、`to_user`（收礼人）。价格取不到就是 0 = **未知**（不编数）。
        */
       const gift = asObject(pickRaw(message, ['gift']))
-      const name = pickText(gift, ['name'], 40) || pickText(gift, ['describe'], 40)
-      const unit = pickInt(gift, ['diamond_count', 'diamondCount'])
+      const frameName = pickText(gift, ['name'], 40) || pickText(gift, ['describe'], 40)
+      const frameUnit = pickInt(gift, ['diamond_count', 'diamondCount'])
+      const giftId = pickInt(gift, ['id']) || pickInt(message, ['gift_id', 'giftId'])
+      const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+      if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
+      const name = frameName || hit?.name || ''
+      const unit = frameUnit || hit?.diamonds || 0
       const repeat = Math.max(1, pickInt(message, ['repeat_count', 'repeatCount'], 1))
       const toUser = parseUserJson(pickRaw(message, ['to_user', 'toUser']))
       if (!name && !nickname) return null

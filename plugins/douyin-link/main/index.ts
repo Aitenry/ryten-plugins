@@ -3,6 +3,7 @@ import { APP_BEFORE_QUIT } from '@host/main/plugins/app-hooks'
 import { HARNESS_TOOL_CONTRIBUTION } from '@host/main/plugins/tool-contract'
 import { EVENTS, createIpcHandlers, initAnalyzer } from './ipc'
 import { analyzerHub } from './monitor/hub'
+import { giftCatalog } from './gift/catalog'
 import { purgePluginData } from './purge'
 import { createToolContribution } from './tools'
 import type { MainPluginContext } from '@host/main/plugins/context'
@@ -14,6 +15,7 @@ import type { MainPluginContext } from '@host/main/plugins/context'
  *   ./douyin/room             —— 网页房间号 → 直播间信息 + flv 拉流地址 + Cookie + 房间成员名单
  *   ./douyin/danmaku          —— **主进程直连**：轮询 `/webcast/im/fetch/` 收全量推送（无窗口）
  *   ./douyin/json             —— 推送 JSON → 弹幕/用户 + 麦位表（纯函数）
+ *   ./gift/catalog            —— 官方礼物目录（礼物 id → 名字 + 抖币价；3 天缓存，落 meta）
  *   ./monitor/recorder        —— 一个房间的「本场」内存视图（最近弹幕、计数、速率、在场、麦位）
  *   ./monitor/hub             —— 分析中枢：房间清单、每房间一路轮询、音频只跟最新选中的房间、
  *                                落库 flush、事件推送、在线观众与全部分析查询的入口
@@ -31,6 +33,16 @@ import type { MainPluginContext } from '@host/main/plugins/context'
  */
 export function install(ctx: MainPluginContext): void {
   initAnalyzer(ctx)
+
+  /**
+   * 礼物目录（**礼物 id → 名字 + 抖币价**）：先用库里的缓存，后台再按 3 天有效期刷新一次。
+   * 推送帧里只有礼物 id（点歌那类甚至只有一个场景标签），「送了什么、值多少」全靠它。
+   * 拉取失败不影响监听（解码器会退回帧里自带的字段）。
+   */
+  void giftCatalog
+    .init()
+    .then(() => giftCatalog.ensure())
+    .catch(() => undefined)
 
   ctx.registerEvent(...EVENTS)
   ctx.registerIpc(createIpcHandlers())

@@ -1,5 +1,6 @@
 import logger from 'electron-log'
 import type { DanmakuItem, DanmakuKind, UserInfo } from '../../shared/types'
+import type { GiftResolver } from '../gift/catalog'
 import {
   getBytes,
   getMessage,
@@ -57,7 +58,7 @@ export interface ProtoBatch {
 let nextId = 1
 
 /** 解一份 protobuf 响应（永不抛错：单条解不动只跳过那一条） */
-export function decodeProtoResponse(buf: Buffer): ProtoResponse {
+export function decodeProtoResponse(buf: Buffer, gifts?: GiftResolver): ProtoResponse {
   const empty: ProtoBatch = { items: [], users: [], roomEnded: false, micUserIds: null, methods: {} }
   const fallback: ProtoResponse = {
     batch: empty,
@@ -80,7 +81,7 @@ export function decodeProtoResponse(buf: Buffer): ProtoResponse {
       const payload = getBytes(message, 2)
       if (!method || !payload) continue
       methods[method] = (methods[method] ?? 0) + 1
-      const decoded = decodeProtoMessage(method, payload)
+      const decoded = decodeProtoMessage(method, payload, gifts)
       if (!decoded) continue
       for (const user of decoded.users) if (user.id) users.set(user.id, user)
       if (decoded.roomEnded) roomEnded = true
@@ -121,7 +122,11 @@ const USER_FIELDS: Record<string, number[]> = {
 }
 
 /** 单条消息 → 一行 + 里面的用户（不认识的 method 返回 null） */
-export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecoded | null {
+export function decodeProtoMessage(
+  method: string,
+  payload: Buffer,
+  gifts?: GiftResolver
+): ProtoDecoded | null {
   let msg: PbMessage
   try {
     msg = readMessage(payload)
@@ -151,10 +156,10 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
     case 'WebcastSocialMessage':
       return { ...nothing(), item: item('social', nickname, userId, '', 0), users: withUser(user ? [user] : []) }
     case 'WebcastGiftMessage':
-      return decodeProtoGift(msg, user)
+      return decodeProtoGift(msg, user, gifts)
     case 'WebcastLinkmicOrderSingMessage':
       // 语音房「点歌」：房间里显示成「X 送了 想听 Y 演唱」，归到礼物这一类（见下面的解码器）
-      return decodeProtoOrderSing(msg)
+      return decodeProtoOrderSing(msg, gifts)
     case 'WebcastRoomStatsMessage': {
       // 在线人数（JSON 模式根本收不到这条）：4 是展示串（"31在线观众"），5 是数字
       const total = pickVarintInRange(msg, [5, 9], 0, 100000000) ?? 0
@@ -211,12 +216,18 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
  * 连击不单独成一列：`repeatEnd = 0` 的连击服务端会**逐条推增量**，逐条落库本来就是逐条明细，
  * 再合成一列反而会把「这一条到底送了几个」搞乱。
  */
-function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
+function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts?: GiftResolver): ProtoDecoded {
   const gift = getMessage(msg, 15)
   const nickname = user?.nickname ?? ''
   const toUser = parseProtoUser(getMessage(msg, 8))
-  const name = (gift ? (pickString(gift, [16, 2], 40) ?? '') : '').trim()
-  const unit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
+  const frameName = (gift ? (pickString(gift, [16, 2], 40) ?? '') : '').trim()
+  const frameUnit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
+  const giftId = (gift ? (getVarint(gift, 5) ?? 0) : 0) || (getVarint(msg, 2) ?? 0)
+  const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+  // 帧里同时给了 id 和价：顺手做一次「帧 vs 官方目录」的运行时自检（不一致会在日志里 warn）
+  if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
+  const name = frameName || hit?.name || ''
+  const unit = frameUnit || hit?.diamonds || 0
   const repeat = pickVarintInRange(msg, [5], 1, 100000) ?? 1
   if (!name && !nickname) return nothing()
   const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
@@ -259,30 +270,39 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
  *   `6.5.1.1` 是**收礼人**（= 歌手，`6.5.1.1.1 = 1249525342678500 = 「VVఇ」`，也就是 `6.3`）。
  *   两个 `User` 都记下来；万一老帧里没有这份记录，退回单号串第一段当 id，
  *   昵称再由中枢用我们自己的数据补（`main/monitor/hub.ts` 的 `resolveGiftSenders`）；
- * - **点唱礼物的名字与价格**在同一份记录里：`6.5.1.10 = 「点唱礼物」`（礼物名）、
- *   `6.5.1.5 = 3200`（礼物 id）、`6.5.1.6 = 99`（抖币价）。这两个数字**交叉核对过**：
- *   官方礼物目录（`webcast/gift/list/`，免签名）里 `id = 3200` 的礼物是「爱的纸鹤」，
- *   价格正好 `diamond_count = 99` —— 帧里的 id/价格与目录逐字一致，所以按「5 = 礼物 id、
- *   6 = 单个抖币价」读。**这是唯一一次交叉核对**（本房间的两种点歌礼物都是这一件），
- *   将来若出现「帧里的 6 ≠ 目录里该 id 的价格」，就说明这个读法是错的，要回来改。
+ * - **点唱礼物的名字与价格以官方目录为准**：帧里只有礼物 id（`6.5.1.5`，实测 3200）和一个
+ *   **场景标签**（`6.5.1.10` = 「点唱礼物」——它**不是**礼物名：同一房间里不同的人点歌用的是
+ *   不同的礼物）。名字与价格按 id 查 `../gift/catalog.ts`（官方 `webcast/gift/list/`，
+ *   1282 件、免签名）：实测 `id = 3200` = 「爱的纸鹤 = 99 抖币」，与帧里 `6.5.1.6 = 99` 一致；
+ *   目录查不到时才退回帧里的标签与价格。帧价与目录不一致会由目录那边写一条 warn（运行时自检）。
  *   `6.5.2 = { 2: 1000, 3: 4 }` 至今没有对得上的解释，**不用**；
  * - `2 = 5` 那几帧也带同一个单号串，但它们是播放状态变更，不是新的送礼——照旧跳过。
  */
-function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
+function decodeProtoOrderSing(msg: PbMessage, gifts?: GiftResolver): ProtoDecoded {
   const payload = getMessage(msg, 6)
   if (!payload) return nothing()
   const singer = parseProtoUser(getMessage(payload, 3))
   // 6.5 = 这份点歌礼物的记录；6.5.1 = 记录本体
-  // （1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 单个抖币价、10 礼物名）
+  // （1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 单个抖币价、10 场景标签）
   const envelope = getMessage(payload, 5)
   const record = envelope ? getMessage(envelope, 1) : undefined
   const recipient = (record ? parseProtoUser(getMessage(record, 1)) : null) ?? singer
   const sender = record ? parseProtoUser(getMessage(record, 2)) : null
   const key = (record ? getString(record, 3, 160) : '') || (getString(payload, 1, 160) ?? '')
-  const name = (record ? getString(record, 10, 40) : '') ?? ''
-  const price = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
+  const label = (record ? getString(record, 10, 40) : '') ?? ''
+  const giftId = record ? (getVarint(record, 5) ?? 0) : 0
+  const frameUnit = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
+  /**
+   * 名字与价格**以官方目录为准**（帧里只有 id 和一个场景标签「点唱礼物」，
+   * 而同一个房间里不同的人点歌用的是不同的礼物——截图里就有独角兽/跑车两种）。
+   * 目录查不到时退回帧里的标签与价格，再查不到就是「名字未知/价值未知」。
+   */
+  const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
+  if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
+  const name = hit?.name || label
+  const unit = hit?.diamonds || frameUnit
   const senderId = sender?.id ?? orderSingSenderId(key)
-  const base = item('gift', sender?.nickname ?? '', senderId, name, 1, price)
+  const base = item('gift', sender?.nickname ?? '', senderId, name, 1, unit)
   const users = [sender, recipient, singer].filter((entry): entry is UserInfo => Boolean(entry?.id))
   const unique = new Map(users.map((entry) => [entry.id, entry]))
   return {
