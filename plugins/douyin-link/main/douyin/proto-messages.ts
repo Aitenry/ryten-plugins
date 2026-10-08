@@ -293,13 +293,28 @@ function decodeProtoOrderSing(msg: PbMessage, gifts?: GiftResolver): ProtoDecode
   const giftId = record ? (getVarint(record, 5) ?? 0) : 0
   const frameUnit = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
   /**
+   * 同一个点歌单会**反复推**：只有「刚点下去」那条带礼物记录（`6.5.1`），后面几条只有单号串与歌手
+   * （实测：同一单号串先来带记录的、后来不带；库里因此出现「同一单两行、一行没名字」）。
+   * 所以这里**按单号串去重**：已经有过带记录的那条，就不再为同一单号串补一条没有名字的。
+   */
+  const orderKey = orderSingKey(key)
+  if (!record && orderKey && seenOrders.has(orderKey)) return nothing()
+  if (record && orderKey) {
+    seenOrders.add(orderKey)
+    if (seenOrders.size > ORDER_MEMORY) {
+      const oldest = seenOrders.values().next().value
+      if (oldest) seenOrders.delete(oldest)
+    }
+  }
+  /**
    * 名字与价格**以官方目录为准**（帧里只有 id 和一个场景标签「点唱礼物」，
    * 而同一个房间里不同的人点歌用的是不同的礼物——截图里就有独角兽/跑车两种）。
-   * 目录查不到时退回帧里的标签与价格，再查不到就是「名字未知/价值未知」。
+   * 目录查不到时退回帧里的标签与价格；连礼物记录都没有的帧退回房间自己的说法
+   * 「想听 X 演唱」（别留一行空白正文）。
    */
   const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
   if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
-  const name = hit?.name || label
+  const name = hit?.name || label || (recipient?.nickname ? `想听 ${recipient.nickname} 演唱` : '')
   const unit = hit?.diamonds || frameUnit
   const senderId = sender?.id ?? orderSingSenderId(key)
   const base = item('gift', sender?.nickname ?? '', senderId, name, 1, unit)
@@ -310,6 +325,15 @@ function decodeProtoOrderSing(msg: PbMessage, gifts?: GiftResolver): ProtoDecode
     item: { ...base, toUser: recipient?.nickname ?? '', toUserId: recipient?.id ?? '' },
     users: [...unique.values()]
   }
+}
+
+/** 「最近见过的点歌单号串」的上限（只为去重，一场直播几千单也不至于涨到哪去） */
+const ORDER_MEMORY = 300
+const seenOrders = new Set<string>()
+
+/** 单号串去掉「歌曲 id」那段之前的整串都算同一单（`6.1` 与 `6.5.1.3` 是同一个串） */
+function orderSingKey(key: string): string {
+  return /^\d+_\d+_\d+/.test(key) ? key : ''
 }
 
 /**
@@ -488,9 +512,10 @@ function item(
   return { id: nextId++, kind, user, userId, text, count, diamonds, toUser: '', toUserId: '', at: Date.now() }
 }
 
-/** 测试用：重置自增序号 */
+/** 测试用：重置自增序号与「见过的点歌单」 */
 export function __resetProtoIds(): void {
   nextId = 1
+  seenOrders.clear()
 }
 
 /**

@@ -87,13 +87,21 @@ const giftFrame = ({ nickname = '送礼的人', unit = 10, repeat = 5, name = '�
  * 6.1 = `发送者_歌手_单号_0_歌曲_1_Normal`、6.2 = 状态、6.3 = 歌手的 User、6.4 = 时间（秒）；
  * 6.5.1 = 点唱礼物记录（1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 抖币价、10 礼物名）。
  */
-const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', songId = 13564, price = 99, giftId = 3200 } = {}) =>
-  Buffer.concat([
+const orderSingFrame = ({
+  sender = '送礼的人',
+  singer = '唱歌的人',
+  songId = 13564,
+  price = 99,
+  giftId = 3200,
+  orderId = '10000037694256230482760723'
+} = {}) => {
+  const key = `58709692971_7667087264728728634_${orderId}_0_${songId}_1_Normal`
+  return Buffer.concat([
     pbVarint(2, 4),
     pbMessage(
       6,
       Buffer.concat([
-        pbString(1, `58709692971_7667087264728728634_10000037694256230482760723_0_${songId}_1_Normal`),
+        pbString(1, key),
         pbVarint(2, 6),
         pbMessage(3, user(7667087264728728634n, singer)),
         pbVarint(4, 1791458632),
@@ -104,13 +112,28 @@ const orderSingFrame = ({ sender = '送礼的人', singer = '唱歌的人', song
             Buffer.concat([
               pbMessage(1, user(7667087264728728634n, singer)),
               pbMessage(2, user(58709692971n, sender)),
-              pbString(3, `58709692971_7667087264728728634_10000037694256230482760723_0_${songId}_1_Normal`),
+              pbString(3, key),
               pbVarint(5, giftId),
               pbVarint(6, price),
               pbString(10, '点唱礼物')
             ])
           )
         )
+      ])
+    )
+  ])
+}
+
+/** 同一单号串的「后一条」帧：只有单号串与歌手，没有 6.5 礼物记录（实测服务端会这么重复推） */
+const orderSingFollowUpFrame = ({ singer = '唱歌的人', orderId = '10000037694256230482760723' } = {}) =>
+  Buffer.concat([
+    pbVarint(2, 4),
+    pbMessage(
+      6,
+      Buffer.concat([
+        pbString(1, `58709692971_7667087264728728634_${orderId}_0_13564_1_Normal`),
+        pbVarint(2, 3),
+        pbMessage(3, user(7667087264728728634n, singer))
       ])
     )
   ])
@@ -248,7 +271,28 @@ const wrong = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSi
 check('点歌 + 目录价不符 → 写一条自检告警', mismatch.warned, ['3200:5≠99'])
 check('点歌 + 目录价不符 → 仍以目录为准', wrong.item.diamonds, 99)
 
-/* 没有那份礼物记录的老帧：礼物名/价格留空，送礼人退回单号串第一段，收礼人退回歌手 */
+/* 同一单号串的后续帧（没有礼物记录）必须被丢掉：否则库里会出现「同一单两行、一行没名字」 */
+proto.__resetProtoIds()
+proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ orderId: '55500000000000000000000001' }))
+check(
+  '同一单的后续帧 → 丢弃（不重复记一行）',
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFollowUpFrame({ orderId: '55500000000000000000000001' })
+  )?.item ?? null,
+  null
+)
+
+/* 没见过的单号串、且帧里没有礼物记录：名字退回房间的说法「想听 X 演唱」，价格未知 */
+const bare = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000002' })
+)
+check('无记录的帧 → 名字退回「想听 X 演唱」', bare.item.text, '想听 Snow 演唱')
+check('无记录的帧 → 收礼人仍是歌手', bare.item.toUser, 'Snow')
+check('无记录的帧 → 价格未知', bare.item.diamonds, 0)
+
+/* 没有那份礼物记录的老帧（全新单号串）：礼物名/价格留空，送礼人退回单号串第一段 */
 const oldStyle = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
   Buffer.concat([
@@ -256,14 +300,17 @@ const oldStyle = proto.decodeProtoMessage(
     pbMessage(
       6,
       Buffer.concat([
-        pbString(1, '58709692971_7667087264728728634_10000037694256230482760723_0_13564_1_Normal'),
+        pbString(1, '58709692971_7667087264728728634_55500000000000000000000003_0_13564_1_Normal'),
         pbMessage(3, user(7667087264728728634n, '歌手'))
       ])
     )
   ])
 )
 check('老帧点歌 → 送礼人 id 仍在', oldStyle.item.userId, '58709692971')
-check('老帧点歌 → 没有礼物名/价格', [oldStyle.item.text, oldStyle.item.diamonds], ['', 0])
+check('老帧点歌 → 礼物记录缺失时退回「想听 X 演唱」+ 价格未知', [oldStyle.item.text, oldStyle.item.diamonds], [
+  '想听 歌手 演唱',
+  0
+])
 check('老帧点歌 → 收礼人退回歌手', oldStyle.item.toUser, '歌手')
 
 /* 单号串第一段不是数字（结构变了/看错了）时，不许写半截垃圾进 userId */
