@@ -10,6 +10,7 @@ import {
   type DanmakuStatus,
   type DbStats,
   type FailureInfo,
+  type GiftBreakdownRow,
   type LiveRoomInfo,
   type LiveSettings,
   type MessageBatch,
@@ -224,16 +225,24 @@ export class AnalyzerHub {
   async init(settings: Partial<LiveSettings>): Promise<void> {
     this.settings = { ...DEFAULT_SETTINGS, ...settings }
     /**
-     * `system` 必须留在显示类型里（0.6.2 起强制补上）。
+     * `system` 与 `gift` 必须留在显示类型里（读旧设置时强制补上）。
      *
-     * 为什么：房间级提示（`WebcastRoomMessage`，例如「欢迎来到直播间…」）在界面上的类型是
+     * `system`（0.6.2 起）：房间级提示（`WebcastRoomMessage`，例如「欢迎来到直播间…」）在界面上是
      * `system`，而老版本的默认显示类型里**没有**它——安静房间里唯一会来的消息就被过滤掉了，
      * 「实时」页于是看着像坏了（用户 2026-10 实测反馈「实时里面的弹幕，没有任何内容」）。
-     * 磁盘上的旧设置文件不会自己多出这个键，所以这里读进来时补一刀。
+     *
+     * `gift`（0.7.5 起）：老设置文件里同样没有它，于是界面上出现「礼物 1」的计数、
+     * 点进去却是「这一类还没有消息」——**计数在数全部消息、列表在按显示类型过滤**，
+     * 两处口径不一致（用户 2026-10-08 截图反馈「只有送礼物的次数，没有地方看」）。
+     *
+     * 磁盘上的旧设置文件不会自己多出新类型，所以这里读进来时各补一刀。
      */
-    if (Array.isArray(this.settings.kinds) && !this.settings.kinds.includes('system')) {
-      this.settings.kinds = [...this.settings.kinds, 'system']
-      logger.info('[douyin-link] 显示类型里补上 system（房间级提示不再被过滤）')
+    if (Array.isArray(this.settings.kinds)) {
+      const added = (['system', 'gift'] as const).filter((kind) => !this.settings.kinds.includes(kind))
+      if (added.length > 0) {
+        this.settings.kinds = [...this.settings.kinds, ...added]
+        logger.info(`[douyin-link] 显示类型里补上 ${added.join('、')}（旧设置文件里没有这个类型）`)
+      }
     }
     const rooms = await store.listRooms()
     for (const room of rooms) {
@@ -1267,6 +1276,8 @@ export class AnalyzerHub {
       })
     }
     const topChat = await store.listUsers(webRid, 'chat', '', 10)
+    // 礼物榜：窗口内按礼物名聚合（「送了什么、值多少」在界面上只有这里+实时列表能看到）
+    const gifts = await store.giftBreakdown(webRid, fromMs, toMs)
     return {
       webRid,
       windowMinutes: minutes,
@@ -1278,6 +1289,7 @@ export class AnalyzerHub {
       series,
       kinds: breakdown.kinds,
       diamonds: totals.diamonds,
+      gifts,
       topChat
     }
   }
@@ -1338,6 +1350,11 @@ export class AnalyzerHub {
 
   async listUsers(webRid: string, sort: store.UserSort, keyword: string, limit: number): Promise<UserRankRow[]> {
     return store.listUsers(webRid, sort, keyword, limit)
+  }
+
+  /** 某个人送过的礼物（用户榜悬停时按需查；只查库，不进内存） */
+  async userGifts(webRid: string, userId: string): Promise<GiftBreakdownRow[]> {
+    return store.userGiftBreakdown(webRid, userId)
   }
 
   /** 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并） */

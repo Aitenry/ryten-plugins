@@ -411,13 +411,32 @@ export interface RoomSummary {
   series: Array<{ minute: number; chat: number; member: number; like: number; social: number; gift: number }>
   /** 窗口内的礼物抖币总额（0 = 没有礼物，或官方没给价） */
   diamonds: number
+  /** 窗口内的礼物流水按礼物名聚合（「送了什么、值多少」看这里；空数组 = 窗口内没有礼物） */
+  gifts: GiftBreakdownRow[]
   /** 类型分布 */
   kinds: Array<{ kind: DanmakuKind; count: number }>
   topChat: UserRankRow[]
 }
 
-/** 榜单 / 用户列表的一行（= 用户档案的「库口径」，统计是跨会话累计的） */
-export interface UserRankRow {
+/**
+ * 「礼物流水」按**礼物名**聚合出来的一行（概览的礼物榜 / 用户礼物明细都用它）。
+ *
+ * 为什么要有它：礼物的名字与价格是解码时按礼物 id 查目录补上的，落在消息的正文里；
+ * 界面上只有「次数」的列是看不出「送的是什么、值多少」的（用户 2026-10-08 反馈
+ * 「只有送礼物的次数，没有地方看」），所以这里按名字把件数与抖币合起来给一张表。
+ */
+export interface GiftBreakdownRow {
+  /** 礼物名（`messages.content`；目录查不到名字时是空串，界面显示成「（礼物名未知）」） */
+  name: string
+  /** 送出的件数（一条消息按它自带的数量算，连击会来多条） */
+  count: number
+  /** 抖币总额（0 = 目录里没给价） */
+  diamonds: number
+  /** 有多少个人送过它 */
+  users: number
+}
+
+/** 榜单 / 用户列表的一行（= 用户档案的「库口径」，统计是跨会话累计的） */export interface UserRankRow {
   userId: string
   nickname: string
   displayId: string

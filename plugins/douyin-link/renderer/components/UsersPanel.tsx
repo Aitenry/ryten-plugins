@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Button, Input, Segmented } from 'antd'
+import { Button, Input, Segmented, Tooltip } from 'antd'
 import { RiDeleteBin6Line, RiSearchLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
-import type { RoomRuntime, UserRankRow } from '../../shared/types'
+import type { GiftBreakdownRow, RoomRuntime, UserRankRow } from '../../shared/types'
 import api from '../api'
 import { clearAvatarCache } from './UserAvatar'
-import { EmptyHint, FitTable, Panel, usePluginPalette } from './ui'
+import { EmptyHint, FitTable, Panel, type PluginPalette, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -162,9 +162,14 @@ export function UsersPanel(props: {
                 width: 70,
                 align: 'right',
                 render: (_value, row) => (
-                  <span style={row.stats.gift > 0 ? { color: palette.warn } : undefined}>
-                    {formatNumber(row.stats.gift)}
-                  </span>
+                  <UserGiftsTip webRid={webRid} userId={row.userId} t={t} palette={palette}>
+                    <span
+                      className="cursor-help"
+                      style={row.stats.gift > 0 ? { color: palette.warn } : undefined}
+                    >
+                      {formatNumber(row.stats.gift)}
+                    </span>
+                  </UserGiftsTip>
                 )
               },
               {
@@ -189,5 +194,82 @@ export function UsersPanel(props: {
         />
       </div>
     </Panel>
+  )
+}
+
+/**
+ * 用户榜里「礼物」那格的悬停明细：**这个人送过哪些礼物、各多少件、值多少抖币**。
+ *
+ * 为什么要专门给一块：表格里只有一列「礼物 N 次」，列宽塞不下礼物名；
+ * 而「送了什么、值多少」正是用户点进这一列时想知道的事（2026-10-08 反馈
+ * 「还是不能获取礼物名称，和金额显示，没有地方看，只有送礼物的次数」）。
+ * 结构照设置页的浮层规矩：标题行 + 发丝线 + 左右对齐的 dt/dd 明细，不拼成一行字符串。
+ * 明细**按需查库**（悬停才查一次，之后缓存），不给榜单页加常驻查询。
+ */
+function UserGiftsTip(props: {
+  webRid: string
+  userId: string
+  t: Translate
+  palette: PluginPalette
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [rows, setRows] = useState<GiftBreakdownRow[] | null>(null)
+
+  const load = (): void => {
+    if (rows !== null) return
+    void api
+      .userGifts(props.webRid, props.userId)
+      .then((next) => setRows(next))
+      .catch(() => setRows([]))
+  }
+
+  const total = (rows ?? []).reduce(
+    (sum, row) => ({ count: sum.count + row.count, diamonds: sum.diamonds + row.diamonds }),
+    { count: 0, diamonds: 0 }
+  )
+
+  return (
+    <Tooltip
+      onOpenChange={(open) => {
+        if (open) load()
+      }}
+      title={
+        <div className="min-w-[220px]">
+          <div className="flex items-baseline justify-between gap-3 text-xs font-medium">
+            <span>{props.t('douyin-link.page.userGiftsTitle')}</span>
+            <span style={{ color: props.palette.warn }}>
+              {props.t('douyin-link.page.userGiftsTotal', {
+                count: formatNumber(total.count),
+                diamonds: formatNumber(total.diamonds)
+              })}
+            </span>
+          </div>
+          <div className="mt-1.5 border-t pt-1.5" style={{ borderColor: props.palette.split }}>
+            {rows === null ? (
+              <span className="text-xs opacity-60">{props.t('douyin-link.page.loading')}</span>
+            ) : rows.length === 0 ? (
+              <span className="text-xs opacity-60">{props.t('douyin-link.page.giftBoardEmpty')}</span>
+            ) : (
+              rows.map((row) => (
+                <div key={row.name || '(unknown)'} className="flex items-baseline justify-between gap-3 text-xs">
+                  <span className="min-w-0 truncate">{row.name || props.t('douyin-link.page.giftNameUnknown')}</span>
+                  <span className="shrink-0 opacity-80">
+                    ×{formatNumber(row.count)}
+                    <span className="opacity-60">
+                      {' · '}
+                      {row.diamonds > 0
+                        ? props.t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                        : props.t('douyin-link.page.giftValueUnknown')}
+                    </span>
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      }
+    >
+      {props.children}
+    </Tooltip>
   )
 }

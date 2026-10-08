@@ -173,6 +173,11 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       idOnly: 'ID {{id}}',
       giftDiamonds: '{{count}} coins',
       giftValueUnknown: 'value unknown',
+      giftBoard: 'Gifts (what was sent / what it cost)',
+      giftBoardEmpty: 'No gifts in this window yet',
+      giftNameUnknown: '(gift name unknown)',
+      userGiftsTitle: 'Gifts from this user',
+      userGiftsTotal: '{{count}} items · {{diamonds}} coins',
       interactions:
         'Session: chat {{chat}} · join {{enter}} · follow {{follow}} · like {{like}} · gift {{gift}}',
       sessionUsers: '{{count}} users this session',
