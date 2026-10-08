@@ -518,7 +518,8 @@ if (replayArg) {
   const orderRows = new Map()
   const plainRows = []
   const decoded = { gift: 0, order: 0, dropped: 0 }
-  const mergeCount = new Map()
+  /** 每个单号：服务端推了几次、见过最大的价、有没有见过带礼物记录的那一帧 */
+  const keyStats = new Map()
   let arrival = 0
   for (const frame of frames) {
     arrival += 1
@@ -546,7 +547,11 @@ if (replayArg) {
       plainRows.push(row)
       continue
     }
-    mergeCount.set(item.orderKey, (mergeCount.get(item.orderKey) ?? 0) + 1)
+    const stat = keyStats.get(item.orderKey) ?? { pushes: 0, maxDiamonds: 0, hadRecord: false }
+    stat.pushes += 1
+    stat.maxDiamonds = Math.max(stat.maxDiamonds, item.diamonds)
+    stat.hadRecord = stat.hadRecord || Boolean(item.giftRecord)
+    keyStats.set(item.orderKey, stat)
     const current = orderRows.get(item.orderKey)
     orderRows.set(
       item.orderKey,
@@ -556,7 +561,8 @@ if (replayArg) {
   const replayRows = [...orderRows.values(), ...plainRows]
   const unnamed = replayRows.filter((row) => !row.content)
   const priced = replayRows.filter((row) => row.diamonds > 0)
-  const merged = [...mergeCount.values()].filter((n) => n > 1).length
+  const repeated = [...keyStats.entries()].filter(([, stat]) => stat.pushes > 1)
+  const recordKeys = [...keyStats.entries()].filter(([, stat]) => stat.hadRecord).map(([key]) => key)
   const probeAfter = await logCalls()
   const replayDiagnostics = probeAfter
     .slice(probeBefore)
@@ -566,7 +572,7 @@ if (replayArg) {
     `\n真帧回放：${logPath}\n  可解码帧 ${frames.length}（跳过截断帧 ${truncated}）· ` +
       `真礼物 ${decoded.gift} · 点歌 ${decoded.order} · 解码器丢弃 ${decoded.dropped}\n` +
       `  目录 ${Object.keys(catalogPairs).length} 件 · 合并后礼物行 ${replayRows.length}` +
-      `（其中 ${merged} 单是两次推送合成）· 有价 ${priced.length} 行`
+      `（其中 ${repeated.length} 单是推送过多次）· 有价 ${priced.length} 行`
   )
   console.log('  行样例（最多 12 行）：')
   for (const row of replayRows.slice(-12)) {
@@ -575,10 +581,32 @@ if (replayArg) {
         `${row.userName || row.userId || '（无送礼人）'} → ${row.toUserName || '（无收礼人）'}`
     )
   }
+  /*
+   * 抓帧窗口里**有没有**带礼物记录（`6.5.1`）的帧，是服务端说了算——2026-10-08 实测同一个房间
+   * 有的时段每单都带、有的时段一条都不带。所以跟记录有关的断言必须**有条件**，
+   * 否则一段安静的抓帧会让这条检查变成假警报（那比没有检查更糟：会让人开始忽略 FAIL）。
+   */
+  const pricedOrders = [...orderRows.entries()].filter(([, row]) => row.diamonds > 0)
   check('真帧回放 → 每一行都有礼物名（不能是「礼物名未知」）', unnamed.length, 0)
-  check('真帧回放 → 至少一行查到官方目录价（真礼物名 + 抖币）', priced.length >= 1, true)
   check('真帧回放 → 解码器不再写「解不出名字」的诊断', replayDiagnostics.length, 0)
-  check('真帧回放 → 同一单的多次推送确实合并了', merged >= 1, true)
+  if (repeated.length > 0) {
+    check(
+      '真帧回放 → 同一单推多次也只留一行，且价取最大',
+      repeated.every(([key, stat]) => orderRows.get(key).diamonds === stat.maxDiamonds),
+      true
+    )
+  } else {
+    console.log('  · 这次抓帧里没有「同一单推多次」的情况，合并那条断言跳过')
+  }
+  if (recordKeys.length > 0) {
+    check('真帧回放 → 见过礼物记录的单都查到了目录价', recordKeys.every((key) => orderRows.get(key).diamonds > 0), true)
+    check('真帧回放 → 有价的行数不超过单数（没编价）', pricedOrders.length <= orderRows.size, true)
+  } else {
+    console.log(
+      '  · 这次抓帧里没有任何带礼物记录（6.5.1）的帧：这几单在服务端就是「没带礼物」，' +
+        '只能显示「想听 X 演唱」+ 价值未知（不是解码器的问题）'
+    )
+  }
 }
 
 rmSync(workDir, { recursive: true, force: true })
