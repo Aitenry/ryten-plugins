@@ -2,7 +2,7 @@
     "name": "ryten-plugins",
     "version": "0.1.0",
     "private": true,
-    "description": "RytenBench plugins that live outside the app: task planner, local music player and a personal ledger",
+    "description": "RytenBench plugins that live outside the app: task planner, local music player, personal ledger and a Douyin live analyzer",
     "license": "MIT",
     "repository": {
         "type": "git",

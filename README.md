@@ -13,6 +13,7 @@ dialog on Windows/Linux cannot select files and folders at the same time.)
 | Task Planner | `plugins/task-planner` | `task-planner` | Task tree, Gantt chart and list view with dependencies, plus a `manage_planner` tool for the AI assistant |
 | Music Player | `plugins/music-player` | `music-player` | Playlists, tracks, cover art, mini player and a bottom-bar entry, plus a `manage_music` tool for the AI assistant |
 | Personal Ledger | `plugins/personal-ledger` | `personal-ledger` | Multi-account, multi-currency ledger: categories/tags/merchants, budgets and savings goals, recurring entries and instalments, money lent and borrowed, credit-card and deposit reminders, net-worth charts, CSV import/export, plus a `personal_ledger` tool for the AI assistant |
+| Douyin Link | `plugins/douyin-link` | `douyin-link` | Multi-room Douyin live analyzer: one hidden collector window per room (`websocket` danmaku capture), audio follows the selected room only, every message/user/minute/session dropped into the plugin's own tables with keyword search, KPI and trend panels, chatter and gift leaderboards, side-by-side room comparison and per-user danmaku history, plus a `douyin_live` tool for the AI assistant |
 
 ## What a plugin package looks like
 
