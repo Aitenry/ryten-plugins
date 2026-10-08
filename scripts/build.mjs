@@ -279,14 +279,25 @@ async function buildPlugin(id) {
   return manifest
 }
 
-/** 打 zip（Release 资产）：包内文件在 zip 根目录，解压即可用 */
+/**
+ * 打 zip（Release 资产）：包内文件在 zip 根目录，解压即可用。
+ *
+ * **必须是「同样输入 → 同样字节」**（2026-10-08 修）：zip 里每个条目默认带**当前时间**，
+ * 于是每次构建的 zip 字节都不同、sha256 也不同。平时看不出来，但一旦同一个 tag 触发了两次
+ * 发布（GitHub 的 tag push 事件偶尔会重复/延迟），两次运行会**各传一份资产、各提交一次索引**：
+ * 后一次只成功传了资产、卡在提交索引那步失败，索引里留下的是前一次的 sha256，
+ * 而 Release 上的资产是后一次的 → 应用按索引下载校验 sha256 **直接失败**（v0.1.13 就是这么坏的）。
+ *
+ * 固定时间戳（用本地时间构造，免得 CI 的 UTC 与本机 UTC+8 编出不同的 DOS 时间）+
+ * 固定文件顺序，让构建可复现：这样无论哪一次运行传的资产，sha256 都对得上索引。
+ */
 async function zipPlugin(id) {
   const outDir = join(DIST_DIR, id)
-  const files = readdirSync(outDir)
+  const files = readdirSync(outDir).sort()
   const manifest = JSON.parse(readFileSync(join(outDir, 'plugin.json'), 'utf-8'))
+  const fixedDate = new Date(2020, 0, 1, 0, 0, 0)
   const zip = new JSZip()
-  for (const file of files) zip.file(file, readFileSync(join(outDir, file)))
-  // 固定时间戳：同样的输入产出同样的 zip（便于比对 sha256）
+  for (const file of files) zip.file(file, readFileSync(join(outDir, file)), { date: fixedDate })
   const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
   const asset = `${id}-${manifest.version}.zip`
   writeFileSync(join(DIST_DIR, asset), buffer)
