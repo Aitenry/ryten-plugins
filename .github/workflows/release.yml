@@ -12,6 +12,12 @@ on:
         description: 'Release tag（如 v0.1.0）'
         required: true
 
+# 同一个 tag 只让一次发布在跑：GitHub 的 tag push 事件偶尔重复/延迟投递，
+# 两次运行会各传一份资产、各提交一次索引 —— 索引与资产就对不上了（v0.1.13 踩过，见 scripts/build.mjs 的注释）。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
