@@ -219,14 +219,15 @@ export class RoomSocketCapture {
     const win = this.win
     if (this.stopped || !win || win.isDestroyed()) return
     logger.info(`[douyin-link] ${this.target.webRid} 实时通道：定期刷新隐藏窗口（防越跑越卡）`)
-    // requestId 会随刷新全变，旧映射清掉；CDP 会话跟着 webContents 走，重开 Network 域即可
-    this.sockets.clear()
-    try {
-      const dbg = win.webContents.debugger
-      if (dbg.isAttached()) void dbg.sendCommand('Network.enable').catch(() => {})
-    } catch {
-      /* ignore */
-    }
+    /**
+     * **不要清 socket 映射、也不要再 enable 一次 Network**（2026-10-08 修）。
+     *
+     * 之前的写法是 `this.sockets.clear()` + `Network.enable`：清掉映射之后，只要刷新后页面的 ws
+     * 是「在我们重新 enable 之前」建起来的（`webSocketCreated` 就这么漏掉了），
+     * 那条连接上的**每一帧都会因为「URL 未知」被静默丢掉**——推送还在来，插件却什么都收不到，
+     * 表现就是「同一条点歌消息只有一部分有礼物名/价格」。CDP 的监听是一直挂着的，
+     * 刷新后页面会新建 ws 并重新发 `webSocketCreated`，所以这里什么都不用做。
+     */
     win.webContents.reload()
     this.armReloadTimer()
   }
@@ -256,7 +257,13 @@ export class RoomSocketCapture {
     if (method === 'Network.webSocketFrameReceived') {
       const requestId = params.requestId ?? ''
       const url = this.sockets.get(requestId) ?? ''
-      if (!isPushUrl(url)) return
+      /**
+       * URL **未知**时照样往下试（只排除「明确不是推送 ws」的那些连接）。
+       * 为什么：映射可能缺（`webSocketCreated` 偶尔漏掉、或页面刷新那一刻建连），
+       * 而按 URL 一律丢帧的代价是整条通道静默作废；`onBinaryFrame` 解不出 `PushFrame` 时本来就会
+       * 自己返回，所以这里多试一次是安全的。
+       */
+      if (url && !isPushUrl(url)) return
       const frame = params.response
       if (!frame || frame.opcode !== 2 || !frame.payloadData) return
       this.onBinaryFrame(frame.payloadData)
