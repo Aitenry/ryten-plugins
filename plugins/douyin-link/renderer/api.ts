@@ -10,6 +10,8 @@ import type {
   MessagePage,
   MessageQuery,
   MonitorSession,
+  PresenceRow,
+  PresenceSnapshot,
   RoomCompareRow,
   RoomRuntime,
   RoomSummary,
@@ -74,11 +76,11 @@ const asList = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]
 /** 兜底设置：与主进程 `DEFAULT_SETTINGS`（main/monitor/hub.ts）逐字一致 */
 export const FALLBACK_SETTINGS: LiveSettings = {
   quality: 'SD2',
-  saveData: true,
   audioOnConnect: true,
   volume: 0.8,
   maxItems: 200,
-  kinds: ['chat', 'gift', 'member', 'like', 'social', 'stats', 'control'],
+  kinds: ['chat', 'member', 'like', 'social', 'stats', 'control', 'system'],
+  realtimeStream: true,
   autoScroll: true,
   monitorConcurrency: 3,
   resumeOnStart: true,
@@ -95,11 +97,11 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
   const volume = typeof value.volume === 'number' && Number.isFinite(value.volume) ? value.volume : fallback.volume
   return {
     quality: isQualityKey(value.quality) ? value.quality : fallback.quality,
-    saveData: bool(value.saveData, fallback.saveData),
     audioOnConnect: bool(value.audioOnConnect, fallback.audioOnConnect),
     volume: Math.min(1, Math.max(0, volume)),
     maxItems: asCount(value.maxItems) || fallback.maxItems,
     kinds: kinds.length > 0 ? kinds : fallback.kinds,
+    realtimeStream: bool(value.realtimeStream, fallback.realtimeStream),
     autoScroll: bool(value.autoScroll, fallback.autoScroll),
     monitorConcurrency: asCount(value.monitorConcurrency) || fallback.monitorConcurrency,
     resumeOnStart: bool(value.resumeOnStart, fallback.resumeOnStart),
@@ -116,7 +118,6 @@ export function normalizeDbStats(value: unknown): DbStats {
     users: asCount(raw.users),
     minutes: asCount(raw.minutes),
     sessions: asCount(raw.sessions),
-    gifts: asCount(raw.gifts),
     firstMessageAt: asCount(raw.firstMessageAt),
     lastMessageAt: asCount(raw.lastMessageAt)
   }
@@ -148,8 +149,6 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
     windowMinutes: asCount(raw.windowMinutes) || minutes,
     totals: {
       chat: asCount(totals.chat),
-      gift: asCount(totals.gift),
-      diamonds: asCount(totals.diamonds),
       enter: asCount(totals.enter),
       like: asCount(totals.like),
       follow: asCount(totals.follow)
@@ -160,8 +159,7 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
     lastAt: asCount(raw.lastAt),
     series: asList<RoomSummary['series'][number]>(raw.series),
     kinds: asList<RoomSummary['kinds'][number]>(raw.kinds),
-    topChat: asList<UserRankRow>(raw.topChat),
-    topGift: asList<UserRankRow>(raw.topGift)
+    topChat: asList<UserRankRow>(raw.topChat)
   }
 }
 
@@ -169,6 +167,22 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
 export function normalizeMessagePage(value: unknown): MessagePage {
   const raw = isRecord(value) ? value : {}
   return { rows: asList<MessagePage['rows'][number]>(raw.rows), total: asCount(raw.total) }
+}
+
+/** 在线观众快照：行必须是数组，三个计数缺了就数手里的行（面板照常渲染） */
+export function normalizePresence(value: unknown, webRid: string): PresenceSnapshot {
+  const raw = isRecord(value) ? value : {}
+  const rows = asList<PresenceRow>(raw.rows).filter((row) => isRecord(row) && typeof row.userId === 'string')
+  return {
+    webRid: asText(raw.webRid) || webRid,
+    rows,
+    micCount: asCount(raw.micCount) || rows.filter((row) => row.seat > 0).length,
+    listedCount: asCount(raw.listedCount) || rows.filter((row) => row.listed).length,
+    activeCount: asCount(raw.activeCount) || rows.filter((row) => row.lastSeen > 0).length,
+    voice: raw.voice === true,
+    hasInfo: raw.hasInfo === true,
+    updatedAt: asCount(raw.updatedAt)
+  }
 }
 
 export const api = {
@@ -235,10 +249,25 @@ export const api = {
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
   usersList: async (
     webRid: string,
-    sort: 'recent' | 'chat' | 'gift' = 'recent',
+    sort: 'recent' | 'chat' = 'recent',
     keyword = '',
     limit = 200
   ): Promise<UserRankRow[]> => asList<UserRankRow>(await invoke(`${PREFIX}users-list`, webRid, sort, keyword, limit)),
+  /**
+   * 在线观众（麦上 + 房间成员 + 本场活跃，见 shared/types 的 PresenceRow）。
+   *
+   * 这一项**不走事件推送**：面板只在自己可见时按需拉（几秒一次），
+   * 不然每个房间每秒都要把几百行档案推给渲染层，纯属浪费。
+   *
+   * **拿不到主进程的回复时回 `null`**（而不是一份「全 0 的快照」）：
+   * 主进程还没装载好、或这个通道在运行的版本里不存在（宿主刚升级插件但主进程还是旧模块）时，
+   * 回一份全 0 快照会让界面把「没连上」说成「这个房间没人」——那就成了撒谎。
+   */
+  presenceList: async (webRid: string): Promise<PresenceSnapshot | null> => {
+    const raw = await invoke(`${PREFIX}presence-list`, webRid)
+    if (!isRecord(raw)) return null
+    return normalizePresence(raw, webRid)
+  },
   userGet: async (webRid: string, userId: string): Promise<UserProfile | null> => {
     const raw = await invoke(`${PREFIX}user-get`, webRid, userId)
     return isRecord(raw) ? (raw as unknown as UserProfile) : null

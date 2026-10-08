@@ -193,9 +193,6 @@ export function SearchPanel(props: {
                     <span className="min-w-0 truncate">
                       {row.text}
                       {row.count > 1 ? <span className="opacity-60"> ×{row.count}</span> : null}
-                      {row.diamonds > 0 ? (
-                        <span className="opacity-60"> · {t('douyin-link.page.kpiDiamondsValue', { count: row.diamonds })}</span>
-                      ) : null}
                     </span>
                   )
                 }

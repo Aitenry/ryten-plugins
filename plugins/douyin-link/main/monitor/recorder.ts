@@ -22,30 +22,37 @@ import type { MessageRow, MinuteDeltaRow, UserDeltaRow } from '../db/mapper'
  */
 
 /** 参与互动计数的类型（stats / control / system 不入库：它们不是互动，是状态） */
-const COUNTED: DanmakuKind[] = ['chat', 'gift', 'member', 'like', 'social']
+const COUNTED: DanmakuKind[] = ['chat', 'member', 'like', 'social']
 
 /** 速率滑窗（最近 60 秒的消息时刻） */
 const RATE_WINDOW_MS = 60000
 /** 一个房间的内存用户上限（一场直播几万人进场，不设上限就是泄漏） */
 const USER_CAP = 4000
+/** 在场清单上限（「在线观众」页签只按需展示，但也不该无限涨） */
+const PRESENCE_CAP = 3000
 /** 单次 flush 最多写多少行消息（剩下的留到下一轮） */
 export const FLUSH_ROWS = 200
 
 const emptyCounters = (): LiveInteractions => ({
   chat: 0,
-  gift: 0,
-  diamonds: 0,
   enter: 0,
   like: 0,
   follow: 0
 })
 
-const emptyStats = (): UserStats => ({ chat: 0, gift: 0, diamonds: 0, enter: 0, like: 0, follow: 0 })
+const emptyStats = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0 })
 
 /** 本场里的一个用户：静态信息（本场见到的最新值）+ 本场的增量统计 */
 interface SessionUser {
   profile: UserProfile
   delta: UserStats
+}
+
+/** 在场证据：本场这个人第一次/最后一次出现（「在线观众」的「本场」那一列用它） */
+export interface PresenceEntry {
+  userId: string
+  firstSeen: number
+  lastSeen: number
 }
 
 export class RoomRecorder {
@@ -70,6 +77,10 @@ export class RoomRecorder {
   private messages: MessageRow[] = []
   private minutes = new Map<number, MinuteDeltaRow>()
   private minuteUsers = new Map<number, Set<string>>()
+  /** 本场「在场」证据（≠ sessionUserIds：只有 id 的来源也要记，见 PresenceEntry） */
+  private presence = new Map<string, PresenceEntry>()
+  /** 麦位：用户 id → 麦位序号（1 起）。聊天室才有，重连后由推送刷新 */
+  private micSeats = new Map<string, number>()
 
   constructor(webRid: string) {
     this.webRid = webRid
@@ -89,6 +100,40 @@ export class RoomRecorder {
     this.messages = []
     this.minutes.clear()
     this.minuteUsers.clear()
+    this.presence.clear()
+    this.micSeats.clear()
+  }
+
+  /**
+   * 更新麦位（聊天室的 `RoomLinkmicMicDisplayInfoSyncData`）。
+   *
+   * 整份替换：这份同步是「当前麦位表」的全量快照，不是增量——留着旧的会让下麦的人永远在麦上。
+   * 同时把这些 id 记进「在场」（他们一定在这个房间里）。
+   */
+  setMicUsers(userIds: string[], at = Date.now()): void {
+    this.micSeats.clear()
+    userIds.forEach((id, index) => {
+      if (!id) return
+      if (!this.micSeats.has(id)) this.micSeats.set(id, index + 1)
+      this.notePresence(id, at)
+    })
+  }
+
+  /** 麦位表（按麦位序） */
+  micList(): Array<{ userId: string; seat: number }> {
+    return [...this.micSeats.entries()]
+      .map(([userId, seat]) => ({ userId, seat }))
+      .sort((a, b) => a.seat - b.seat)
+  }
+
+  /** 某人的麦位序号（0 = 不在麦上） */
+  seatOf(userId: string): number {
+    return this.micSeats.get(userId) ?? 0
+  }
+
+  /** 本场的在场清单（「在线观众」用；按最近出现倒序） */
+  presenceList(): PresenceEntry[] {
+    return [...this.presence.values()].sort((a, b) => b.lastSeen - a.lastSeen)
   }
 
   /** 清空内存里的最近弹幕（界面上的「清空」；库里的数据不动） */
@@ -120,6 +165,7 @@ export class RoomRecorder {
 
     for (const info of users) {
       if (!info.id) continue
+      this.notePresence(info.id, now)
       const existing = this.userMap.get(info.id)
       if (!existing) {
         this.userMap.set(info.id, {
@@ -154,11 +200,11 @@ export class RoomRecorder {
       this.recent.push(item)
       if (item.userId) {
         this.sessionUserIds.add(item.userId)
+        this.notePresence(item.userId, item.at)
         const minuteBucket = this.minuteUsers.get(minuteOf(item.at)) ?? new Set<string>()
         minuteBucket.add(item.userId)
         this.minuteUsers.set(minuteOf(item.at), minuteBucket)
       }
-
       const counted = COUNTED.includes(item.kind)
       if (!counted) continue
       this.rateMarks.push(item.at)
@@ -172,7 +218,6 @@ export class RoomRecorder {
         userName: item.user,
         content: item.text,
         count: item.count,
-        diamonds: item.diamonds,
         atMs: item.at
       })
       const user = item.userId ? this.userMap.get(item.userId) : undefined
@@ -180,10 +225,6 @@ export class RoomRecorder {
         switch (item.kind) {
           case 'chat':
             user.delta.chat += 1
-            break
-          case 'gift':
-            user.delta.gift += 1
-            user.delta.diamonds += item.diamonds
             break
           case 'member':
             user.delta.enter += 1
@@ -257,7 +298,7 @@ export class RoomRecorder {
       if (rows.length >= limit) break
       const delta = entry.delta
       const active =
-        delta.chat + delta.gift + delta.enter + delta.like + delta.follow > 0 || this.sessionUserIds.has(id)
+        delta.chat + delta.enter + delta.like + delta.follow > 0 || this.sessionUserIds.has(id)
       if (!active) continue
       rows.push({
         webRid: this.webRid,
@@ -296,18 +337,39 @@ export class RoomRecorder {
     this.minutes.clear()
     this.minuteUsers.clear()
     this.sessionUserIds.clear()
+    this.presence.clear()
+    this.micSeats.clear()
   }
 
   /* --------------------------------------------------------- 内部 */
+
+  /** 记一次「在场」。上限兜底：一场大直播几万人进场，不设上限就是泄漏（界面上只按需展示） */
+  private notePresence(userId: string, at: number): void {
+    if (!userId) return
+    const hit = this.presence.get(userId)
+    if (hit) {
+      hit.lastSeen = Math.max(hit.lastSeen, at)
+      return
+    }
+    if (this.presence.size >= PRESENCE_CAP) {
+      // 满了先丢最早的那些（他们也已经不在场了）
+      let oldestId = ''
+      let oldestAt = Number.POSITIVE_INFINITY
+      for (const [id, entry] of this.presence) {
+        if (entry.lastSeen < oldestAt) {
+          oldestAt = entry.lastSeen
+          oldestId = id
+        }
+      }
+      if (oldestId) this.presence.delete(oldestId)
+    }
+    this.presence.set(userId, { userId, firstSeen: at, lastSeen: at })
+  }
 
   private bumpCounters(item: DanmakuItem): void {
     switch (item.kind) {
       case 'chat':
         this.counters.chat += 1
-        break
-      case 'gift':
-        this.counters.gift += 1
-        this.counters.diamonds += item.diamonds
         break
       case 'member':
         this.counters.enter += 1
@@ -331,11 +393,9 @@ export class RoomRecorder {
         webRid: this.webRid,
         minute,
         chat: 0,
-        gift: 0,
         member: 0,
         likes: 0,
         social: 0,
-        diamonds: 0,
         messages: 0,
         users: 0
       } satisfies MinuteDeltaRow)
@@ -343,10 +403,6 @@ export class RoomRecorder {
     switch (item.kind) {
       case 'chat':
         row.chat += 1
-        break
-      case 'gift':
-        row.gift += 1
-        row.diamonds += item.diamonds
         break
       case 'member':
         row.member += 1

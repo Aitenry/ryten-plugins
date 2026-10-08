@@ -193,7 +193,7 @@ export function getStrings(msg: PbMessage, field: number, maxLength = 200): stri
 
 /**
  * 猜字段号时的**带范围校验**取值：只认落在 [min, max] 里的候选。
- * 用在「礼物额度」这类字段号没实测过的场景：宁可拿不到（返回 undefined），不给错数字。
+ * 用在「额度/计数字段」这类字段号没实测过的场景：宁可拿不到（返回 undefined），不给错数字。
  */
 export function pickVarintInRange(
   msg: PbMessage,

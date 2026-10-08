@@ -85,13 +85,6 @@ export function OverviewPanel(props: {
           <div className="grid grid-cols-4 grid-rows-2 gap-2">
             <Kpi label={t('douyin-link.page.kpiMessages')} value={summary?.messages ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiChat')} value={totals?.chat ?? 0} palette={palette} />
-            <Kpi
-              label={t('douyin-link.page.kpiGift')}
-              value={totals?.gift ?? 0}
-              hint={t('douyin-link.page.kpiDiamondsValue', { count: totals?.diamonds ?? 0 })}
-              palette={palette}
-              accent={palette.warn}
-            />
             <Kpi label={t('douyin-link.page.kpiMember')} value={totals?.enter ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiLike')} value={totals?.like ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiSocial')} value={totals?.follow ?? 0} palette={palette} />
@@ -129,10 +122,7 @@ export function OverviewPanel(props: {
 
       <div className="col-span-4 flex min-h-0 flex-col gap-3">
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.topChat')}>
-          <RankList rows={summary?.topChat ?? []} metric="chat" webRid={webRid} t={t} palette={palette} />
-        </Panel>
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.topGift')}>
-          <RankList rows={summary?.topGift ?? []} metric="gift" webRid={webRid} t={t} palette={palette} />
+          <RankList rows={summary?.topChat ?? []} webRid={webRid} t={t} palette={palette} />
         </Panel>
         <Panel className="shrink-0" title={t('douyin-link.page.range')}>
           <Segmented
@@ -166,7 +156,7 @@ function Kpi(props: {
   )
 }
 
-/** 分钟趋势：堆叠柱（弹幕/礼物/进场/点赞/关注）+ 三条网格线 + 首末时间 */
+/** 分钟趋势：堆叠柱（弹幕/进场/点赞/关注）+ 三条网格线 + 首末时间 */
 function TrendChart(props: {
   series: RoomSummary['series']
   size: { width: number; height: number }
@@ -180,22 +170,21 @@ function TrendChart(props: {
   const plotHeight = Math.max(10, size.height - padBottom - padTop)
   // 分钟多的时候合并成桶，柱宽才看得见（最多画 60 根）
   const bucket = Math.max(1, Math.ceil(series.length / 60))
-  const buckets: Array<{ at: number; chat: number; gift: number; member: number; like: number; social: number }> = []
+  const buckets: Array<{ at: number; chat: number; member: number; like: number; social: number }> = []
   for (let index = 0; index < series.length; index += bucket) {
     const slice = series.slice(index, index + bucket)
     buckets.push({
       at: slice[0]?.minute ?? 0,
       chat: sum(slice, 'chat'),
-      gift: sum(slice, 'gift'),
       member: sum(slice, 'member'),
       like: sum(slice, 'like'),
       social: sum(slice, 'social')
     })
   }
-  const totals = buckets.map((item) => item.chat + item.gift + item.member + item.like + item.social)
+  const totals = buckets.map((item) => item.chat + item.member + item.like + item.social)
   const max = Math.max(1, ...totals)
   const barWidth = Math.max(1, plotWidth / buckets.length - 1)
-  const colors = [palette.accent, palette.warn, palette.up, palette.down, palette.axis]
+  const colors = [palette.accent, palette.up, palette.down, palette.axis]
 
   return (
     <svg width={size.width} height={size.height} role="img">
@@ -214,10 +203,9 @@ function TrendChart(props: {
         const x = padLeft + index * (plotWidth / buckets.length)
         const parts: Array<[number, string]> = [
           [item.chat, colors[0]],
-          [item.gift, colors[1]],
-          [item.member, colors[2]],
-          [item.like, colors[3]],
-          [item.social, colors[4]]
+          [item.member, colors[1]],
+          [item.like, colors[2]],
+          [item.social, colors[3]]
         ]
         let drawn = 0
         return (
@@ -283,20 +271,16 @@ function KindBars(props: {
 
 function RankList(props: {
   rows: UserRankRow[]
-  metric: 'chat' | 'gift'
   webRid: string
   t: Translate
   palette: PluginPalette
 }): React.JSX.Element {
   if (props.rows.length === 0) return <span className="text-xs opacity-50">{props.t('douyin-link.page.noData')}</span>
-  const max = Math.max(
-    1,
-    ...props.rows.map((row) => (props.metric === 'chat' ? row.stats.chat : row.stats.diamonds))
-  )
+  const max = Math.max(1, ...props.rows.map((row) => row.stats.chat))
   return (
     <div className="flex flex-col gap-1.5">
       {props.rows.slice(0, 8).map((row, index) => {
-        const value = props.metric === 'chat' ? row.stats.chat : row.stats.diamonds
+        const value = row.stats.chat
         return (
           <div key={row.userId} className="flex min-w-0 items-center gap-2 text-[10px]">
             <span className="w-4 shrink-0 text-right opacity-50">{index + 1}</span>
@@ -306,7 +290,7 @@ function RankList(props: {
                 className="block h-full rounded-full"
                 style={{
                   width: `${Math.max(3, (value / max) * 100)}%`,
-                  backgroundColor: props.metric === 'chat' ? props.palette.accent : props.palette.warn
+                  backgroundColor: props.palette.accent
                 }}
               />
             </span>
@@ -331,7 +315,7 @@ function sessionsSummary(t: Translate, sessions: MonitorSession[]): string {
   })
 }
 
-function sum(rows: RoomSummary['series'], key: 'chat' | 'gift' | 'member' | 'like' | 'social'): number {
+function sum(rows: RoomSummary['series'], key: 'chat' | 'member' | 'like' | 'social'): number {
   return rows.reduce((total, row) => total + row[key], 0)
 }
 

@@ -17,6 +17,8 @@ import {
   type MessageQuery,
   type MonitorPhase,
   type MonitorSession,
+  type PresenceRow,
+  type PresenceSnapshot,
   type QualityKey,
   type RoomCompareRow,
   type RoomRuntime,
@@ -25,35 +27,36 @@ import {
   type UserInfo,
   type UserProfile,
   type UserRankRow,
+  type UserStats,
   type UserBatch
 } from '../../shared/types'
 import * as store from '../db/mapper'
 import type { MessageRow } from '../db/mapper'
 import { AudioPump } from '../audio/pump'
 import { DanmakuCollector } from '../douyin/danmaku'
-import { ResolveFailure, resolveLiveRoom } from '../douyin/room'
-import { giftCatalog } from '../gift/catalog'
+import { RoomSocketCapture } from '../douyin/ws-capture'
+import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
+import type { RoomResolveResult } from '../douyin/room'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
 import { since, withTimeout } from '../util/deadline'
-import { isGuardedWindow } from '../window-guard'
 
 /**
- * 分析中枢：**所有网络、窗口与数据都在这里**（渲染层只是视图）。
+ * 分析中枢：**所有网络与数据都在这里**（渲染层只是视图）。
  *
- * 这一版与上一版的根本区别：不再有「全局唯一的那一个直播间」，而是
- * **一张房间清单 + 每房间一个采集器**：
+ * 链路（0.6.0：弹幕改为主进程直连，不再有隐藏窗口）：
+ *   采集器（`../douyin/danmaku` 轮询 `im/fetch`）→ recorder（本场计数 + 最近弹幕 + 在场/麦位）
+ *        → 事件推界面（节流）↘ 每 2 秒 flush：消息流水 / 分钟桶 / 用户统计 → 数据库
+ *   直播间接口（`../douyin/room` 的 enter）→ 房间成员名单 + 是否语音聊天室 + 主播信息
+ *        → 每 5 分钟轻刷一次（只打 enter，不重新抓页面）
  *
  * | 能力 | 落点 |
  * |------|------|
- * | 同时监控多个房间 | 每个房间一个隐藏窗口 + 一个 `DanmakuCollector`（各自独立会话分区） |
+ * | 同时监控多个房间 | 每个房间一路轮询（1000ms 一次，多房间加抖动；无窗口、无内存大户） |
  * | 音频只跟「最新选中的房间」 | 全局最多一个 `AudioPump`，切房间时先停旧泵再起新泵 |
  * | 历史与分析数据 | 全部落数据库（`main/db/mapper.ts`），中枢只维护「本场」的内存数字 |
- * | 打开应用不该自己连上直播间 | 装载时**只读房间清单**，不解析、不建窗口、不出声 |
- *
- * 数据流（改代码前先认这一张图）：
- *   采集器 → recorder（本场计数 + 最近弹幕 + 三类增量）→ 事件推界面（节流）
- *                                          ↘ 每 2 秒 flush：消息流水 / 分钟桶 / 用户统计 → 数据库
+ * | 在线观众 / 麦上用户 | recorder 的在场清单 + 麦位表 + enter 的成员名单，`presence()` 合并 |
+ * | 打开应用不该自己连上直播间 | 装载时**只读房间清单**，不解析、不连接、不出声 |
  */
 
 /** 主进程 → 渲染层：房间列表（相位、计数、库里累计）变了 */
@@ -68,13 +71,11 @@ export const USERS_EVENT = 'plugin:douyin-link:users'
  * 主进程 → 渲染层：本场计数的**实时心跳**（一秒一跳，只带几个数字）。
  *
  * 为什么不复用 ROOMS 事件：房间列表节流到 2 秒、还带着库里的累计量；
- * 界面上「本场：弹幕 12 · 礼物 3 次 520 抖币」这条统计行要跟手，
+ * 界面上「本场：弹幕 12 · 进场 3」这条统计行要跟手，
  * 所以单开一条只带数字的通道，页面原地合并即可（不重拉快照）。
  */
 export const TICKS_EVENT = 'plugin:douyin-link:ticks'
 
-/** 每个房间一个会话分区（媒体拦截与 Cookie 都按房间隔离；别共用一个分区） */
-const PARTITION_PREFIX = 'persist:douyin-link-room-'
 /** 一个房间在内存里最多留多少条最近弹幕 */
 const RECENT_CAP = 400
 /** flush 间隔与「房间列表」推送节流 */
@@ -88,25 +89,31 @@ const DB_STATS_CACHE_MS = 15000
 const PUSH_INTERVAL_MS = 250
 /** 一个房间一批最多推多少条（超了丢老的：界面已经跟不上了，硬塞只会更卡） */
 const MESSAGES_BUFFER_CAP = 600
-/** 解析与「采集器启动」的死线：绝不许把一次点击变成永久转圈 */
+/** 解析与新房间信息的死线：绝不许把一次点击变成永久转圈 */
 const RESOLVE_DEADLINE_MS = 20000
-const DANMAKU_START_DEADLINE_MS = 15000
 /** 掉线后自动重试的间隔与上限（监控是长期的，中断要自己爬起来） */
 const RETRY_DELAY_MS = 25000
 const RETRY_LIMIT = 12
+/** 房间信息（成员名单/在线人数/标题）的轻刷新间隔：只打 enter，一次一个请求 */
+const ROOM_REFRESH_MS = 5 * 60 * 1000
+/** 没在监控的房间多久刷一次（只要面板有房间级数据就行，别为闲置房间频繁抓页面） */
+const IDLE_REFRESH_MS = 30 * 60 * 1000
+/** 「在线观众」一次最多合成多少行（面板画不下更多，也免得查询无限膨胀） */
+const PRESENCE_ROWS_CAP = 400
 /** 保留期清理的节流 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 export const DEFAULT_SETTINGS: LiveSettings = {
   // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
   quality: 'SD2',
-  saveData: true,
   audioOnConnect: true,
   volume: 0.8,
   maxItems: 200,
-  kinds: ['chat', 'gift', 'member', 'like', 'social', 'stats', 'control'],
+  kinds: ['chat', 'member', 'like', 'social', 'stats', 'control', 'system'],
+  // 实时通道默认开：借隐藏窗口页面的 ws 收逐条消息（比轮询实时）；失败自动回落到轮询
+  realtimeStream: true,
   autoScroll: true,
-  // 同时监控 3 个房间（每个房间一个隐藏窗口，约 200MB 级内存，别贪）
+  // 同时监控 3 个房间（轮询很轻，但每个房间每秒一个请求，还是别贪）
   monitorConcurrency: 3,
   // 默认**开**：开关开着 = 就在监控（2026-10 用户实测反馈：开关显示开着、实际没在跑，
   // 还得点两次开关才动）。关掉它则「打开应用只恢复清单」，此时启动会把监控勾选一并清掉，
@@ -122,6 +129,14 @@ interface RoomState {
   webRid: string
   /** 解析用的目标（链接形式，交给 resolveLiveRoom） */
   target: string
+  /**
+   * 内部房间 id（webcast 接口用的长 id）。
+   *
+   * 除了弹幕轮询要用，它还决定「房间信息轻刷新」能不能做：库里的房间行带着它，
+   * 所以**没在监控的房间**也能每 5 分钟刷一次（在线人数/标题/成员名单/是否语音房）。
+   * 缺了它，界面上的「在线观众」在没开监控时就只能是一片 0（用户实测反馈过）。
+   */
+  roomId: string
   info: LiveRoomInfo | null
   title: string
   anchor: string
@@ -137,16 +152,30 @@ interface RoomState {
   qualities: QualityKey[]
   quality: QualityKey | null
   streams: Partial<Record<QualityKey, string>>
+  /** 解析时拿到的 Cookie（`im/fetch` 轮询要带它；失败重试时会随重新解析换新） */
+  cookie: string
+  /** 房间成员名单（enter 的 `admin_user_ids_str`，最多 30 位） */
+  roomUserIds: string[]
+  /** 主播的 User（用来把他放进用户库与在线观众） */
+  anchorUser: UserInfo | null
+  /** 是否语音/聊天室（有麦位） */
+  voice: boolean
+  /** 上次轻刷新房间信息的时刻（见 ROOM_REFRESH_MS） */
+  refreshedAt: number
   /** 当前音频泵在用的地址（重连会换签名；界面看到的仍是 streamUrl 的语义） */
   sourceUrl: string
   recorder: RoomRecorder
   collector: DanmakuCollector | null
+  /** 实时通道（借隐藏窗口页面的 ws 收逐条消息）；与 collector 同生命周期 */
+  roomSocket: RoomSocketCapture | null
+  /** 实时通道是否在顶班：true 时 HTTP 轮询被暂停（二者二选一，避免同一条消息记两次） */
+  wsLive: boolean
   /**
    * 启动令牌（0 = 没有启动在进行中）。**防重入的关键**。
    *
    * 为什么必须有：`startMonitor()` 要 `await` 解析直播间（约 1 秒）之后才把 `collector`
    * 赋上，而 `reconcile()` 只看 `collector`——这 1 秒里任何一次 reconcile（切房间、点开关、
-   * 刷新、设置生效）都会给**同一个房间**再起一个隐藏窗口与采集器，两边把同一批弹幕各推
+   * 刷新、设置生效）都会给**同一个房间**再起一路采集器，两边把同一批弹幕各推
    * 一次，界面上每条弹幕就出现两遍。真机日志为证（同一房间、相隔 700ms）：
    * `03:56:35.611 开始监控 646268856760` / `03:56:36.303 开始监控 646268856760`。
    */
@@ -172,6 +201,8 @@ export class AnalyzerHub {
   private roomsPushedAt = 0
   /** 启动令牌自增（见 RoomState.startToken） */
   private startSeq = 0
+  /** 轻刷新是否在跑（避免 flush 每分钟叠一次请求） */
+  private refreshing = false
   /** 攒着还没推给界面的弹幕与心跳（见 schedulePush：逐帧广播会把界面和主进程一起淹掉） */
   private pendingMessages = new Map<string, DanmakuItem[]>()
   private pendingTicks = new Map<string, RoomTick>()
@@ -187,6 +218,18 @@ export class AnalyzerHub {
   /** 装载：把库里的房间清单读进内存，按保留期清一次旧数据。**不自动连接** */
   async init(settings: Partial<LiveSettings>): Promise<void> {
     this.settings = { ...DEFAULT_SETTINGS, ...settings }
+    /**
+     * `system` 必须留在显示类型里（0.6.2 起强制补上）。
+     *
+     * 为什么：房间级提示（`WebcastRoomMessage`，例如「欢迎来到直播间…」）在界面上的类型是
+     * `system`，而老版本的默认显示类型里**没有**它——安静房间里唯一会来的消息就被过滤掉了，
+     * 「实时」页于是看着像坏了（用户 2026-10 实测反馈「实时里面的弹幕，没有任何内容」）。
+     * 磁盘上的旧设置文件不会自己多出这个键，所以这里读进来时补一刀。
+     */
+    if (Array.isArray(this.settings.kinds) && !this.settings.kinds.includes('system')) {
+      this.settings.kinds = [...this.settings.kinds, 'system']
+      logger.info('[douyin-link] 显示类型里补上 system（房间级提示不再被过滤）')
+    }
     const rooms = await store.listRooms()
     for (const room of rooms) {
       this.states.set(room.webRid, this.createState(room))
@@ -196,7 +239,6 @@ export class AnalyzerHub {
         `、并发上限 ${this.settings.monitorConcurrency}、保留 ${this.settings.retentionDays} 天`
     )
     this.startTimers()
-    void giftCatalog.ensure()
     void this.cleanup()
     if (this.settings.resumeOnStart) {
       // **开关开着 = 就在监控**：库里勾着监控的房间直接接着跑（用户 2026-10 明确要的行为）
@@ -220,7 +262,7 @@ export class AnalyzerHub {
     }
   }
 
-  /** 插件停用/卸载：窗口、泵与定时器全收干净（不留后台窗口） */
+  /** 插件停用/卸载：轮询、泵与定时器全收干净（不留后台请求） */
   dispose(): void {
     for (const state of this.states.values()) this.stopState(state, 'pluginDisabled')
     this.stopAudio()
@@ -236,19 +278,14 @@ export class AnalyzerHub {
     this.cleanupTimer = null
     this.started = false
     avatarCache.dispose()
-    logger.info('[douyin-link] 分析中枢已停止（采集窗口与音频泵都收掉了）')
+    logger.info('[douyin-link] 分析中枢已停止（弹幕轮询与音频泵都收掉了）')
   }
 
   /**
-   * 宿主主窗口没了（用户关掉窗口 / 应用正在退出）：把**所有带窗口与带后台流的东西**收掉，
-   * 但**保留**房间清单、设置与定时器（宿主还有可能在同一个进程里重建窗口，收得太狠会半死）。
+   * 收摊（应用退出前调用）：把**所有在跑的东西**停掉，但**保留**房间清单、设置与定时器
+   * （宿主还有可能在同一个进程里重建界面，收得太狠会半死）。
    *
-   * 为什么必须收（2026-10-08 用户实测「关掉应用再打开，看到的是抖音直播间画面」）：
-   * 隐藏采集窗口只要还活着，宿主的 `window-all-closed → app.quit()` 就永远不触发
-   * （用户以为关掉了，进程其实还在后台拉直播间页面）；而再次启动应用时，宿主的
-   * second-instance 处理器会把「第一个活着的窗口」`show()` 出来——主窗口已没了的时候，
-   * 活着的只剩我们的采集窗口。收掉它，退出流程才能走到最后一刻。
-   * 完整分析见 `./window-guard.ts`。
+   * 0.6.0 起这条路上没有窗口要关了（弹幕是主进程在轮询），收的是轮询、音频泵与重试定时器。
    */
   suspend(reason: string): void {
     let collected = 0
@@ -259,7 +296,7 @@ export class AnalyzerHub {
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
     this.retryTimers.clear()
     this.stopAudio()
-    logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 个采集窗口与音频泵，房间清单与设置保持不变`)
+    logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
     this.emitRooms(true)
   }
 
@@ -271,7 +308,6 @@ export class AnalyzerHub {
   updateSettings(patch: Partial<LiveSettings>): LiveSettings {
     const next: LiveSettings = { ...this.settings }
     if (patch.quality && (QUALITY_KEYS as string[]).includes(patch.quality)) next.quality = patch.quality
-    if (typeof patch.saveData === 'boolean') next.saveData = patch.saveData
     if (typeof patch.audioOnConnect === 'boolean') next.audioOnConnect = patch.audioOnConnect
     if (typeof patch.volume === 'number' && Number.isFinite(patch.volume)) {
       next.volume = Math.min(1, Math.max(0, patch.volume))
@@ -280,6 +316,7 @@ export class AnalyzerHub {
       next.maxItems = Math.min(1000, Math.max(50, Math.round(patch.maxItems)))
     }
     if (Array.isArray(patch.kinds)) next.kinds = patch.kinds
+    if (typeof patch.realtimeStream === 'boolean') next.realtimeStream = patch.realtimeStream
     if (typeof patch.autoScroll === 'boolean') next.autoScroll = patch.autoScroll
     if (typeof patch.monitorConcurrency === 'number' && Number.isFinite(patch.monitorConcurrency)) {
       next.monitorConcurrency = Math.min(8, Math.max(1, Math.round(patch.monitorConcurrency)))
@@ -295,17 +332,6 @@ export class AnalyzerHub {
 
   /** 设置里「影响正在跑的采集器/音频泵」的那部分变化（ipc 落盘后调用） */
   async applySettingsEffects(previous: LiveSettings): Promise<void> {
-    if (previous.saveData !== this.settings.saveData) {
-      for (const state of this.states.values()) {
-        if (!state.collector) continue
-        logger.info(`[douyin-link] 省流量模式切换，重启 ${state.webRid} 的弹幕采集窗口`)
-        try {
-          await state.collector.restart(state.webRid, { saveData: this.settings.saveData })
-        } catch (error) {
-          logger.warn('[douyin-link] 重启采集窗口失败:', describe(error))
-        }
-      }
-    }
     if (previous.quality !== this.settings.quality && this.pump && this.audioRoom) {
       logger.info(`[douyin-link] 档位切到 ${this.settings.quality}，重启 ${this.audioRoom} 的音频泵`)
       const state = this.states.get(this.audioRoom)
@@ -315,6 +341,19 @@ export class AnalyzerHub {
       }
     }
     if (previous.monitorConcurrency !== this.settings.monitorConcurrency) this.reconcile()
+    // 实时通道开关：对已经在监控的房间即时生效（关掉就销毁隐藏窗口、HTTP 轮询接管；打开就给在跑的房间补上）
+    if (previous.realtimeStream !== this.settings.realtimeStream) {
+      for (const state of this.states.values()) {
+        if (this.settings.realtimeStream) {
+          if (state.collector) this.startRoomSocket(state)
+        } else {
+          this.stopRoomSocket(state)
+          // 关掉实时通道：把 HTTP 轮询接回来（之前可能正被 ws 顶班停着）
+          if (state.collector) state.collector.start()
+        }
+      }
+      logger.info(`[douyin-link] 实时通道已${this.settings.realtimeStream ? '开启' : '关闭'}`)
+    }
   }
 
   /* --------------------------------------------------------------- 快照 */
@@ -336,14 +375,12 @@ export class AnalyzerHub {
   private async buildRooms(): Promise<RoomRuntime[]> {
     const stores = await this.roomStores()
     const list = [...this.states.values()]
-    list.sort((a, b) => {
-      // 分析中的房间永远在最上（用户刚点的那个），其余按最近活跃
-      if (a.webRid === this.activeRoom) return -1
-      if (b.webRid === this.activeRoom) return 1
-      return b.lastActiveAt - a.lastActiveAt
-    })
+    // 顺序 = 加入时间倒序（新加的在上），**点选不改顺序**（用户反馈：点一下房间就跳到最上面，
+    // 很迷惑）。选中态由左栏的高亮表达，位置不该动。也不能按 `lastActiveAt` 排——选中会刷新它，
+    // 等于换个说法继续置顶。
+    list.sort((a, b) => b.addedAt - a.addedAt)
     return list.map((state) => {
-      const stored = stores.get(state.webRid) ?? { messages: 0, users: 0, diamonds: 0, sessions: 0 }
+      const stored = stores.get(state.webRid) ?? { messages: 0, users: 0, sessions: 0 }
       return {
         webRid: state.webRid,
         title: state.info?.title || state.title,
@@ -399,7 +436,7 @@ export class AnalyzerHub {
       const resolved = await withTimeout(resolveLiveRoom(`https://live.douyin.com/${webRid}`), RESOLVE_DEADLINE_MS, 'addRoom')
       const existing = this.states.get(webRid)
       const state = existing ?? this.createState({ webRid, addedAt: Date.now() })
-      this.applyResolved(state, resolved.room, resolved.flv)
+      this.applyResolved(state, resolved)
       if (!existing) this.states.set(webRid, state)
       await store.upsertRoom(resolved.room)
       await store.touchRoom(webRid, { active: true, seen: true })
@@ -482,7 +519,7 @@ export class AnalyzerHub {
     if (!state) return false
     try {
       const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'refreshRoom')
-      this.applyResolved(state, resolved.room, resolved.flv)
+      this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
       state.failure = null
       if (state.phase === 'ended' && resolved.room.status === 'live' && state.monitor) this.reconcile()
@@ -537,7 +574,7 @@ export class AnalyzerHub {
     if (!url) {
       try {
         const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startAudio')
-        this.applyResolved(state, resolved.room, resolved.flv)
+        this.applyResolved(state, resolved)
         await store.upsertRoom(resolved.room)
         url = state.streams[this.pickQuality(state)] ?? ''
       } catch (error) {
@@ -599,7 +636,7 @@ export class AnalyzerHub {
       // 地址过期时重解析（签名带 t=）；**不改界面状态**，音频自己换地址即可
       logger.info(`[douyin-link] 重新解析音频地址（${state.webRid}）`)
       const resolved = await resolveLiveRoom(state.target)
-      this.applyResolved(state, resolved.room, resolved.flv)
+      this.applyResolved(state, resolved)
       const url = state.streams[this.pickQuality(state)] ?? ''
       if (!url) throw new ResolveFailure('enterFailed', 'no flv url')
       state.sourceUrl = url
@@ -680,7 +717,7 @@ export class AnalyzerHub {
     try {
       const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startMonitor')
       if (!alive()) return
-      this.applyResolved(state, resolved.room, resolved.flv)
+      this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
       if (!alive()) return
       await store.touchRoom(state.webRid, { active: true, seen: true })
@@ -701,22 +738,31 @@ export class AnalyzerHub {
       state.sessionId = sessionId
       state.recorder.begin(sessionId, this.settings.maxItems)
       state.danmaku = { phase: 'connecting', failure: null, since: Date.now(), received: 0 }
-      const collector = new DanmakuCollector(`${PARTITION_PREFIX}${state.webRid}`, {
-        onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
-        onStatus: (status) => this.handleDanmakuStatus(state, status.phase, status.failure)
-      })
+      const collector = new DanmakuCollector(
+        { webRid: state.webRid, roomId: resolved.room.roomId, cookie: resolved.cookie },
+        {
+          onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
+          onMic: (userIds) => this.handleMic(state, userIds),
+          onStatus: (status) => this.handleDanmakuStatus(state, status.phase, status.failure)
+        }
+      )
       state.collector = collector
       state.phase = 'connecting'
       this.emitRooms(true)
-      logger.info(`[douyin-link] 开始监控 ${state.webRid}《${state.title}》`)
-      await withTimeout(collector.start(state.webRid, { saveData: this.settings.saveData }), DANMAKU_START_DEADLINE_MS, 'danmaku.start')
-      logger.info(`[douyin-link] ${state.webRid} 弹幕窗口已开始加载（${since(startedAt)}）`)
+      logger.info(
+        `[douyin-link] 开始监控 ${state.webRid}《${state.title}》` +
+          `${state.voice ? '（语音聊天室：会跟着麦位表）' : ''}`
+      )
+      // 启动是同步的（真正的连接建立是后台的轮询循环）：这里只确认没被立刻取消
+      collector.start()
+      logger.info(`[douyin-link] ${state.webRid} 弹幕通道已启动（${since(startedAt)}）`)
+      this.startRoomSocket(state)
     } catch (error) {
       if (!alive()) return
       const failure: FailureInfo =
         error instanceof ResolveFailure
           ? { code: error.code, detail: error.detail || undefined }
-          : { code: 'windowFailed', detail: describe(error) }
+          : { code: 'connectFailed', detail: describe(error) }
       state.phase = 'error'
       state.failure = failure
       logger.warn(`[douyin-link] 监控 ${state.webRid} 启动失败:`, failure.code, failure.detail ?? '')
@@ -731,6 +777,7 @@ export class AnalyzerHub {
   private stopState(state: RoomState, reason: string): void {
     // 让进行中的启动立刻失效（见 RoomState.startToken）：它会在下一个 await 处退出
     state.startToken = 0
+    this.stopRoomSocket(state)
     const timer = this.retryTimers.get(state.webRid)
     if (timer) {
       clearTimeout(timer)
@@ -750,6 +797,61 @@ export class AnalyzerHub {
     state.phase = 'off'
     state.danmaku = idleDanmaku()
     state.failure = null
+  }
+
+  /**
+   * 实时通道：借隐藏窗口加载直播间页，用 CDP 截页面自己 ws 的推送帧，整批上报
+   * （弹幕/进场/点赞/关注/人数/麦位）。它连上时暂停 HTTP 轮询、掉线时把轮询接回来。
+   */
+  private startRoomSocket(state: RoomState): void {
+    if (!this.settings.realtimeStream || state.roomSocket) return
+    const socket = new RoomSocketCapture(
+      { webRid: state.webRid, roomId: state.roomId, cookie: state.cookie },
+      {
+        onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
+        onMic: (userIds) => this.handleMic(state, userIds),
+        onStatus: (status) => this.onRealtimeStatus(state, status.phase, status.failure)
+      }
+    )
+    state.roomSocket = socket
+    socket.start()
+  }
+
+  /** 停掉实时通道（不负责把轮询接回来；那是调用方按场景决定的事） */
+  private stopRoomSocket(state: RoomState): void {
+    const socket = state.roomSocket
+    state.roomSocket = null
+    state.wsLive = false
+    if (socket) socket.stop()
+  }
+
+  /**
+   * 实时通道相位 → 决定这一路消息用谁：
+   * ws 活着就让 HTTP 轮询歇着（二者二选一，否则同一条消息会被记两次）；
+   * ws 掉线/重试/失败就把轮询接回来——**永远有一路在跑**，实时通道只是加速，不是唯一依赖。
+   */
+  private onRealtimeStatus(
+    state: RoomState,
+    phase: DanmakuStatus['phase'],
+    failure: FailureInfo | null
+  ): void {
+    logger.info(`[douyin-link] ${state.webRid} 实时通道：${phase}${failure ? `（${failure.code}）` : ''}`)
+    this.setWsLive(state, phase === 'live')
+  }
+
+  /** ws 顶班 / 交班：切换 HTTP 轮询的启停（保持 state.collector 非空，reconcile 不会另起一路） */
+  private setWsLive(state: RoomState, live: boolean): void {
+    if (state.wsLive === live) return
+    state.wsLive = live
+    const collector = state.collector
+    if (!collector) return
+    if (live) {
+      collector.stop()
+      logger.info(`[douyin-link] ${state.webRid} 实时通道顶班，暂停 HTTP 轮询（消息不再走轮询）`)
+    } else {
+      collector.start()
+      logger.info(`[douyin-link] ${state.webRid} 实时通道交班，HTTP 轮询接管`)
+    }
   }
 
   /** 掉线自动重试（监控是长期的，中断要自己爬起来） */
@@ -846,6 +948,27 @@ export class AnalyzerHub {
     this.pushRoomsThrottled()
   }
 
+  /**
+   * 麦位表变了（聊天室的 `RoomLinkmicMicDisplayInfoSyncData`）。
+   *
+   * 麦上的人是语音聊天室最核心的一群人，所以这份表直接进「本场」分析：界面的在线观众面板
+   * 会把麦上一列置顶（按麦位序）。
+   * 这份同步是**全量快照**（不是增量），所以每次整份替换——留着旧的会让下麦的人永远在麦上。
+   */
+  private handleMic(state: RoomState, userIds: string[]): void {
+    const before = state.recorder.micList()
+    const changed =
+      before.length !== userIds.length ||
+      before.some((item, index) => item.userId !== userIds[index])
+    state.recorder.setMicUsers(userIds)
+    state.voice = true
+    if (changed) {
+      logger.info(`[douyin-link] ${state.webRid} 麦位更新：${userIds.length} 人在麦上`)
+      this.roomsDirty = true
+      this.pushRoomsThrottled(true)
+    }
+  }
+
   private queueUsers(state: RoomState, touched: string[]): void {
     const force = touched.length > 0 && Date.now() - this.usersPushAt >= USERS_PUSH_THROTTLE_MS
     if (!force) return
@@ -887,6 +1010,62 @@ export class AnalyzerHub {
       await yieldToLoop()
     }
     this.pushRoomsThrottled(true)
+    void this.refreshRoomsLight()
+  }
+
+  /**
+   * 轻刷新（`ROOM_REFRESH_MS` 一次）：只打 enter（没 Cookie 的房间才回落到抓一次页面）。
+   *
+   * **不限于监控中的房间**（0.6.0 用户实测反馈「在线观众页签全是 0」）：
+   * `voice` / 房间成员名单 / 主播档案都是「解析之后才有」的运行态；房间不在监控时如果从不解析，
+   * 面板就只能显示「普通直播间 + 全 0」，而这跟「解析过了但确实没人」在界面上一模一样。
+   * 所以对所有**知道 roomId 的房间**都轻刷（一次 GET，很便宜，骨架是页面自己也会打的接口）。
+   *
+   * 麦位与本场活跃仍然只有监控跑起来才有——那是推送里的东西，没有推送就没有，
+   * 界面上会把这件事说清楚（见 PresencePanel）。
+   */
+  private async refreshRoomsLight(): Promise<void> {
+    if (this.refreshing) return
+    this.refreshing = true
+    try {
+      const now = Date.now()
+      for (const state of this.states.values()) {
+        if (!state.roomId) continue
+        // 正在启动监控（startMonitor 里那次解析还在跑）：让那条路去填，别重复抓一遍
+        if (state.startToken) continue
+        // 监控中的房间刷得勤（在线人数/成员名单在动），没监控的只求「面板有房间级数据」：
+        // 半小时一次，既不让面板空着，也不为闲置房间每 5 分钟抓一次页面。
+        const interval = state.collector ? ROOM_REFRESH_MS : IDLE_REFRESH_MS
+        if (now - state.refreshedAt < interval) continue
+        // 先记时刻再请求：失败也要等下一个周期，不要变成每 2 秒一次的请求风暴
+        state.refreshedAt = now
+        try {
+          if (state.cookie) {
+            const entered = await enterLiveRoom(state.webRid, state.roomId, state.cookie)
+            this.applyResolved(state, {
+              room: entered.room,
+              flv: entered.flv,
+              cookie: state.cookie,
+              roomUserIds: entered.roomUserIds,
+              anchorUser: entered.anchorUser
+            })
+            await store.upsertRoom(entered.room)
+          } else {
+            // 还没有进房 Cookie（这个房间从没解析过 / 库里的房间刚恢复）：完整解析一次
+            const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'refreshLight')
+            this.applyResolved(state, resolved)
+            await store.upsertRoom(resolved.room)
+          }
+          this.roomsDirty = true
+        } catch (error) {
+          logger.warn(`[douyin-link] ${state.webRid} 房间信息轻刷新失败:`, describe(error))
+        }
+        await yieldToLoop()
+      }
+      if (this.roomsDirty) this.pushRoomsThrottled(true)
+    } finally {
+      this.refreshing = false
+    }
   }
 
   /** 按保留期清旧数据（启动与每 6 小时一次） */
@@ -913,7 +1092,7 @@ export class AnalyzerHub {
    * 落库之后**不能**把「库里累计量」缓存整份作废（旧版就是 `storeCache.at = 0`）。
    *
    * 后果：下一次房间列表推送（≤1 秒一次）会重跑三条**全表聚合**——
-   * messages `count(*)` + `sum(diamonds)`、users `count(*)`、sessions `count(*)`。
+   * messages `count(*)`、users `count(*)`、sessions `count(*)`。
    * 这些查询跑在宿主的 PGlite 上，房间一多就是每秒几轮全表扫描，宿主自己的写入与
    * 助手流式输出会被卡住（用户实测：「监控一开，对话输出卡到一半不动」）。
    *
@@ -924,7 +1103,6 @@ export class AnalyzerHub {
     const cached = this.storeCache.data.get(state.webRid)
     if (!cached || rows.length === 0) return
     cached.messages += rows.length
-    for (const row of rows) cached.diamonds += row.diamonds
   }
 
   private pushRoomsThrottled(force = false): void {
@@ -951,14 +1129,14 @@ export class AnalyzerHub {
   }
 
   /**
-   * 事件只发给**界面窗口**：跳过我们自己的隐藏采集窗口。
+   * 事件只发给**界面窗口**（宿主的主窗口）。
    *
-   * 采集窗口加载的是抖音页面，里面没有插件界面——给它发事件纯属白花主进程的时间
-   * （每个监控的房间一个窗口，多房间时更明显）。
+   * 0.6.0 起插件自己不再建窗口，所以这里不需要再挑「哪个窗口是采集用的」——
+   * 隐藏窗口那套（`window-guard.ts`）随主进程直连一起删掉了。
    */
   private broadcast(channel: string, payload: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed() || isGuardedWindow(win)) continue
+      if (win.isDestroyed()) continue
       safeSend(win.webContents, channel, payload)
     }
   }
@@ -999,17 +1177,12 @@ export class AnalyzerHub {
       series.push({
         minute: minute * 60000,
         chat: row?.chat ?? 0,
-        gift: row?.gift ?? 0,
         member: row?.member ?? 0,
         like: row?.likes ?? 0,
-        social: row?.social ?? 0,
-        diamonds: row?.diamonds ?? 0
+        social: row?.social ?? 0
       })
     }
-    const [topChat, topGift] = await Promise.all([
-      store.listUsers(webRid, 'chat', '', 10),
-      store.listUsers(webRid, 'gift', '', 10)
-    ])
+    const topChat = await store.listUsers(webRid, 'chat', '', 10)
     return {
       webRid,
       windowMinutes: minutes,
@@ -1020,8 +1193,7 @@ export class AnalyzerHub {
       lastAt: breakdown.lastAt,
       series,
       kinds: breakdown.kinds,
-      topChat,
-      topGift
+      topChat
     }
   }
 
@@ -1048,8 +1220,6 @@ export class AnalyzerHub {
         windowMinutes: minutes,
         messages: 0,
         chat: 0,
-        gift: 0,
-        diamonds: 0,
         member: 0,
         like: 0,
         social: 0,
@@ -1123,6 +1293,91 @@ export class AnalyzerHub {
     return url ? avatarCache.dataUrl(url) : ''
   }
 
+  /**
+   * 「在线观众」：把三条来源合起来（见 `shared/types` 的 PresenceRow 注释）。
+   *
+   * 排序（面板直接按这个顺序渲染）：**麦上按麦位序排最前**（他们是房间里最核心的一群人），
+   * 然后按「本场最近出现」，最后是按 id 排的成员名单。
+   *
+   * 档案来源（谁先有算谁）：本场解出来的 → 库里的（上一轮监控留下的）→ 主播信息 → 只有 id。
+   * 只有 id 的行**不编名字**，界面上显示用户号。
+   */
+  async presence(webRid: string): Promise<PresenceSnapshot> {
+    const state = this.states.get(webRid)
+    const empty: PresenceSnapshot = {
+      webRid,
+      rows: [],
+      micCount: 0,
+      listedCount: 0,
+      activeCount: 0,
+      voice: false,
+      hasInfo: false,
+      updatedAt: Date.now()
+    }
+    if (!state) return empty
+    const recorder = state.recorder
+    const presence = new Map(recorder.presenceList().map((entry) => [entry.userId, entry]))
+    const micSeats = new Map(recorder.micList().map((item) => [item.userId, item.seat]))
+    const listed = new Set(state.roomUserIds)
+    const anchorId = state.anchorUser?.id ?? ''
+
+    const ids = new Set<string>([...micSeats.keys(), ...listed])
+    if (anchorId) ids.add(anchorId)
+    // 大直播间的在场清单可能上千人：面板也画不下，只取「最近出现的」补到上限
+    // （麦位与成员名单一定在内），免得每 5 秒对宿主的 PGlite 打十几轮 in 查询。
+    for (const entry of recorder.presenceList()) {
+      if (ids.size >= PRESENCE_ROWS_CAP) break
+      ids.add(entry.userId)
+    }
+    if (ids.size === 0) return { ...empty, voice: state.voice, hasInfo: Boolean(state.info) }
+
+    const stored = await store.getUsers(webRid, [...ids])
+    const blank: UserStats = { chat: 0, enter: 0, like: 0, follow: 0 }
+    const rows: PresenceRow[] = []
+    for (const id of ids) {
+      const session = recorder.profile(id)
+      const anchor = id === anchorId ? state.anchorUser : null
+      const row = stored.get(id)
+      const stats = row?.stats ?? blank
+      rows.push({
+        userId: id,
+        nickname: session?.nickname || row?.nickname || anchor?.nickname || '',
+        displayId: session?.displayId || row?.displayId || anchor?.displayId || '',
+        avatar: session?.avatar || row?.avatar || anchor?.avatar || '',
+        gender: session?.gender || row?.gender || anchor?.gender || 0,
+        honorLevel: session?.honorLevel || row?.honorLevel || anchor?.honorLevel || 0,
+        fansClubLevel: session?.fansClubLevel || row?.fansClubLevel || anchor?.fansClubLevel || 0,
+        badges: session?.badges?.length ? session.badges : (row?.badges ?? anchor?.badges ?? []),
+        secUid: session?.secUid || row?.secUid || anchor?.secUid || '',
+        seat: micSeats.get(id) ?? 0,
+        anchor: id === anchorId,
+        listed: listed.has(id),
+        lastSeen: presence.get(id)?.lastSeen ?? 0,
+        firstSeen: presence.get(id)?.firstSeen ?? 0,
+        session: session?.stats ?? blank,
+        stats,
+        storedFirstSeen: row?.firstSeen ?? 0
+      })
+    }
+    rows.sort((a, b) => {
+      // 麦上优先（按麦位序），然后主播，再按本场最近出现
+      if (a.seat !== b.seat) return (a.seat || 999) - (b.seat || 999)
+      if (a.anchor !== b.anchor) return a.anchor ? -1 : 1
+      if (a.lastSeen !== b.lastSeen) return b.lastSeen - a.lastSeen
+      return a.userId.localeCompare(b.userId)
+    })
+    return {
+      webRid,
+      rows,
+      micCount: micSeats.size,
+      listedCount: listed.size,
+      activeCount: presence.size,
+      voice: state.voice,
+      hasInfo: Boolean(state.info),
+      updatedAt: Date.now()
+    }
+  }
+
   async clearUsers(webRid = ''): Promise<void> {
     await store.clearUsers(webRid)
     this.storeCache.at = 0
@@ -1175,6 +1430,7 @@ export class AnalyzerHub {
     return {
       webRid: room.webRid,
       target: `https://live.douyin.com/${room.webRid}`,
+      roomId: room.roomId ?? '',
       info: null,
       title: room.title ?? '',
       anchor: room.anchor ?? '',
@@ -1189,9 +1445,16 @@ export class AnalyzerHub {
       qualities: [],
       quality: null,
       streams: {},
+      cookie: '',
+      roomUserIds: [],
+      anchorUser: null,
+      voice: false,
+      refreshedAt: 0,
       sourceUrl: '',
       recorder: new RoomRecorder(room.webRid),
       collector: null,
+      roomSocket: null,
+      wsLive: false,
       startToken: 0,
       sessionId: 0,
       attempts: 0,
@@ -1201,16 +1464,28 @@ export class AnalyzerHub {
     }
   }
 
-  private applyResolved(state: RoomState, info: LiveRoomInfo, streams: Partial<Record<QualityKey, string>>): void {
+  private applyResolved(state: RoomState, resolved: RoomResolveResult): void {
+    const info = resolved.room
     state.info = info
+    state.roomId = info.roomId || state.roomId
     state.title = info.title
     state.anchor = info.anchor
     state.cover = info.cover
     state.onlineText = info.onlineText
     state.status = info.status
-    state.streams = streams
-    state.qualities = QUALITY_KEYS.filter((key) => Boolean(streams[key]))
-    if (!state.quality || !streams[state.quality]) state.quality = this.pickQuality(state)
+    state.voice = info.voice
+    state.streams = resolved.flv
+    state.cookie = resolved.cookie || state.cookie
+    state.qualities = QUALITY_KEYS.filter((key) => Boolean(resolved.flv[key]))
+    if (!state.quality || !resolved.flv[state.quality]) state.quality = this.pickQuality(state)
+    // 房间成员名单与主播信息随解析一起更新（见过的用新值覆盖，没见过才写）
+    if (resolved.roomUserIds.length > 0) {
+      const previous = new Set(state.roomUserIds)
+      const merged = [...state.roomUserIds, ...resolved.roomUserIds.filter((id) => !previous.has(id))]
+      state.roomUserIds = merged.slice(0, 200)
+    }
+    if (resolved.anchorUser?.id) state.anchorUser = resolved.anchorUser
+    state.refreshedAt = Date.now()
   }
 }
 
@@ -1226,14 +1501,14 @@ export const FAILURE_CODES = [
   'roomNotFound',
   'enterFailed',
   'resolveFailed',
-  'windowFailed',
-  'windowClosed',
-  'loadFailed',
-  'noSocket',
-  'silent',
-  'retryWithoutSaveData',
-  'reloadLimit',
-  'renderGone',
+  'connectFailed',
+  'timeout',
+  'httpError',
+  'throttled',
+  'badResponse',
+  'sessionExpired',
+  'rejected',
+  'pollFailed',
   'notConnected',
   'audioUnsupported',
   'noAudioStream',
@@ -1242,7 +1517,6 @@ export const FAILURE_CODES = [
   'fetchFailed',
   'badStream',
   'noAudio',
-  'httpError',
   'decodeFailed',
   'unsupported'
 ]

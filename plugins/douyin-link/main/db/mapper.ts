@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm'
 import logger from 'electron-log'
 import { withOrm } from '@host/main/database/orm'
 import type {
@@ -14,7 +14,6 @@ import type {
   UserStats
 } from '../../shared/types'
 import {
-  douyinLinkGifts,
   douyinLinkMessages,
   douyinLinkMeta,
   douyinLinkMinutes,
@@ -46,7 +45,6 @@ export interface MessageRow {
   userName: string
   content: string
   count: number
-  diamonds: number
   atMs: number
 }
 
@@ -76,16 +74,14 @@ export interface MinuteDeltaRow {
   webRid: string
   minute: number
   chat: number
-  gift: number
   member: number
   likes: number
   social: number
-  diamonds: number
   messages: number
   users: number
 }
 
-const EMPTY_STATS = (): UserStats => ({ chat: 0, gift: 0, diamonds: 0, enter: 0, like: 0, follow: 0 })
+const EMPTY_STATS = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0 })
 
 /* ------------------------------------------------------------------ 房间 */
 
@@ -300,20 +296,18 @@ export async function bumpMinutes(rows: MinuteDeltaRow[]): Promise<void> {
       const values = sql.join(
         chunk.map(
           (row) =>
-            sql`(${row.webRid}, ${row.minute}, ${row.chat}, ${row.gift}, ${row.member}, ${row.likes}, ${row.social}, ${row.diamonds}, ${row.messages}, ${row.users})`
+            sql`(${row.webRid}, ${row.minute}, ${row.chat}, ${row.member}, ${row.likes}, ${row.social}, ${row.messages}, ${row.users})`
         ),
         sql`, `
       )
       await db.execute(sql`
-        INSERT INTO douyin_link_minutes (web_rid, minute, chat, gift, member, likes, social, diamonds, messages, users)
+        INSERT INTO douyin_link_minutes (web_rid, minute, chat, member, likes, social, messages, users)
         VALUES ${values}
         ON CONFLICT (web_rid, minute) DO UPDATE SET
           chat = douyin_link_minutes.chat + EXCLUDED.chat,
-          gift = douyin_link_minutes.gift + EXCLUDED.gift,
           member = douyin_link_minutes.member + EXCLUDED.member,
           likes = douyin_link_minutes.likes + EXCLUDED.likes,
           social = douyin_link_minutes.social + EXCLUDED.social,
-          diamonds = douyin_link_minutes.diamonds + EXCLUDED.diamonds,
           messages = douyin_link_minutes.messages + EXCLUDED.messages,
           users = GREATEST(douyin_link_minutes.users, EXCLUDED.users)
       `)
@@ -324,11 +318,9 @@ export async function bumpMinutes(rows: MinuteDeltaRow[]): Promise<void> {
 export interface MinuteRow {
   minute: number
   chat: number
-  gift: number
   member: number
   likes: number
   social: number
-  diamonds: number
   messages: number
   users: number
 }
@@ -351,11 +343,9 @@ export async function minuteSeries(webRid: string, fromMinute: number, toMinute:
     return rows.map((row) => ({
       minute: row.minute,
       chat: row.chat,
-      gift: row.gift,
       member: row.member,
       likes: row.likes,
       social: row.social,
-      diamonds: row.diamonds,
       messages: row.messages,
       users: row.users
     }))
@@ -396,8 +386,6 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             badges: row.badges,
             secUid: row.secUid,
             chat: row.delta.chat,
-            gift: row.delta.gift,
-            diamonds: row.delta.diamonds,
             enter: row.delta.enter,
             likes: row.delta.like,
             follows: row.delta.follow,
@@ -421,8 +409,6 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             honorLevel: greatest('honor_level'),
             fansClubLevel: greatest('fans_club_level'),
             chat: sql`douyin_link_users.chat + EXCLUDED.chat`,
-            gift: sql`douyin_link_users.gift + EXCLUDED.gift`,
-            diamonds: sql`douyin_link_users.diamonds + EXCLUDED.diamonds`,
             enter: sql`douyin_link_users.enter + EXCLUDED.enter`,
             likes: sql`douyin_link_users.likes + EXCLUDED.likes`,
             follows: sql`douyin_link_users.follows + EXCLUDED.follows`,
@@ -434,7 +420,7 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
   })
 }
 
-export type UserSort = 'recent' | 'chat' | 'gift'
+export type UserSort = 'recent' | 'chat'
 
 /** 某个房间的用户榜（`keyword` 匹配昵称/抖音号/id） */
 export async function listUsers(
@@ -460,9 +446,7 @@ export async function listUsers(
     const order =
       sort === 'chat'
         ? [desc(douyinLinkUsers.chat), desc(douyinLinkUsers.lastSeen)]
-        : sort === 'gift'
-          ? [desc(douyinLinkUsers.diamonds), desc(douyinLinkUsers.gift)]
-          : [desc(douyinLinkUsers.lastSeen)]
+        : [desc(douyinLinkUsers.lastSeen)]
     const rows = await db
       .select()
       .from(douyinLinkUsers)
@@ -487,6 +471,31 @@ export async function getUser(webRid: string, userId: string): Promise<UserRankR
       .limit(1)
     return rows.length > 0 ? toRankRow(rows[0]) : null
   })
+}
+
+/**
+ * 一次查一批用户（「在线观众」按 id 列表取档案用）。
+ *
+ * 为什么要有批量版：那一页可能一次要 30~300 个 id，一个个 `getUser` 就是几百次往返，
+ * 跑在宿主的 PGlite 上会把别的写入挤停（用户实测过的卡顿就是这么来的）。
+ * `inArray` 一次查完，分片是为了别让参数个数顶到上限。
+ */
+export async function getUsers(webRid: string, userIds: string[]): Promise<Map<string, UserRankRow>> {
+  const out = new Map<string, UserRankRow>()
+  const ids = [...new Set(userIds.filter((id) => id.length > 0))]
+  if (!webRid || ids.length === 0) return out
+  await schemaReady
+  await withOrm('douyin-link.getUsers', async (db) => {
+    for (let index = 0; index < ids.length; index += MSG_CHUNK) {
+      const slice = ids.slice(index, index + MSG_CHUNK)
+      const rows = await db
+        .select()
+        .from(douyinLinkUsers)
+        .where(and(eq(douyinLinkUsers.webRid, webRid), inArray(douyinLinkUsers.userId, slice)))
+      for (const row of rows) out.set(row.userId, toRankRow(row))
+    }
+  })
+  return out
 }
 
 export async function clearUsers(webRid = ''): Promise<void> {
@@ -545,7 +554,6 @@ export async function listSessions(webRid: string, limit = 20): Promise<MonitorS
 export interface RoomStore {
   messages: number
   users: number
-  diamonds: number
   sessions: number
 }
 
@@ -557,22 +565,20 @@ export async function roomStores(): Promise<Map<string, RoomStore>> {
     const ensure = (webRid: string): RoomStore => {
       const hit = out.get(webRid)
       if (hit) return hit
-      const created: RoomStore = { messages: 0, users: 0, diamonds: 0, sessions: 0 }
+      const created: RoomStore = { messages: 0, users: 0, sessions: 0 }
       out.set(webRid, created)
       return created
     }
     const messages = await db
       .select({
         webRid: douyinLinkMessages.webRid,
-        messages: sql<number>`count(*)::int`,
-        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+        messages: sql<number>`count(*)::int`
       })
       .from(douyinLinkMessages)
       .groupBy(douyinLinkMessages.webRid)
     for (const row of messages) {
       const store = ensure(row.webRid)
       store.messages = row.messages
-      store.diamonds = row.diamonds
     }
     const users = await db
       .select({ webRid: douyinLinkUsers.webRid, users: sql<number>`count(*)::int` })
@@ -597,11 +603,9 @@ export async function windowAggregates(fromMs: number, toMs: number): Promise<Ma
         webRid: douyinLinkMessages.webRid,
         messages: sql<number>`count(*)::int`,
         chat: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'chat'))::int`,
-        gift: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'gift'))::int`,
         member: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'member'))::int`,
         likes: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'like'))::int`,
         social: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'social'))::int`,
-        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
         users: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int`
       })
       .from(douyinLinkMessages)
@@ -621,8 +625,6 @@ export async function windowAggregates(fromMs: number, toMs: number): Promise<Ma
         windowMinutes: Math.max(1, Math.round((toMs - fromMs) / 60000)),
         messages: row.messages,
         chat: row.chat,
-        gift: row.gift,
-        diamonds: row.diamonds,
         member: row.member,
         like: row.likes,
         social: row.social,
@@ -725,8 +727,6 @@ export async function windowTotals(
   const totals = EMPTY_STATS()
   if (hit) {
     totals.chat = hit.chat
-    totals.gift = hit.gift
-    totals.diamonds = hit.diamonds
     totals.enter = hit.member
     totals.like = hit.like
     totals.follow = hit.social
@@ -738,14 +738,13 @@ export async function windowTotals(
 export async function dbStats(): Promise<DbStats> {
   await schemaReady
   return withOrm('douyin-link.dbStats', async (db) => {
-    const count = async (table: 'rooms' | 'messages' | 'users' | 'minutes' | 'sessions' | 'gifts'): Promise<number> => {
+    const count = async (table: 'rooms' | 'messages' | 'users' | 'minutes' | 'sessions'): Promise<number> => {
       const mapping = {
         rooms: douyinLinkRooms,
         messages: douyinLinkMessages,
         users: douyinLinkUsers,
         minutes: douyinLinkMinutes,
-        sessions: douyinLinkSessions,
-        gifts: douyinLinkGifts
+        sessions: douyinLinkSessions
       } as const
       const rows = await db.select({ value: sql<number>`count(*)::int` }).from(mapping[table])
       return rows[0]?.value ?? 0
@@ -762,59 +761,13 @@ export async function dbStats(): Promise<DbStats> {
       users: await count('users'),
       minutes: await count('minutes'),
       sessions: await count('sessions'),
-      gifts: await count('gifts'),
       firstMessageAt: span[0]?.first ?? 0,
       lastMessageAt: span[0]?.last ?? 0
     }
   })
 }
 
-/* ------------------------------------------------------- 礼物目录 / 键值 */
-
-export interface GiftRow {
-  id: number
-  name: string
-  diamonds: number
-  describe: string
-  icon: string
-}
-
-export async function saveGifts(rows: GiftRow[]): Promise<void> {
-  if (rows.length === 0) return
-  await schemaReady
-  await withOrm('douyin-link.saveGifts', async (db) => {
-    const now = Date.now()
-    for (let index = 0; index < rows.length; index += MSG_CHUNK) {
-      await db
-        .insert(douyinLinkGifts)
-        .values(rows.slice(index, index + MSG_CHUNK).map((row) => ({ ...row, updatedAt: now })))
-        .onConflictDoUpdate({
-          target: douyinLinkGifts.id,
-          set: {
-            name: sql`excluded.name`,
-            diamonds: sql`excluded.diamonds`,
-            describe: sql`excluded.describe`,
-            icon: sql`excluded.icon`,
-            updatedAt: sql`excluded.updated_at`
-          }
-        })
-    }
-  })
-}
-
-export async function loadGifts(): Promise<GiftRow[]> {
-  await schemaReady
-  return withOrm('douyin-link.loadGifts', async (db) => {
-    const rows = await db.select().from(douyinLinkGifts)
-    return rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      diamonds: row.diamonds,
-      describe: row.describe,
-      icon: row.icon
-    }))
-  })
-}
+/* ------------------------------------------------------------------ 键值 */
 
 export async function getMeta(key: string): Promise<string> {
   await schemaReady
@@ -863,11 +816,10 @@ function toStoredMessage(row: {
   userName: string
   content: string
   count: number
-  diamonds: number
   atMs: number
   id: number
 }): StoredMessage {
-  return {
+  const message: StoredMessage = {
     id: row.id,
     webRid: row.webRid,
     kind: row.kind as DanmakuKind,
@@ -875,9 +827,9 @@ function toStoredMessage(row: {
     userId: row.userId,
     text: row.content,
     count: row.count,
-    diamonds: row.diamonds,
     at: row.atMs
   }
+  return message
 }
 
 function toRankRow(row: {
@@ -895,8 +847,6 @@ function toRankRow(row: {
   honorLevel: number
   fansClubLevel: number
   chat: number
-  gift: number
-  diamonds: number
   enter: number
   likes: number
   follows: number
@@ -926,8 +876,6 @@ function toRankRow(row: {
     fansClubLevel: row.fansClubLevel,
     stats: {
       chat: row.chat,
-      gift: row.gift,
-      diamonds: row.diamonds,
       enter: row.enter,
       like: row.likes,
       follow: row.follows

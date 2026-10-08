@@ -1,382 +1,442 @@
-import { BrowserWindow, session, type Debugger, type Session } from 'electron'
 import logger from 'electron-log'
 import type { DanmakuItem, DanmakuPhase, FailureInfo, UserInfo } from '../../shared/types'
-import { since, withTimeout } from '../util/deadline'
-import { giftCatalog } from '../gift/catalog'
-import { guardHiddenWindow } from '../window-guard'
-import { parsePushFrame } from './push'
+import { decodePushBatch, parseJsonLoose, type JsonDecodedBatch } from './json'
+import { decodeProtoResponse } from './proto-messages'
 
 /**
- * 弹幕采集器：**借直播间页面自己的那条已签名 websocket**。
+ * 弹幕采集器：**主进程自己 GET `/webcast/im/fetch/`**，不再建隐藏窗口。
  *
- * 为什么不自己连：抖音 web 端的弹幕推送地址 `wss://…/webcast/im/push/v2/` 需要
- * `signature`（由页面里那份 webmssdk 现场算出来的），裸连一律被风控挡回 502（实测四种域名都一样），
- * 而 HTTP 的 `im/fetch` 在缺签名时返回空数组。与其复刻那套混淆签名，不如：
+ * 为什么换掉「隐藏窗口 + CDP 截 ws 帧」（上一版的做法）：
+ * 那条路的全部麻烦都来自「ws 推送要 signature」——而 signature 只有页面里那份混淆的
+ * webmssdk 算得出来（而且要有真浏览器的设备指纹与 msToken 才不是占位值），于是只能开窗口借
+ * 页面自己的连接。实测（2026-10）：
+ * - `wss://…/webcast/im/push/v2/` 即使带上同样的 Cookie 也只会拿到 **200 空响应**
+ *   （试遍了各家域名、两种 webcast_sdk_version、以及照 IM SDK 原样拼的
+ *   `signature = frontierSign({'X-MS-STUB': md5(param 串)})['X-Bogus']` 都一样）；
+ * - 官方推送地址是**服务端下发**的（`push_server` + `route_params`，只在页面那套签名流程的
+ *   protobuf 响应里给），我们自己拉到的响应里 `internal_ext` 永远是 `wss_info:0-0-0-0`
+ *   ——即「没给我们分配推送节点」；
+ * - 但 HTTP 的 `GET /webcast/im/fetch/` **不需要 signature**：一份 ttwid Cookie + 一组
+ *   固定参数就能拿到 `{data:[…], extra:{cursor, fetch_interval, now}, internal_ext}`，
+ *   而且 `cursor`/`internal_ext` 带上就继续增量推送——这就是主进程能独立收全量的原因。
  *
- * 1. 开一个**隐藏窗口**加载 `https://live.douyin.com/<rid>`（页面自己会算出签名、连上 ws、发心跳、回 ack）；
- * 2. 用 Electron 自带的 **CDP（webContents.debugger）** 监听 `Network.webSocketFrameReceived`，
- *    直接把 ws 收到的二进制帧截下来（无需注入脚本、不依赖页面内部结构）；
- * 3. 主进程按 protobuf 解出弹幕（见 ./push.ts）。
+ * 于是采集变成：**主进程按服务端给的间隔轮询**（`fetch_interval`，实测 1000ms）。
  *
- * 省流量：隐藏窗口默认**取消所有流媒体请求**（flv/m3u8/ts/mp4），只看弹幕；
- * 若 15 秒内没截到 ws，自动关掉拦截重试一次（有页面非要把播放器拉起来才连 im 的情况）。
- * 画面与声音一律不落到用户耳朵里：窗口不 show、webContents.setAudioMuted(true)、
- * 页面弹窗一律拒绝（`setWindowOpenHandler`），并且窗口交给 `../window-guard` 看管
- * ——**被 show 就立刻按回去**，主窗口关闭时也会被连带收掉（隐藏窗口也是窗口，
- * 留在那儿会让宿主永远等不到 `window-all-closed`）。
+ * ⚠️ 限流（这是实测踩过的坑）：**1 秒一次连着跑会被风控**，接口开始回
+ * `HTTP 503`（用户 2026-10 遇到的「接口返回异常状态码：HTTP 503」就是这个）。
+ * 503 是「慢一点、等会再来」，不是「挂了」，所以这里：
+ * - 503 / 429 → 单独的 `throttled` 状态 + 指数退避（5s→10s→20s→40s→60s 封顶），
+ *   并且**把该房间的轮询下限抬上去**（自适应节流：被限流就慢一档，连续顺畅再慢慢降回来）；
+ * - 其它失败才按「连续 3 次」判死（交回中枢重解析换新 Cookie）。
+ *
+ * 与上一版一致的对外契约：`onItems` / `onStatus`，另外多一个 `onMic`
+ * ——聊天室的麦位表随推送一起来（`RoomLinkmicMicDisplayInfoSyncData`）。
+ *
+ * 省流量这件事不再需要设置项：没有窗口就没有画面，压根不会去拉 flv/m3u8。
  */
 
-const PUSH_HOST_MARK = '/webcast/im'
-const WATCHDOG_NO_SOCKET_MS = 15000
-const WATCHDOG_SILENCE_MS = 90000
-const MAX_RELOADS = 5
-/** CDP 挂载/开网络域的死线：这两步都可能「吊住且不报错」，别让它拦住加载 */
-const CDP_DEADLINE_MS = 8000
+/** 单次请求的死线（轮询是长期动作，一次卡住不该拖住整条链路） */
+const POLL_TIMEOUT_MS = 15000
+/** 轮询间隔的钳制范围（服务端给 1000ms；再快没必要，再慢会积压） */
+const MIN_INTERVAL_MS = 1200
+const MAX_INTERVAL_MS = 5000
+/** 被限流时该房间的轮询下限能抬到多少（自适应节流的天花板） */
+const MAX_THROTTLE_FLOOR_MS = 15000
+/** 被限流后的退避阶梯（毫秒） */
+const THROTTLE_BACKOFF_MS = [5000, 10000, 20000, 40000, 60000]
+/** 连续顺畅多少轮之后，把抬高的下限降回来 */
+const RELAX_AFTER_SUCCESS = 20
+/** 诊断汇总的间隔：「接口到底推了哪些消息」按这个节奏写一条日志（实时页空白时靠它定位） */
+const METHOD_SUMMARY_MS = 5 * 60 * 1000
+/** 其它失败连续多少次算「这条通道不行了」（之后交给中枢重试：会重新解析房间换新 Cookie） */
+const FATAL_FAILURES = 3
+/** 失败后的退避基数 */
+const BACKOFF_BASE_MS = 2000
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
-const MEDIA_PATTERN = /\.(flv|m3u8|ts|mp4|m4s|aac|mp3)(\?|$)/i
+export interface DanmakuTarget {
+  webRid: string
+  /** 内部房间 id（webcast 接口用的长 id） */
+  roomId: string
+  /** 进房时拿到的 Cookie（ttwid 必需） */
+  cookie: string
+}
 
 export interface DanmakuHooks {
-  /** 一批弹幕 + 这批里出现的用户静态信息（交给用户档案库聚合） */
+  /** 一批消息 + 这批里出现的用户静态信息（交给用户档案库聚合） */
   onItems: (items: DanmakuItem[], users: UserInfo[], meta: { roomEnded: boolean }) => void
+  /** 在麦上的用户（按麦位顺序；聊天室才有） */
+  onMic: (userIds: string[]) => void
   onStatus: (status: { phase: DanmakuPhase; failure: FailureInfo | null }) => void
 }
 
-export class DanmakuCollector {
-  private readonly partition: string
-  private readonly hooks: DanmakuHooks
-  private win: BrowserWindow | null = null
-  private target = ''
-  private blockMedia = true
-  private stopped = true
-  private sawSocket = false
-  private firstItemsLogged = false
-  private socketIds = new Set<string>()
-  private lastFrameAt = 0
-  private reloads = 0
-  private reloadedForBlocking = false
-  private noSocketTimer: ReturnType<typeof setTimeout> | null = null
-  private silenceTimer: ReturnType<typeof setInterval> | null = null
-  private cdpHandler: ((event: unknown, method: string, params: unknown) => void) | null = null
+interface PollResult {
+  messages: unknown[]
+  /** protobuf 模式下的原始报文（与 `messages` 二选一） */
+  proto: Buffer | null
+  cursor: string
+  internalExt: string
+  intervalMs: number
+  /** 服务端下发的推送地址（protobuf 才给；后续尝试升级到 websocket 用） */
+  pushServer: string
+  fetchType: number
+}
 
-  constructor(partition: string, hooks: DanmakuHooks) {
-    this.partition = partition
+/** 带失败码的轮询错误（`code` 直接给界面翻文案） */
+class PollError extends Error {
+  readonly code: string
+  readonly detail: string
+  /** 是否属于「被限流」（503/429）：这类不该判死，只该慢下来 */
+  readonly throttled: boolean
+
+  constructor(code: string, detail = '', throttled = false) {
+    super(detail ? `${code}: ${detail}` : code)
+    this.name = 'PollError'
+    this.code = code
+    this.detail = detail
+    this.throttled = throttled
+  }
+}
+
+export class DanmakuCollector {
+  private readonly hooks: DanmakuHooks
+  private target: DanmakuTarget
+  private stopped = true
+  private running = false
+  private connectedOnce = false
+  private failures = 0
+  private cursor = ''
+  private internalExt = ''
+  private intervalMs = MIN_INTERVAL_MS
+  /** 被限流抬高的轮询下限（自适应节流；顺畅一段时间后慢慢降回 MIN_INTERVAL_MS） */
+  private floorMs = MIN_INTERVAL_MS
+  /** 连续被限流的次数（决定退避阶梯） */
+  private throttles = 0
+  /** 连续顺畅的轮数（用于把抬高的下限降回来） */
+  private smoothRounds = 0
+  /** 诊断计数（见 METHOD_SUMMARY_MS） */
+  private pollsDone = 0
+  private itemsDone = 0
+  private methods: Record<string, number> = {}
+  private lastSummaryAt = Date.now()
+  private loggedFirstBatch = false
+  /** 服务端下发的推送地址（protobuf 响应里才有；记录一次，供日志与后续 ws 升级用） */
+  private pushServer = ''
+  private wakeup: (() => void) | null = null
+
+  constructor(target: DanmakuTarget, hooks: DanmakuHooks) {
+    this.target = target
     this.hooks = hooks
   }
 
-  /** 弹幕通道是否已经建立过（页面里的 ws 被截到过） */
+  /** 推送通道是否已经成功拉到过数据（界面上的「已连接」） */
   get connected(): boolean {
-    return this.sawSocket
+    return this.connectedOnce
   }
 
-  async start(webRid: string, options: { saveData: boolean }): Promise<void> {
-    this.stop()
-    this.target = webRid
-    this.blockMedia = options.saveData
+  /** 换一份 Cookie / 房间 id（重解析之后） */
+  setTarget(target: DanmakuTarget): void {
+    this.target = target
+  }
+
+  start(): void {
+    if (this.running) return
     this.stopped = false
-    this.reloads = 0
-    this.reloadedForBlocking = false
-    this.sawSocket = false
-    this.firstItemsLogged = false
-    this.socketIds.clear()
-    this.lastFrameAt = 0
-    await this.open()
+    this.running = true
+    this.connectedOnce = false
+    this.failures = 0
+    this.throttles = 0
+    this.smoothRounds = 0
+    this.floorMs = MIN_INTERVAL_MS
+    this.pollsDone = 0
+    this.itemsDone = 0
+    this.methods = {}
+    this.lastSummaryAt = Date.now()
+    this.loggedFirstBatch = false
+    this.cursor = ''
+    this.internalExt = ''
+    this.intervalMs = MIN_INTERVAL_MS
+    this.hooks.onStatus({ phase: 'connecting', failure: null })
+    logger.info(`[douyin-link] 弹幕通道开始轮询（房间 ${this.target.webRid} / ${this.target.roomId}）`)
+    void this.loop()
   }
 
   stop(): void {
     this.stopped = true
-    this.clearTimers()
-    const win = this.win
-    this.win = null
-    this.sawSocket = false
-    this.socketIds.clear()
-    if (win && !win.isDestroyed()) {
-      try {
-        if (win.webContents.debugger.isAttached()) {
-          if (this.cdpHandler) win.webContents.debugger.removeListener('message', this.cdpHandler)
-          win.webContents.debugger.detach()
-        }
-      } catch {
-        // 窗口已经没了：忽略
-      }
-      try {
-        win.destroy()
-      } catch {
-        // 同上
-      }
-    }
-    this.cdpHandler = null
-    this.clearMediaBlock()
+    this.running = false
+    this.connectedOnce = false
+    const wake = this.wakeup
+    this.wakeup = null
+    if (wake) wake()
   }
 
-  /** 换省流量策略：重建窗口（拦截器只能装在会话上，改策略最省事就是重开） */
-  async restart(webRid: string, options: { saveData: boolean }): Promise<void> {
-    await this.start(webRid, options)
-  }
-
-  private async open(): Promise<void> {
-    // **看门狗必须在最早的一刻装上**：建窗口、CDP attach、Network.enable、loadURL，
-    // 这几步（在真机上）都可能「吊住而且不报错」。旧版把看门狗放在 `await Network.enable`
-    // 之后，那一步不返回就永远没有出口——界面停「连接弹幕中…」，日志里连一行失败都没有。
-    // 现在无论卡在哪一步，15 秒后都会被拽出来（先关掉省流量重试，再不行就报 noSocket）。
-    this.armNoSocketWatchdog()
-    this.armSilenceWatchdog()
-    try {
-      const ses = session.fromPartition(this.partition)
-      this.applyUserAgent(ses)
-      this.applyMediaBlock(ses)
-      const win = new BrowserWindow({
-        show: false,
-        skipTaskbar: true,
-        width: 960,
-        height: 540,
-        webPreferences: {
-          partition: this.partition,
-          backgroundThrottling: false,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-          spellcheck: false,
-          devTools: false
-        }
-      })
-      this.win = win
-      win.webContents.setAudioMuted(true)
-      // 隐藏窗口不能有可见的副产物：
-      // ① 登记守卫——万一有人（宿主 second-instance 处理器 / 页面）把它 show() 出来，立刻按回去；
-      // ② 拒掉页面自己开的弹窗——默认策略会为 window.open 建一个**可见**的 BrowserWindow，
-      //    抖音直播页的登录/广告浮层足够触发它（那也会表现为「冒出个直播间画面」）。
-      guardHiddenWindow(win)
-      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-      win.on('closed', () => {
-        if (!this.stopped && this.win === win) {
-          this.win = null
-          this.hooks.onStatus({ phase: 'error', failure: { code: 'windowClosed' } })
-        }
-      })
-      win.webContents.on('render-process-gone', (_event, details) => {
+  private async loop(): Promise<void> {
+    while (!this.stopped) {
+      let waitMs = 0
+      try {
+        const result = await this.poll()
         if (this.stopped) return
-        this.hooks.onStatus({ phase: 'retrying', failure: { code: 'renderGone', detail: details.reason } })
-        this.scheduleReload(2000)
-      })
-
-      await this.attachCdp(win)
-
-      // 页面就绪后再要一次 Network 域（命令幂等）：第一次万一没生效，这里补一次
-      win.webContents.on('dom-ready', () => {
-        if (this.stopped || this.win !== win) return
-        this.enableNetwork(win.webContents.debugger)
-      })
-
-      this.hooks.onStatus({ phase: 'connecting', failure: null })
-      // 不 await 加载：页面只要有一个请求迟迟不 settle，`await loadURL` 就会一直吊着。
-      // 看门狗已经在上面装好，加载失败也单独报 loadFailed。
-      logger.info(`[douyin-link] 弹幕窗口开始加载（房间 ${this.target}）`)
-      win.loadURL(`https://live.douyin.com/${this.target}`).catch((error) => {
-        // 换过一次窗口（restart）时旧窗口的失败不该报到新会话上
-        if (this.stopped || this.win !== win) return
-        this.hooks.onStatus({ phase: 'error', failure: { code: 'loadFailed', detail: describe(error) } })
-      })
-    } catch (error) {
-      if (this.stopped) return
-      this.hooks.onStatus({
-        phase: 'error',
-        failure: { code: 'windowFailed', detail: describe(error) }
-      })
+        this.failures = 0
+        this.smoothRounds += 1
+        if (this.smoothRounds >= RELAX_AFTER_SUCCESS && this.floorMs > MIN_INTERVAL_MS) {
+          // 顺畅够久了：把自适应抬高的下限降一档（不一次降到底，免得又撞限流）
+          this.floorMs = Math.max(MIN_INTERVAL_MS, Math.round(this.floorMs / 2))
+          this.smoothRounds = 0
+          this.throttles = 0
+          logger.info(`[douyin-link] ${this.target.webRid} 轮询顺畅，间隔下限降到 ${this.floorMs}ms`)
+        }
+        this.cursor = result.cursor || this.cursor
+        this.internalExt = result.internalExt || this.internalExt
+        this.intervalMs = clampInterval(result.intervalMs)
+        if (result.pushServer && result.pushServer !== this.pushServer) {
+          this.pushServer = result.pushServer
+          logger.info(
+            `[douyin-link] ${this.target.webRid} 服务端下发推送地址：${this.pushServer}` +
+              `（fetch_type=${result.fetchType}${result.fetchType === 1 ? ' = 建议走 websocket' : ''}）`
+          )
+        }
+        if (!this.connectedOnce) {
+          this.connectedOnce = true
+          logger.info(`[douyin-link] 弹幕通道已连上（房间 ${this.target.webRid}）`)
+          this.hooks.onStatus({ phase: 'live', failure: null })
+        } else if (this.throttles > 0) {
+          // 从限流里恢复：把相位与失败提示收回去
+          this.throttles = 0
+          this.hooks.onStatus({ phase: 'live', failure: null })
+        }
+        this.consume(result)
+        waitMs = jittered(Math.max(this.floorMs, this.intervalMs))
+      } catch (error) {
+        if (this.stopped) return
+        const failure = toFailure(error)
+        /**
+         * 限流（503/429）：**不判死**。
+         * 这是「慢一点」，服务端一直在回同一个 503 也不代表房间没了——
+         * 所以只退避、只把该房间的下限抬一档，然后继续；界面看到的是 `retrying + throttled`。
+         */
+        if (isThrottled(error)) {
+          this.throttles += 1
+          this.smoothRounds = 0
+          this.floorMs = Math.min(MAX_THROTTLE_FLOOR_MS, Math.round(this.floorMs * 2))
+          const backoff = THROTTLE_BACKOFF_MS[Math.min(this.throttles - 1, THROTTLE_BACKOFF_MS.length - 1)]
+          logger.warn(
+            `[douyin-link] ${this.target.webRid} 被限流（${failure.detail ?? failure.code}），` +
+              `${Math.round(backoff / 1000)}s 后重试，间隔下限抬到 ${this.floorMs}ms`
+          )
+          this.hooks.onStatus({ phase: 'retrying', failure })
+          waitMs = backoff
+        } else {
+          this.failures += 1
+          if (this.failures >= FATAL_FAILURES) {
+            logger.warn(
+              `[douyin-link] 弹幕通道连不上（房间 ${this.target.webRid}，连续 ${this.failures} 次）:`,
+              failure.code,
+              failure.detail ?? ''
+            )
+            this.hooks.onStatus({ phase: 'error', failure })
+            this.running = false
+            return
+          }
+          logger.warn(
+            `[douyin-link] 弹幕拉取失败（房间 ${this.target.webRid}，第 ${this.failures} 次）:`,
+            failure.code,
+            failure.detail ?? ''
+          )
+          this.hooks.onStatus({ phase: 'retrying', failure })
+          waitMs = Math.min(MAX_INTERVAL_MS * 2, BACKOFF_BASE_MS * this.failures)
+        }
+      }
+      await this.sleep(waitMs)
     }
   }
 
   /**
-   * 挂 CDP 并打开 Network 域。
-   *
-   * **每一步都带死线**：`debugger.attach` 与 `sendCommand` 在目标还没就绪时都可能永远不返回，
-   * 而且不会抛错。CDP 没挂上不等于弹幕没戏（看门狗会重载页面再试），
-   * 所以超时只记日志、继续加载——**绝不允许它拦住流程**。
+   * 拉一次。**带上上次拿到的 cursor / internal_ext** 就是增量（服务端只回新的），
+   * 不带则是「从现在开始」——所以重连后不会重复补发旧消息。
    */
-  private async attachCdp(win: BrowserWindow): Promise<void> {
-    const startedAt = Date.now()
-    const debug = win.webContents.debugger
+  private async poll(): Promise<PollResult> {
+    const query = new URLSearchParams({
+      aid: '6383',
+      app_name: 'douyin_web',
+      live_id: '1',
+      device_platform: 'web',
+      language: 'zh-CN',
+      enter_from: 'web_live',
+      cookie_enabled: 'true',
+      screen_width: '2560',
+      screen_height: '1440',
+      browser_language: 'zh-CN',
+      browser_platform: 'Win32',
+      browser_name: 'Chrome',
+      browser_version: '126.0.0.0',
+      web_rid: this.target.webRid,
+      room_id: this.target.roomId,
+      did_rule: '3',
+      debug: 'false',
+      endpoint: 'live_pc',
+      support_wrds: '1',
+      im_path: '/webcast/im/fetch/',
+      /**
+       * **必须是 protobuf**：JSON（默认）只回房间级消息（`RoomMessage`/`RoomDataSyncMessage`），
+       * 用户消息（进场/弹幕/在线人数）一条都没有——「实时」页空白就是这个原因；
+       * 而且只有 protobuf 响应里才带服务端下发的 `push_server`（websocket 升级要用）。
+       */
+      resp_content_type: 'protobuf',
+      fetch_rule: '1',
+      last_rtt: '0',
+      user_unique_id: '',
+      timestamp: String(Date.now())
+    })
+    if (this.cursor) query.set('cursor', this.cursor)
+    if (this.internalExt) query.set('internal_ext', this.internalExt)
+
+    let response: Response
     try {
-      debug.attach('1.3')
-    } catch (error) {
-      logger.warn('[douyin-link] CDP attach 失败，弹幕可能截不到:', describe(error))
-      return
-    }
-    this.cdpHandler = (_event, method, params) => {
-      this.onCdp(method, params as Record<string, unknown>)
-    }
-    debug.on('message', this.cdpHandler)
-    logger.info(`[douyin-link] 弹幕窗口 CDP 已挂载（${since(startedAt)}），开始等推送通道`)
-    // **绝不等 Network.enable 的回执**：真机实测（Electron 44 / Chromium 152）这条命令的回执
-    // 有时永远不回来——但 Network 事件照旧在推（实测同一窗口 40 秒收到 71 帧）。
-    // 旧版在这里 await，于是页面永远不加载、界面永远停「连接弹幕中…」，日志里连一行失败都没有。
-    this.enableNetwork(debug)
-  }
-
-  /** 开 Network 域（幂等）。回执可能不来，所以只记日志、不阻塞任何流程 */
-  private enableNetwork(debug: Debugger): void {
-    withTimeout(
-      debug.sendCommand('Network.enable', {
-        maxTotalBufferSize: 0,
-        maxResourceBufferSize: 0,
-        maxPostDataSize: 0
-      }),
-      CDP_DEADLINE_MS,
-      'Network.enable'
-    )
-      .then(() => logger.info('[douyin-link] CDP Network 域已开（等弹幕推送通道）'))
-      .catch((error) =>
-        logger.warn('[douyin-link] CDP Network.enable 没拿到回执，继续观察事件:', describe(error))
-      )
-  }
-
-  private onCdp(method: string, params: Record<string, unknown>): void {
-    if (this.stopped) return
-    if (method === 'Network.webSocketCreated') {
-      const url = String(params.url ?? '')
-      const id = String(params.requestId ?? '')
-      // 把看到的每一条 ws 都记下来：万一抖音改了推送地址、`/webcast/im` 这个标记失效，
-      // 日志里能直接看出「它连到哪儿去了」，而不用再加一轮探针
-      logger.info(`[douyin-link] 弹幕窗口建立 websocket：${url.slice(0, 160)}`)
-      if (url.includes(PUSH_HOST_MARK)) {
-        this.socketIds.add(id)
-        if (!this.sawSocket) {
-          this.sawSocket = true
-          this.reloads = 0
-          this.lastFrameAt = Date.now()
-          this.clearNoSocketWatchdog()
-          logger.info('[douyin-link] 已截到弹幕推送通道')
-          this.hooks.onStatus({ phase: 'live', failure: null })
-        }
-      }
-      return
-    }
-    if (method === 'Network.webSocketClosed' || method === 'Network.webSocketWillSendHandshakeRequest') {
-      if (method === 'Network.webSocketClosed') this.socketIds.delete(String(params.requestId ?? ''))
-      return
-    }
-    if (method === 'Network.webSocketFrameReceived') {
-      const id = String(params.requestId ?? '')
-      if (this.socketIds.size > 0 && !this.socketIds.has(id)) return
-      const response = params.response as { opcode?: number; payloadData?: string } | undefined
-      const data = response?.payloadData
-      if (!data) return
-      const raw = Buffer.from(data, 'base64')
-      if (raw.length === 0) return
-      this.lastFrameAt = Date.now()
-      // 礼物额度靠官方目录（giftId → 抖币价），目录没就绪时礼物只显示名字、不给数字
-      const parsed = parsePushFrame(raw, giftCatalog)
-      if (parsed.items.length > 0) {
-        if (!this.firstItemsLogged) {
-          this.firstItemsLogged = true
-          logger.info(
-            `[douyin-link] 首批弹幕已解出：${parsed.items.length} 条（${parsed.items
-              .map((item) => item.kind)
-              .join(',')}），带用户信息 ${parsed.users.length} 人`
-          )
-        }
-        this.hooks.onItems(parsed.items, parsed.users, { roomEnded: parsed.close })
-      }
-    }
-  }
-
-  private armNoSocketWatchdog(): void {
-    this.clearNoSocketWatchdog()
-    this.noSocketTimer = setTimeout(() => {
-      this.noSocketTimer = null
-      if (this.stopped || this.sawSocket) return
-      if (this.blockMedia && !this.reloadedForBlocking) {
-        // 很可能是「画面被拦 → 页面没把 im 拉起来」：关掉拦截重试一次
-        this.reloadedForBlocking = true
-        this.hooks.onStatus({ phase: 'retrying', failure: { code: 'retryWithoutSaveData' } })
-        void this.restart(this.target, { saveData: false })
-        return
-      }
-      this.hooks.onStatus({ phase: 'error', failure: { code: 'noSocket' } })
-    }, WATCHDOG_NO_SOCKET_MS)
-  }
-
-  private clearNoSocketWatchdog(): void {
-    if (this.noSocketTimer) {
-      clearTimeout(this.noSocketTimer)
-      this.noSocketTimer = null
-    }
-  }
-
-  private armSilenceWatchdog(): void {
-    if (this.silenceTimer) clearInterval(this.silenceTimer)
-    this.silenceTimer = setInterval(() => {
-      if (this.stopped || !this.sawSocket) return
-      if (Date.now() - this.lastFrameAt < WATCHDOG_SILENCE_MS) return
-      this.hooks.onStatus({ phase: 'retrying', failure: { code: 'silent' } })
-      this.scheduleReload(1000)
-    }, 20000)
-  }
-
-  private scheduleReload(delay: number): void {
-    if (this.stopped) return
-    if (this.reloads >= MAX_RELOADS) {
-      this.hooks.onStatus({ phase: 'error', failure: { code: 'reloadLimit' } })
-      return
-    }
-    this.reloads += 1
-    setTimeout(() => {
-      const win = this.win
-      if (this.stopped || !win || win.isDestroyed()) return
-      this.sawSocket = false
-      this.socketIds.clear()
-      this.lastFrameAt = Date.now()
-      this.armNoSocketWatchdog()
-      try {
-        win.webContents.reload()
-      } catch {
-        this.hooks.onStatus({ phase: 'error', failure: { code: 'windowFailed' } })
-      }
-    }, delay)
-  }
-
-  private clearTimers(): void {
-    this.clearNoSocketWatchdog()
-    if (this.silenceTimer) {
-      clearInterval(this.silenceTimer)
-      this.silenceTimer = null
-    }
-  }
-
-  private applyUserAgent(ses: Session): void {
-    try {
-      // 隐藏窗口不能带 Electron 标识：抖音 web 端对 UA 有风控
-      ses.setUserAgent(CHROME_UA)
-    } catch {
-      // 某些环境不允许改会话 UA：不影响主流程
-    }
-  }
-
-  private applyMediaBlock(ses: Session): void {
-    this.clearMediaBlock()
-    if (!this.blockMedia) return
-    try {
-      ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
-        if (details.resourceType === 'media' || MEDIA_PATTERN.test(details.url)) {
-          callback({ cancel: true })
-          return
-        }
-        callback({})
+      response = await fetch(`https://live.douyin.com/webcast/im/fetch/?${query}`, {
+        method: 'GET',
+        headers: {
+          'user-agent': CHROME_UA,
+          cookie: this.target.cookie,
+          referer: `https://live.douyin.com/${this.target.webRid}`,
+          accept: 'application/x-protobuf, */*',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8'
+        },
+        signal: AbortSignal.timeout(POLL_TIMEOUT_MS)
       })
-    } catch {
-      // 拿不到 webRequest（例如非 Electron 环境）：退化成「画面也一起拉」
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new PollError(detail.includes('timeout') ? 'timeout' : 'network', detail.slice(0, 120))
+    }
+    if (!response.ok) {
+      // 503/429 = 被限流（不是房间没了）：标成 throttled，调用方只退避、不判死
+      const throttled = response.status === 503 || response.status === 429
+      throw new PollError(
+        throttled ? 'throttled' : 'httpError',
+        `HTTP ${response.status}`,
+        throttled
+      )
+    }
+    const raw = Buffer.from(await response.arrayBuffer())
+    if (raw.length === 0) throw new PollError('badResponse', 'empty body')
+
+    // protobuf 与 JSON 两种可能的回包都认（服务端偶尔会忽略 resp_content_type）
+    if (raw[0] !== 0x7b) {
+      const decoded = decodeProtoResponse(raw)
+      return {
+        messages: [],
+        proto: raw,
+        cursor: decoded.cursor,
+        internalExt: decoded.internalExt,
+        intervalMs: decoded.intervalMs > 0 ? decoded.intervalMs : this.intervalMs,
+        pushServer: decoded.pushServer,
+        fetchType: decoded.fetchType
+      }
+    }
+
+    let body: {
+      data?: unknown
+      extra?: { cursor?: unknown; fetch_interval?: unknown }
+      internal_ext?: unknown
+      status_code?: unknown
+    }
+    try {
+      body = parseJsonLoose(raw.toString('utf8'))
+    } catch (error) {
+      throw new PollError('badResponse', error instanceof Error ? error.message.slice(0, 80) : 'parse')
+    }
+    const status = Number(body?.status_code ?? 0)
+    if (status !== 0) {
+      // 20003 = 没登录（Cookie 失效）；其它也一律当作「要换一份 Cookie 再来」
+      const detail = typeof body?.data === 'object' && body.data ? JSON.stringify(body.data).slice(0, 120) : ''
+      throw new PollError(status === 20003 ? 'sessionExpired' : 'rejected', `${status}${detail ? ' ' + detail : ''}`)
+    }
+    const intervalRaw = Number((body?.extra as { fetch_interval?: unknown })?.fetch_interval ?? 0)
+    return {
+      messages: Array.isArray(body?.data) ? body.data : [],
+      proto: null,
+      cursor: typeof body?.extra?.cursor === 'string' ? body.extra.cursor : '',
+      internalExt: typeof body?.internal_ext === 'string' ? body.internal_ext : '',
+      intervalMs: intervalRaw > 0 ? intervalRaw : this.intervalMs,
+      pushServer: '',
+      fetchType: 0
     }
   }
 
-  private clearMediaBlock(): void {
-    try {
-      session.fromPartition(this.partition).webRequest.onBeforeRequest(null)
-    } catch {
-      // 会话不存在：忽略
+  /** 解一批消息并上报（解码在 ./json.ts 与 ./proto-messages.ts；单条解不动不影响这一批的其它消息） */
+  private consume(result: PollResult): void {
+    const decoded: JsonDecodedBatch = result.proto
+      ? decodeProtoResponse(result.proto).batch
+      : result.messages.length > 0
+        ? decodePushBatch(result.messages)
+        : { items: [], users: [], roomEnded: false, micUserIds: null, methods: {} }
+    if (Object.keys(decoded.methods).length > 0) this.pollsDone += 1
+    for (const [method, count] of Object.entries(decoded.methods)) {
+      this.methods[method] = (this.methods[method] ?? 0) + count
+    }
+    this.itemsDone += decoded.items.length
+    if (!this.loggedFirstBatch && decoded.items.length > 0) {
+      this.loggedFirstBatch = true
+      logger.info(
+        `[douyin-link] ${this.target.webRid} 首批消息已解出：${decoded.items.length} 条（${decoded.items
+          .map((item) => item.kind)
+          .join(',')}），带用户信息 ${decoded.users.length} 人`
+      )
+    }
+    if (Date.now() - this.lastSummaryAt >= METHOD_SUMMARY_MS) {
+      this.lastSummaryAt = Date.now()
+      const list = Object.entries(this.methods)
+        .sort((a, b) => b[1] - a[1])
+        .map(([method, count]) => `${method.replace(/^Webcast/, '')}=${count}`)
+        .join(' ')
+      logger.info(
+        `[douyin-link] ${this.target.webRid} 近 ${Math.round(METHOD_SUMMARY_MS / 60000)} 分钟：` +
+          `轮询 ${this.pollsDone} 次、解出 ${this.itemsDone} 行；接口推过的消息：${list || '（一条都没有）'}`
+      )
+      this.pollsDone = 0
+      this.itemsDone = 0
+      this.methods = {}
+    }
+    if (decoded.micUserIds && decoded.micUserIds.length > 0) this.hooks.onMic(decoded.micUserIds)
+    if (decoded.items.length > 0 || decoded.users.length > 0) {
+      this.hooks.onItems(decoded.items, decoded.users, { roomEnded: decoded.roomEnded })
     }
   }
+
+  /** 可被 `stop()` 立刻打断的等待 */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.wakeup = null
+        resolve()
+      }, ms)
+      this.wakeup = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+  }
+}
+
+function clampInterval(ms: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return MIN_INTERVAL_MS
+  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, Math.round(ms)))
+}
+
+/** 抖一下（多房间同刻启动时，别让所有房间在同一毫秒一起打接口） */
+function jittered(ms: number): number {
+  return Math.round(ms * (0.9 + Math.random() * 0.2))
+}
+
+function toFailure(error: unknown): FailureInfo {
+  if (error instanceof PollError) return { code: error.code, detail: error.detail || undefined }
+  return { code: 'pollFailed', detail: describe(error) }
+}
+
+/** 是不是「被限流」（503/429）：这类只退避，不判死 */
+function isThrottled(error: unknown): boolean {
+  return error instanceof PollError && error.throttled
 }
 
 function describe(error: unknown): string {

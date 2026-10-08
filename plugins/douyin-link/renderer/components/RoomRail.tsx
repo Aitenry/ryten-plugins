@@ -70,6 +70,15 @@ export function RoomRail(props: {
 
   const monitoring = props.rooms.some((room) => room.monitor)
 
+  /**
+   * 列表顺序 = 加入时间倒序（新加的在上），**点选不改顺序**（用户反馈：点一下房间就跳到最上面）。
+   *
+   * 主进程也这么排（`hub.buildRooms`），这里再排一次是因为**主进程模块只在应用启动时加载**：
+   * 重装插件只换渲染层，主进程那段旧排序还在跑——列表顺序不该依赖「用户有没有重启应用」。
+   * 两边键相同，重启后也不会互相打架。
+   */
+  const ordered = [...props.rooms].sort((a, b) => b.addedAt - a.addedAt)
+
   return (
     <Panel
       className="h-full"
@@ -103,7 +112,7 @@ export function RoomRail(props: {
           <span className="px-1 py-3 text-xs opacity-60">{t('douyin-link.page.emptyRooms')}</span>
         ) : (
           <FitList
-            items={props.rooms}
+            items={ordered}
             rowHeight={62}
             keyOf={(room) => room.webRid}
             moreLabel={(count) => t('douyin-link.page.moreRooms', { count })}
@@ -142,7 +151,9 @@ function RoomRow(props: {
 }): React.JSX.Element {
   const { room, palette, t } = props
   const phase = phaseMeta(t, room, palette)
-  const title = room.title || room.note || room.webRid
+  // 标题 = 主播名 + 直播间标题：只有直播间标题根本认不出是哪个直播间（用户反馈）
+  const label = room.title || room.note || room.webRid
+  const title = room.anchor ? `${room.anchor} · ${label}` : label
 
   return (
     <div

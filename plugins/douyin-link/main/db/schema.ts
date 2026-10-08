@@ -9,7 +9,7 @@ import {
 } from 'drizzle-orm/pg-core'
 
 /**
- * 抖音直播分析器 的表（7 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
+ * 抖音直播分析器 的表（6 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
  *
  * 三条约定（与宿主同规矩）：
  * - JS 键 camelCase，列名显式给 snake_case，mapper 里同一套键名；
@@ -38,7 +38,7 @@ export const douyinLinkRooms = pgTable('douyin_link_rooms', {
   lastSeenAt: doublePrecision('last_seen_at').notNull().default(0)
 })
 
-/** 消息流水（弹幕/礼物/进场/点赞/关注；stats 与系统提示不入库，它们不是互动） */
+/** 消息流水（弹幕/进场/点赞/关注；stats 与系统提示不入库，它们不是互动） */
 export const douyinLinkMessages = pgTable('douyin_link_messages', {
   id: serial().primaryKey().notNull(),
   webRid: text('web_rid').notNull(),
@@ -49,7 +49,6 @@ export const douyinLinkMessages = pgTable('douyin_link_messages', {
   userName: text('user_name').notNull().default(''),
   content: text().notNull().default(''),
   count: integer().notNull().default(0),
-  diamonds: integer().notNull().default(0),
   atMs: doublePrecision('at_ms').notNull()
 })
 
@@ -73,8 +72,6 @@ export const douyinLinkUsers = pgTable(
     badges: text().notNull().default('[]'),
     secUid: text('sec_uid').notNull().default(''),
     chat: integer().notNull().default(0),
-    gift: integer().notNull().default(0),
-    diamonds: integer().notNull().default(0),
     enter: integer().notNull().default(0),
     likes: integer().notNull().default(0),
     follows: integer().notNull().default(0),
@@ -93,11 +90,9 @@ export const douyinLinkMinutes = pgTable(
     /** 分钟桶：floor(ms / 60000) */
     minute: integer().notNull(),
     chat: integer().notNull().default(0),
-    gift: integer().notNull().default(0),
     member: integer().notNull().default(0),
     likes: integer().notNull().default(0),
     social: integer().notNull().default(0),
-    diamonds: integer().notNull().default(0),
     messages: integer().notNull().default(0),
     users: integer().notNull().default(0)
   },
@@ -114,17 +109,7 @@ export const douyinLinkSessions = pgTable('douyin_link_sessions', {
   endReason: text('end_reason').notNull().default('')
 })
 
-/** 官方礼物目录（giftId → 名称 + 抖币价）：从接口拉一次存库里，解帧时按 id 查表 */
-export const douyinLinkGifts = pgTable('douyin_link_gifts', {
-  id: integer().primaryKey().notNull(),
-  name: text().notNull().default(''),
-  diamonds: integer().notNull().default(0),
-  describe: text().notNull().default(''),
-  icon: text().notNull().default(''),
-  updatedAt: doublePrecision('updated_at').notNull().default(0)
-})
-
-/** 小键值表（礼物目录的抓取时间、连击档文案这类零碎） */
+/** 小键值表（零碎元数据） */
 export const douyinLinkMeta = pgTable('douyin_link_meta', {
   key: text().primaryKey().notNull(),
   value: text().notNull().default(''),

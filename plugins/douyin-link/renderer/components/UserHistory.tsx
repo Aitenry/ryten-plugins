@@ -169,11 +169,6 @@ export function UserHistory(props: {
                 {row.text || '-'}
               </span>
               {row.count > 1 ? <span className="shrink-0 opacity-60">×{row.count}</span> : null}
-              {row.diamonds > 0 ? (
-                <span className="shrink-0" style={{ color: palette.warn }}>
-                  {t('douyin-link.page.giftDiamonds', { count: row.diamonds })}
-                </span>
-              ) : null}
             </div>
           ))
         )}

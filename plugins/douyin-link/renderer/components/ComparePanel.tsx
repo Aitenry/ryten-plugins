@@ -15,7 +15,7 @@ const RELOAD_MS = 10000
 /**
  * 对比页签：**把所有直播间放在一张表里比**（窗口内的量 + 库里累计 + 相位/声音状态）。
  *
- * 一张表就能回答分析里最常见的问题：哪个房间最热、礼物额度最高、
+ * 一张表就能回答分析里最常见的问题：哪个房间最热、
  * 哪个房间其实已经半天没消息了（活跃分钟 vs 窗口分钟）、哪个在排队没跑起来。
  * 点一行 = 把分析焦点切过去（声音跟着走）。
  */
@@ -125,14 +125,6 @@ export function ComparePanel(props: {
                 )
               },
               { title: t('douyin-link.page.kpiChat'), dataIndex: 'chat', width: 76, align: 'right' },
-              { title: t('douyin-link.page.kpiGift'), dataIndex: 'gift', width: 70, align: 'right' },
-              {
-                title: t('douyin-link.page.kpiDiamonds'),
-                dataIndex: 'diamonds',
-                width: 92,
-                align: 'right',
-                render: (value: number) => <span style={{ color: palette.warn }}>{formatNumber(value)}</span>
-              },
               { title: t('douyin-link.page.kpiMember'), dataIndex: 'member', width: 70, align: 'right' },
               { title: t('douyin-link.page.kpiLike'), dataIndex: 'like', width: 70, align: 'right' },
               { title: t('douyin-link.page.kpiSocial'), dataIndex: 'social', width: 70, align: 'right' },

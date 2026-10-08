@@ -42,7 +42,7 @@ export function createToolContribution(): {
           room?: string
           keyword?: string
           kind?: string
-          sort?: 'recent' | 'chat' | 'gift'
+          sort?: 'recent' | 'chat'
           minutes?: number
           limit?: number
           on?: boolean
@@ -89,8 +89,6 @@ export function createToolContribution(): {
                   room: `${row.title || row.webRid}（${row.webRid}）`,
                   messages: row.messages,
                   chat: row.chat,
-                  gift: row.gift,
-                  diamonds: row.diamonds,
                   member: row.member,
                   like: row.like,
                   social: row.social,
@@ -113,8 +111,6 @@ export function createToolContribution(): {
               mainFormat(t.summaryTotals, {
                 messages: summary.messages,
                 chat: summary.totals.chat,
-                gift: summary.totals.gift,
-                diamonds: summary.totals.diamonds,
                 member: summary.totals.enter,
                 like: summary.totals.like,
                 social: summary.totals.follow,
@@ -139,10 +135,7 @@ export function createToolContribution(): {
               )
             }
             if (summary.topChat.length > 0) {
-              lines.push(mainFormat(t.summaryTopChat, { list: topList(summary.topChat, 'chat') }))
-            }
-            if (summary.topGift.length > 0) {
-              lines.push(mainFormat(t.summaryTopGift, { list: topList(summary.topGift, 'gift') }))
+              lines.push(mainFormat(t.summaryTopChat, { list: topChatList(summary.topChat) }))
             }
             return lines.join('\n')
           }
@@ -151,7 +144,7 @@ export function createToolContribution(): {
             const limit = clampLimit(input.limit, 20)
             const rows = await analyzerHub.listUsers(
               room.webRid,
-              input.sort === 'chat' || input.sort === 'gift' ? input.sort : 'recent',
+              input.sort === 'chat' ? input.sort : 'recent',
               String(input.keyword ?? ''),
               limit
             )
@@ -162,8 +155,6 @@ export function createToolContribution(): {
                 mainFormat(t.userLine, {
                   user: `${row.nickname || row.userId}${row.displayId ? `（ID ${row.displayId}）` : ''}`,
                   chat: row.stats.chat,
-                  gift: row.stats.gift,
-                  diamonds: row.stats.diamonds,
                   enter: row.stats.enter,
                   like: row.stats.like,
                   follow: row.stats.follow,
@@ -208,8 +199,8 @@ export function createToolContribution(): {
               .describe('rooms=房间清单；summary=房间分析报告；messages=库内消息检索；users=用户榜；compare=多房间对比；monitor=开关监控；audio=开关声音'),
             room: z.string().optional().describe('房间号或标题关键词；省略 = 分析中的房间（rooms/compare 不需要）'),
             keyword: z.string().optional().describe('messages/users 的关键词（正文或昵称）'),
-            kind: z.string().optional().describe('messages 的类型：chat/gift/member/like/social'),
-            sort: z.enum(['recent', 'chat', 'gift']).optional().describe('users 的排序'),
+            kind: z.string().optional().describe('messages 的类型：chat/member/like/social'),
+            sort: z.enum(['recent', 'chat']).optional().describe('users 的排序'),
             minutes: z.number().optional().describe('summary/compare 的统计窗口（分钟，默认 60）'),
             limit: z.number().optional().describe('返回条数（默认 messages 30 / users 20，最多 200）'),
             on: z.boolean().optional().describe('monitor/audio 的开关（默认 true）')
@@ -242,8 +233,7 @@ function roomsText(
         received: room.received,
         users: room.sessionUsers,
         stored: room.stored.messages,
-        storedUsers: room.stored.users,
-        diamonds: room.stored.diamonds
+        storedUsers: room.stored.users
       })
     )
     if (room.failure) lines.push(mainFormat(t.roomFailure, { code: room.failure.code }))
@@ -293,14 +283,8 @@ function roomLabel(room: RoomRuntime): string {
   return `${room.title || room.webRid}（${room.webRid}）`
 }
 
-function topList(rows: Array<{ nickname: string; userId: string; stats: { chat: number; diamonds: number } }>, kind: 'chat' | 'gift'): string {
-  return rows
-    .map((row) =>
-      kind === 'chat'
-        ? `${row.nickname || row.userId} ${row.stats.chat}`
-        : `${row.nickname || row.userId} ${row.stats.diamonds}`
-    )
-    .join(' · ')
+function topChatList(rows: Array<{ nickname: string; userId: string; stats: { chat: number } }>): string {
+  return rows.map((row) => `${row.nickname || row.userId} ${row.stats.chat}`).join(' · ')
 }
 
 function clampMinutes(value?: number): number {
