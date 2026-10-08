@@ -1,12 +1,6 @@
 import { useState } from 'react'
-import { Button, Dropdown, Input, Switch, Tooltip } from 'antd'
-import {
-  RiAddLine,
-  RiDeleteBin6Line,
-  RiMoreLine,
-  RiRefreshLine,
-  RiVolumeUpLine
-} from '@remixicon/react'
+import { Button, Dropdown, Input, Switch } from 'antd'
+import { RiAddLine, RiDeleteBin6Line, RiMoreLine, RiRefreshLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
 import { FitList, HOVER_BG, Panel, usePluginPalette } from './ui'
@@ -44,7 +38,7 @@ function phaseMeta(t: Translate, room: RoomRuntime, palette: ReturnType<typeof u
  * 左栏：**房间清单**（这个分析器的入口）。
  *
  * 一行 = 一个直播间：相位点、标题、房间号与速率、库里累计、监控开关、更多操作。
- * 点整行 = 把它设为「分析中的房间」（页签与声音都跟着它）。
+ * 点整行 = 把它设为「分析中的房间」（页签跟着它）。
  *
  * 列表用 `FitList`（贪心塞行 + 「还有 N 个」）而不是滚动条：插件页面不该出滚动条
  * （见 WORKSHOP 第 6 节）。房间数一般是个位数，真多了也是「先看前几个」更合理。
@@ -52,7 +46,6 @@ function phaseMeta(t: Translate, room: RoomRuntime, palette: ReturnType<typeof u
 export function RoomRail(props: {
   rooms: RoomRuntime[]
   activeRoom: string
-  audioRoom: string
   busy: boolean
   onAdd: (input: string) => void
   onSelect: (webRid: string) => void
@@ -126,7 +119,6 @@ export function RoomRail(props: {
               <RoomRow
                 room={room}
                 active={room.webRid === props.activeRoom}
-                audio={room.webRid === props.audioRoom}
                 palette={palette}
                 t={t}
                 onSelect={() => props.onSelect(room.webRid)}
@@ -146,7 +138,6 @@ export function RoomRail(props: {
 function RoomRow(props: {
   room: RoomRuntime
   active: boolean
-  audio: boolean
   palette: ReturnType<typeof usePluginPalette>
   t: Translate
   onSelect: () => void
@@ -178,16 +169,7 @@ function RoomRow(props: {
         style={{ width: 7, height: 7, backgroundColor: phase.color }}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className="flex min-w-0 items-center gap-1">
-          <span className="min-w-0 truncate text-xs font-medium">{title}</span>
-          {props.audio ? (
-            <Tooltip title={t('douyin-link.page.audioTag')}>
-              <span className="shrink-0" style={{ color: palette.accent }}>
-                <RiVolumeUpLine size={13} />
-              </span>
-            </Tooltip>
-          ) : null}
-        </span>
+        <span className="min-w-0 truncate text-xs font-medium">{title}</span>
         <span className="min-w-0 truncate text-[10px] opacity-60">
           {room.webRid} · {phase.text} · {t('douyin-link.page.rate', { rate: room.rate })} ·{' '}
           {t('douyin-link.page.storedCount', { count: room.stored.messages })}

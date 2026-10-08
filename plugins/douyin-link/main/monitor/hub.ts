@@ -116,7 +116,12 @@ const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const DEFAULT_SETTINGS: LiveSettings = {
   // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
   quality: 'SD2',
-  audioOnConnect: true,
+  /**
+   * **不再自动出声**（2026-10-08 用户要求「移除播放音频内容」）：播放/清晰度/音量那一整条
+   * 工具行都下线了，插件现在是纯采集分析——留着 true 的话，界面上一旦没有停止按钮，
+   * 声音就会自己响起来。老设置里写着的 true 会在 `loadSettings` 里迁移成 false。
+   */
+  audioOnConnect: false,
   volume: 0.8,
   maxItems: 200,
   kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],

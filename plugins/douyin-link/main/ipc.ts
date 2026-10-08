@@ -62,6 +62,15 @@ export function loadSettings(): Partial<LiveSettings> {
       parsed.retentionDays = 0
       logger.info('[douyin-link] 保留期：旧的默认 7 天 → 永久保存（可在设置里改回具体天数）')
     }
+    /**
+     * 音频下线的迁移（2026-10-08「移除播放音频内容」）：老设置里 `audioOnConnect: true` 会在
+     * 开始监控时自己出声，而播放控件已经不在界面上了——置为 false，别让用户遇到
+     * 「有声音但找不到地方关」。
+     */
+    if (parsed.audioOnConnect === true) {
+      parsed.audioOnConnect = false
+      logger.info('[douyin-link] 音频播放已下线：关闭「连接时播放」（界面不再提供播放/音量）')
+    }
     return parsed
   } catch {
     return {}
