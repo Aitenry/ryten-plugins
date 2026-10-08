@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "tag": "v0.1.3",
+  "tag": "v0.1.4",
   "plugins": [
     {
       "id": "douyin-link",
       "name": "抖音直播分析器",
-      "version": "0.5.7",
-      "description": "多直播间分析器：同时监控多个抖音直播间（每个房间一个隐藏窗口截弹幕 websocket），音频只跟最新选中的那个房间（其它房间继续监听），历史数据（消息流水/用户统计/分钟聚合/监控会话/礼物目录）全部落数据库，可按关键词与类型检索、出 KPI 与趋势、看发言榜与礼物榜、做多房间对比；点弹幕里的昵称或用户榜的一行可打开用户档案并翻这个人发过的历史弹幕（本房间 / 全部房间、只看弹幕 / 全部互动）；打开应用会接着监控开关开着的房间（可在设置里关掉），关闭应用时后台的隐藏采集窗口会一并收掉（不会留下直播间窗口或后台拉流）。",
+      "version": "0.7.0",
+      "description": "多直播间分析器：同时监控多个抖音直播间（默认走「实时通道」——借一个隐藏窗口的直播间页面 websocket 收逐条消息，弹幕/进场/点赞都更实时；不可用时自动回落到主进程直连轮询），音频只跟最新选中的那个房间（其它房间继续监听）；弹幕/进场/点赞/关注全部落数据库，可按关键词与类型检索、出 KPI 与趋势、看发言榜、做多房间对比；「在线观众」页签把**麦上用户**（聊天室麦位，按麦位序置顶）、直播间接口给的房间成员、以及本场活跃过的人合成一张表，点任意一行可打开用户档案并翻历史弹幕（本房间 / 全部房间、只看弹幕 / 全部互动）；打开应用会接着监控开关开着的房间（可在设置里关掉）。",
       "builtin": false,
       "entry": {
         "renderer": "renderer.mjs",
@@ -23,9 +23,9 @@
         "icon": "RiLiveLine",
         "order": 60
       },
-      "asset": "douyin-link-0.5.7.zip",
-      "size": 61141,
-      "sha256": "41caaad52eae953de4bdb104199c4f00d18bddbbadca8ece60cb404c2e50a31b"
+      "asset": "douyin-link-0.7.0.zip",
+      "size": 65939,
+      "sha256": "ca4cae232f23ca6ff35f46cdfc05c2334744860afc3bc8a172b10cacdb551608"
     },
     {
       "id": "music-player",
@@ -51,7 +51,7 @@
       },
       "asset": "music-player-0.1.0.zip",
       "size": 24500,
-      "sha256": "804e2565a69dbc22bcafbce2dd43cb9f4b98c605327ddf82ea98b45c1c73ec22"
+      "sha256": "8a8d3341bddde26b04d558b24ad508eea9138ace9048344cd03e8536d452d077"
     },
     {
       "id": "personal-ledger",
@@ -76,7 +76,7 @@
       },
       "asset": "personal-ledger-1.1.6.zip",
       "size": 53976,
-      "sha256": "6c118b1035dfa196208efa412d7f3859a66cd29620552657612c581cd4959ed9"
+      "sha256": "68d02cab3384e3fe5fd9c6cdfc041e41b4bdaca9c0487f991967a3b2bc543418"
     },
     {
       "id": "task-planner",
@@ -102,7 +102,7 @@
       },
       "asset": "task-planner-0.1.0.zip",
       "size": 20092,
-      "sha256": "eee93e6eb8a7d2d944ca3d9f19bd2232b9bec812eca977f7edf275de74136f5d"
+      "sha256": "31b95c3ecd7b5b41591e0fcea6f0c3591d4d6c96b47593507d60019cdc2d8a7a"
     }
   ]
 }
