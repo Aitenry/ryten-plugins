@@ -25,7 +25,7 @@
       },
       "asset": "douyin-link-0.7.9.zip",
       "size": 72180,
-      "sha256": "df382ca2d867a2f8be325c266ca0c3704aa74ec3847f6fdb468a95fcd9c6c082"
+      "sha256": "f33136532879611164fb4ba62c00d8023552121aa9e43664eb492e1cc8a6c933"
     },
     {
       "id": "music-player",
@@ -51,7 +51,7 @@
       },
       "asset": "music-player-0.1.0.zip",
       "size": 24500,
-      "sha256": "11f92cfb96dc62cca06a065c47d3c073c27a7023831b762a2a4d96f1639cad06"
+      "sha256": "94e9377578b22de58f9f09d35aaa273610d249e3997280d08fb219895c6f1560"
     },
     {
       "id": "personal-ledger",
@@ -76,7 +76,7 @@
       },
       "asset": "personal-ledger-1.1.6.zip",
       "size": 53976,
-      "sha256": "71af554547b7ae85f9c9517d86570f9d75df242399efaab0f3a85c14a64d7bdb"
+      "sha256": "104913bc84d1773b350afc8f6600ce131d6b2b0d01526ad84ad8049951bc593c"
     },
     {
       "id": "task-planner",
@@ -102,7 +102,7 @@
       },
       "asset": "task-planner-0.1.0.zip",
       "size": 20092,
-      "sha256": "40c1830043977cc19717b281801da505098262de8900d100d3c2030f7219bef0"
+      "sha256": "539f145d6739bb1a81e66bc04e0a0fda6497436d32c3940e16c30ca68fbcb1c6"
     }
   ]
 }
