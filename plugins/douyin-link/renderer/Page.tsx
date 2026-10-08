@@ -415,7 +415,8 @@ export default function Page(): React.JSX.Element {
         chat: counters.chat ?? 0,
         enter: counters.enter ?? 0,
         follow: counters.follow ?? 0,
-        like: counters.like ?? 0
+        like: counters.like ?? 0,
+        gift: counters.gift ?? 0
       })
     : ''
 
@@ -478,7 +479,7 @@ export default function Page(): React.JSX.Element {
               <DanmakuFeed
                 webRid={activeRoom}
                 items={items}
-                kinds={settings?.kinds ?? ['chat', 'member', 'like', 'social', 'stats', 'control']}
+                kinds={settings?.kinds ?? ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control']}
                 autoScroll={settings?.autoScroll ?? true}
                 users={users}
                 onOpenUser={setOpenUser}
@@ -860,12 +861,17 @@ function UserProfileModal(props: {
 
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-medium">{t('douyin-link.users.statsTitle')}</span>
-              {/* 数字排成与概览页 KPI 同款的软底小方块：一行四格，扫一眼就有量级感 */}
-              <div className="grid grid-cols-4 gap-1.5">
+              {/* 数字排成与概览页 KPI 同款的软底小方块：一行五格，扫一眼就有量级感 */}
+              <div className="grid grid-cols-5 gap-1.5">
                 <StatBlock label={t('douyin-link.kinds.chat')} value={formatNumber(profile.stats.chat)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.member')} value={formatNumber(profile.stats.enter)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.like')} value={formatNumber(profile.stats.like)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.social')} value={formatNumber(profile.stats.follow)} palette={palette} />
+                <StatBlock
+                  label={t('douyin-link.page.kpiDiamonds')}
+                  value={formatNumber(profile.stats.diamonds)}
+                  palette={palette}
+                />
               </div>
               <span className="text-[10px] opacity-50">{t('douyin-link.users.statsHint')}</span>
             </div>

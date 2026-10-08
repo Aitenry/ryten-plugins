@@ -22,7 +22,7 @@ import type { MessageRow, MinuteDeltaRow, UserDeltaRow } from '../db/mapper'
  */
 
 /** 参与互动计数的类型（stats / control / system 不入库：它们不是互动，是状态） */
-const COUNTED: DanmakuKind[] = ['chat', 'member', 'like', 'social']
+const COUNTED: DanmakuKind[] = ['chat', 'member', 'like', 'social', 'gift']
 
 /** 速率滑窗（最近 60 秒的消息时刻） */
 const RATE_WINDOW_MS = 60000
@@ -37,12 +37,13 @@ const emptyCounters = (): LiveInteractions => ({
   chat: 0,
   enter: 0,
   like: 0,
-  follow: 0
+  follow: 0,
+  gift: 0
 })
 
-const emptyStats = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0 })
+const emptyStats = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 })
 
-/** 本场里的一个用户：静态信息（本场见到的最新值）+ 本场的增量统计 */
+/** 本场某个用户：静态信息（本场见到的最新值）+ 本场的增量统计 + **本场送出的抖币总额** */
 interface SessionUser {
   profile: UserProfile
   delta: UserStats
@@ -218,6 +219,7 @@ export class RoomRecorder {
         userName: item.user,
         content: item.text,
         count: item.count,
+        diamonds: item.diamonds,
         atMs: item.at
       })
       const user = item.userId ? this.userMap.get(item.userId) : undefined
@@ -234,6 +236,10 @@ export class RoomRecorder {
             break
           case 'social':
             user.delta.follow += 1
+            break
+          case 'gift':
+            user.delta.gift += 1
+            user.delta.diamonds += item.diamonds
             break
           default:
             break
@@ -298,7 +304,8 @@ export class RoomRecorder {
       if (rows.length >= limit) break
       const delta = entry.delta
       const active =
-        delta.chat + delta.enter + delta.like + delta.follow > 0 || this.sessionUserIds.has(id)
+        delta.chat + delta.enter + delta.like + delta.follow + delta.gift > 0 ||
+        this.sessionUserIds.has(id)
       if (!active) continue
       rows.push({
         webRid: this.webRid,
@@ -380,6 +387,9 @@ export class RoomRecorder {
       case 'social':
         this.counters.follow += 1
         break
+      case 'gift':
+        this.counters.gift += 1
+        break
       default:
         break
     }
@@ -396,6 +406,8 @@ export class RoomRecorder {
         member: 0,
         likes: 0,
         social: 0,
+        gift: 0,
+        diamonds: 0,
         messages: 0,
         users: 0
       } satisfies MinuteDeltaRow)
@@ -412,6 +424,10 @@ export class RoomRecorder {
         break
       case 'social':
         row.social += 1
+        break
+      case 'gift':
+        row.gift += 1
+        row.diamonds += item.diamonds
         break
       default:
         break

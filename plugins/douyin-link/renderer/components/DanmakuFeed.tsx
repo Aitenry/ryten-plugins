@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Segmented, Tooltip } from 'antd'
-import { RiArrowDownLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine } from '@remixicon/react'
+import { RiArrowDownLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine, RiGiftLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { DanmakuItem, DanmakuKind, UserProfile } from '../../shared/types'
 import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
@@ -42,7 +42,7 @@ const NEAR_BOTTOM_PX = 48
 type ViewKey = Exclude<DanmakuKind, 'control' | 'system' | 'stats'>
 
 /** 分类顺序 */
-const VIEWS: ViewKey[] = ['chat', 'member', 'social', 'like']
+const VIEWS: ViewKey[] = ['chat', 'member', 'social', 'like', 'gift']
 
 export function DanmakuFeed(props: {
   /** 正在看哪个房间（头像按房间缓存） */
@@ -227,7 +227,18 @@ function DanmakuRow(props: {
   const { item, palette, user } = props
   const accent = kindColor(item.kind, palette)
 
-  if (item.kind === 'chat' || item.kind === 'stats' || item.kind === 'control' || item.kind === 'system') {
+  /**
+   * 紧凑行 vs 卡片行：聊天/人数/状态本来就是紧凑行；**没有发送者的礼物**（点歌）也走紧凑行——
+   * 它没有昵称可点、头像只会是个问号，做成「· 想听 X 演唱」更干净。
+   */
+  const compact =
+    item.kind === 'chat' ||
+    item.kind === 'stats' ||
+    item.kind === 'control' ||
+    item.kind === 'system' ||
+    (item.kind === 'gift' && !item.user && !item.userId)
+
+  if (compact) {
     return (
       <div data-rb-row="" className="flex min-w-0 items-start gap-1.5 rounded px-1 py-0.5 text-xs leading-5">
         <span className="mt-[7px] shrink-0 rounded-full" style={{ width: 4, height: 4, backgroundColor: accent }} />
@@ -256,6 +267,9 @@ function DanmakuRow(props: {
           ) : item.kind === 'system' ? (
             // 房间级系统提示（`WebcastRoomMessage`，如进房欢迎语）：原文照显，不当成状态变化
             <span style={{ color: accent }}>{item.text}</span>
+          ) : item.kind === 'gift' ? (
+            // 点歌：这一帧里没有发送者，只有歌手与歌名 -> 直接成句，别硬凑一个昵称出来
+            <span style={{ color: accent }}>{lineText(t, item)}</span>
           ) : (
             <span style={{ color: accent }}>
               {item.text === 'ended' ? t('douyin-link.lines.controlEnded') : t('douyin-link.lines.controlChanged')}
@@ -271,7 +285,9 @@ function DanmakuRow(props: {
       ? t('douyin-link.kinds.member')
       : item.kind === 'social'
         ? t('douyin-link.kinds.social')
-        : t('douyin-link.kinds.like')
+        : item.kind === 'gift'
+          ? t('douyin-link.kinds.gift')
+          : t('douyin-link.kinds.like')
 
   return (
     <div data-rb-row="" className="flex min-w-0 items-center gap-2 rounded-md px-1.5 py-1">
@@ -283,17 +299,38 @@ function DanmakuRow(props: {
         {badge}
       </span>
       <span className="min-w-0 flex-1 truncate text-xs">
-        <Tooltip title={user ? userTooltip(t, user) : undefined}>
-          <span
-            className="cursor-pointer font-medium"
-            style={{ color: accent }}
-            onClick={() => item.userId && props.onOpenUser(item.userId)}
-          >
-            {item.user || t('douyin-link.page.unknownUser')}
-          </span>
-        </Tooltip>
-        <span className="opacity-70"> {lineText(t, item)}</span>
+        {/*
+          点歌（也走 gift 这一类）那一帧里**没有发送者的 User**（只有个 id 片段），
+          所以昵称那一段整个省掉，而不是显示成「（未知用户）」——宁可少一段，不写废话。
+        */}
+        {item.user || item.userId ? (
+          <>
+            <Tooltip title={user ? userTooltip(t, user) : undefined}>
+              <span
+                className="cursor-pointer font-medium"
+                style={{ color: accent }}
+                onClick={() => item.userId && props.onOpenUser(item.userId)}
+              >
+                {item.user || t('douyin-link.page.unknownUser')}
+              </span>
+            </Tooltip>
+            <span className="opacity-70"> </span>
+          </>
+        ) : null}
+        <span className="opacity-70">{lineText(t, item)}</span>
       </span>
+      {/*
+        礼物的价值单独一列：`diamonds = 0` 有两种可能（免费礼物 / 官方没给价），
+        推送里分不出来，所以文案只说「价值未知」，不写成「0 抖币」。
+        点歌（没有发送者那一类）不带价格，整列省掉。
+      */}
+      {item.kind === 'gift' && (item.user || item.userId) ? (
+        <span className="shrink-0 text-[10px] opacity-60">
+          {item.diamonds > 0
+            ? t('douyin-link.page.giftDiamonds', { count: formatDiamonds(item.diamonds) })
+            : t('douyin-link.page.giftValueUnknown')}
+        </span>
+      ) : null}
       {item.count > 1 ? (
         <span className="shrink-0 text-xs opacity-60">×{item.count}</span>
       ) : null}
@@ -311,9 +348,20 @@ function lineText(
       return t('douyin-link.lines.member')
     case 'social':
       return t('douyin-link.lines.social')
+    case 'gift':
+      // 礼物名解不出来（推送里没带 GiftStruct）时也要成句，别显示成「送出了 」
+      return item.text
+        ? t('douyin-link.lines.giftNamed', { name: item.text })
+        : t('douyin-link.lines.gift')
     default:
       return t('douyin-link.lines.like')
   }
+}
+
+/** 抖币数字（万以上折成「1.2万」，弹幕行里放不下长数字） */
+export function formatDiamonds(value: number): string {
+  if (value >= 10000) return `${Math.round(value / 1000) / 10}万`
+  return String(value)
 }
 
 /** 悬停昵称时的速览（等级/粉丝团/关注数，明细点开看） */
@@ -340,6 +388,9 @@ export function kindColor(kind: DanmakuKind, palette: PluginPalette): string {
       return palette.down
     case 'social':
       return palette.up
+    // 礼物用暖色（warn）：它是这个房间里「花钱」的那条，最该被一眼看到
+    case 'gift':
+      return palette.warn
     case 'stats':
       return palette.axis
     case 'control':
@@ -356,6 +407,8 @@ export function kindIcon(kind: DanmakuKind, size = 12): React.JSX.Element {
       return <RiLoginCircleLine size={size} />
     case 'social':
       return <RiAddCircleLine size={size} />
+    case 'gift':
+      return <RiGiftLine size={size} />
     default:
       return <RiHeartLine size={size} />
   }

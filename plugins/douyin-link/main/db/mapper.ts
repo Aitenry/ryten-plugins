@@ -45,6 +45,8 @@ export interface MessageRow {
   userName: string
   content: string
   count: number
+  /** 礼物的抖币总价值（非礼物 0） */
+  diamonds: number
   atMs: number
 }
 
@@ -77,11 +79,14 @@ export interface MinuteDeltaRow {
   member: number
   likes: number
   social: number
+  /** 该分钟的礼物条数与抖币总额 */
+  gift: number
+  diamonds: number
   messages: number
   users: number
 }
 
-const EMPTY_STATS = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0 })
+const EMPTY_STATS = (): UserStats => ({ chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 })
 
 /* ------------------------------------------------------------------ 房间 */
 
@@ -296,18 +301,20 @@ export async function bumpMinutes(rows: MinuteDeltaRow[]): Promise<void> {
       const values = sql.join(
         chunk.map(
           (row) =>
-            sql`(${row.webRid}, ${row.minute}, ${row.chat}, ${row.member}, ${row.likes}, ${row.social}, ${row.messages}, ${row.users})`
+            sql`(${row.webRid}, ${row.minute}, ${row.chat}, ${row.member}, ${row.likes}, ${row.social}, ${row.gift}, ${row.diamonds}, ${row.messages}, ${row.users})`
         ),
         sql`, `
       )
       await db.execute(sql`
-        INSERT INTO douyin_link_minutes (web_rid, minute, chat, member, likes, social, messages, users)
+        INSERT INTO douyin_link_minutes (web_rid, minute, chat, member, likes, social, gift, diamonds, messages, users)
         VALUES ${values}
         ON CONFLICT (web_rid, minute) DO UPDATE SET
           chat = douyin_link_minutes.chat + EXCLUDED.chat,
           member = douyin_link_minutes.member + EXCLUDED.member,
           likes = douyin_link_minutes.likes + EXCLUDED.likes,
           social = douyin_link_minutes.social + EXCLUDED.social,
+          gift = douyin_link_minutes.gift + EXCLUDED.gift,
+          diamonds = douyin_link_minutes.diamonds + EXCLUDED.diamonds,
           messages = douyin_link_minutes.messages + EXCLUDED.messages,
           users = GREATEST(douyin_link_minutes.users, EXCLUDED.users)
       `)
@@ -321,6 +328,8 @@ export interface MinuteRow {
   member: number
   likes: number
   social: number
+  gift: number
+  diamonds: number
   messages: number
   users: number
 }
@@ -346,6 +355,8 @@ export async function minuteSeries(webRid: string, fromMinute: number, toMinute:
       member: row.member,
       likes: row.likes,
       social: row.social,
+      gift: row.gift,
+      diamonds: row.diamonds,
       messages: row.messages,
       users: row.users
     }))
@@ -389,6 +400,8 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             enter: row.delta.enter,
             likes: row.delta.like,
             follows: row.delta.follow,
+            gift: row.delta.gift,
+            diamonds: row.delta.diamonds,
             firstSeen: row.firstSeen,
             lastSeen: row.lastSeen
           }))
@@ -412,6 +425,8 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             enter: sql`douyin_link_users.enter + EXCLUDED.enter`,
             likes: sql`douyin_link_users.likes + EXCLUDED.likes`,
             follows: sql`douyin_link_users.follows + EXCLUDED.follows`,
+            gift: sql`douyin_link_users.gift + EXCLUDED.gift`,
+            diamonds: sql`douyin_link_users.diamonds + EXCLUDED.diamonds`,
             firstSeen: sql`LEAST(douyin_link_users.first_seen, EXCLUDED.first_seen)`,
             lastSeen: sql`GREATEST(douyin_link_users.last_seen, EXCLUDED.last_seen)`
           }
@@ -420,7 +435,7 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
   })
 }
 
-export type UserSort = 'recent' | 'chat'
+export type UserSort = 'recent' | 'chat' | 'gift'
 
 /** 某个房间的用户榜（`keyword` 匹配昵称/抖音号/id） */
 export async function listUsers(
@@ -446,7 +461,10 @@ export async function listUsers(
     const order =
       sort === 'chat'
         ? [desc(douyinLinkUsers.chat), desc(douyinLinkUsers.lastSeen)]
-        : [desc(douyinLinkUsers.lastSeen)]
+        : // 刷礼物榜按**抖币**排（不是条数）：十连小心心和一个大礼物谁更值，只有抖币说得清
+          sort === 'gift'
+          ? [desc(douyinLinkUsers.diamonds), desc(douyinLinkUsers.lastSeen)]
+          : [desc(douyinLinkUsers.lastSeen)]
     const rows = await db
       .select()
       .from(douyinLinkUsers)
@@ -606,6 +624,8 @@ export async function windowAggregates(fromMs: number, toMs: number): Promise<Ma
         member: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'member'))::int`,
         likes: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'like'))::int`,
         social: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'social'))::int`,
+        gift: sql<number>`(count(*) filter (where ${douyinLinkMessages.kind} = 'gift'))::int`,
+        diamonds: sql<number>`(coalesce(sum(${douyinLinkMessages.diamonds}) filter (where ${douyinLinkMessages.kind} = 'gift'), 0))::int`,
         users: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int`
       })
       .from(douyinLinkMessages)
@@ -628,6 +648,8 @@ export async function windowAggregates(fromMs: number, toMs: number): Promise<Ma
         member: row.member,
         like: row.likes,
         social: row.social,
+        gift: row.gift,
+        diamonds: row.diamonds,
         users: row.users,
         perMinute: 0,
         totalMessages: row.messages
@@ -730,6 +752,8 @@ export async function windowTotals(
     totals.enter = hit.member
     totals.like = hit.like
     totals.follow = hit.social
+    totals.gift = hit.gift
+    totals.diamonds = hit.diamonds
   }
   return { totals, messages: hit?.messages ?? 0 }
 }
@@ -816,6 +840,7 @@ function toStoredMessage(row: {
   userName: string
   content: string
   count: number
+  diamonds: number
   atMs: number
   id: number
 }): StoredMessage {
@@ -827,6 +852,7 @@ function toStoredMessage(row: {
     userId: row.userId,
     text: row.content,
     count: row.count,
+    diamonds: row.diamonds ?? 0,
     at: row.atMs
   }
   return message
@@ -850,6 +876,8 @@ function toRankRow(row: {
   enter: number
   likes: number
   follows: number
+  gift: number
+  diamonds: number
   firstSeen: number
   lastSeen: number
 }): UserRankRow {
@@ -878,7 +906,9 @@ function toRankRow(row: {
       chat: row.chat,
       enter: row.enter,
       like: row.likes,
-      follow: row.follows
+      follow: row.follows,
+      gift: row.gift ?? 0,
+      diamonds: row.diamonds ?? 0
     },
     firstSeen: row.firstSeen,
     lastSeen: row.lastSeen

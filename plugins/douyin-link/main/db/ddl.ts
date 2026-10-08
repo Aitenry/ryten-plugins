@@ -36,6 +36,7 @@ const DDL: string[] = [
      user_name  TEXT NOT NULL DEFAULT '',
      content    TEXT NOT NULL DEFAULT '',
      count      INTEGER NOT NULL DEFAULT 0,
+     diamonds   INTEGER NOT NULL DEFAULT 0,
      at_ms      DOUBLE PRECISION NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_time ON douyin_link_messages (web_rid, at_ms DESC)`,
@@ -62,6 +63,8 @@ const DDL: string[] = [
      enter           INTEGER NOT NULL DEFAULT 0,
      likes           INTEGER NOT NULL DEFAULT 0,
      follows         INTEGER NOT NULL DEFAULT 0,
+     gift            INTEGER NOT NULL DEFAULT 0,
+     diamonds        INTEGER NOT NULL DEFAULT 0,
      first_seen      DOUBLE PRECISION NOT NULL DEFAULT 0,
      last_seen       DOUBLE PRECISION NOT NULL DEFAULT 0
    )`,
@@ -75,6 +78,8 @@ const DDL: string[] = [
      member   INTEGER NOT NULL DEFAULT 0,
      likes    INTEGER NOT NULL DEFAULT 0,
      social   INTEGER NOT NULL DEFAULT 0,
+     gift     INTEGER NOT NULL DEFAULT 0,
+     diamonds INTEGER NOT NULL DEFAULT 0,
      messages INTEGER NOT NULL DEFAULT 0,
      users    INTEGER NOT NULL DEFAULT 0
    )`,
@@ -94,22 +99,30 @@ const DDL: string[] = [
      updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
    )`,
   /**
-   * 0.7.0 移除礼物功能的迁移（**幂等**）。
+   * 礼物功能的列迁移（**幂等**，0.7.1）。
    *
-   * 为什么必须显式 DROP：`CREATE TABLE IF NOT EXISTS` 对**已存在的旧库完全无效**——
-   * 只把建表语句里的礼物列删掉，旧库里的那些列会一直留着。所以要在这里把旧列/旧表/旧索引用
-   * `IF EXISTS` 真正清掉，并删掉历史 `kind='gift'` 的消息行。
+   * 背景：0.7.0 曾把礼物整体下线，并在这里 `DROP COLUMN` 掉了这些列。0.7.1 把礼物接回来
+   * （解释器见 `main/douyin/proto-messages.ts` 的 `decodeProtoGift` / `decodeProtoOrderSing`），
+   * 所以要：
+   * - 把 0.7.0 那几条 `DROP COLUMN ... gift/diamonds` 换成 `ADD COLUMN IF NOT EXISTS`——
+   *   `CREATE TABLE IF NOT EXISTS` 对**已存在的旧库完全无效**，不加这几条，老库永远缺列，
+   *   写库时会直接报「column does not exist」；
+   * - **不要再删 `kind = 'gift'` 的历史行**（0.7.0 那句 `DELETE` 必须去掉，否则每次启动都把
+   *   刚收到的礼物记录清掉）。
+   *
+   * `douyin_link_gifts`（0.5.7 的礼物目录缓存）不再需要：礼物名与价格现在直接从推送帧里解，
+   * 所以那张表继续 DROP，不再重建。
    */
-  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS diamonds`,
+  `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
+  /** 0.7.0 还删过「收礼人」两列，这次也不恢复（要收礼人就得再改 schema，等真需要时再说） */
   `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_id`,
   `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_name`,
-  `ALTER TABLE douyin_link_users DROP COLUMN IF EXISTS gift`,
-  `ALTER TABLE douyin_link_users DROP COLUMN IF EXISTS diamonds`,
-  `ALTER TABLE douyin_link_minutes DROP COLUMN IF EXISTS gift`,
-  `ALTER TABLE douyin_link_minutes DROP COLUMN IF EXISTS diamonds`,
   `DROP INDEX IF EXISTS idx_douyin_link_user_room_diamonds`,
-  `DROP TABLE IF EXISTS douyin_link_gifts`,
-  `DELETE FROM douyin_link_messages WHERE kind = 'gift'`
+  `DROP TABLE IF EXISTS douyin_link_gifts`
 ]
 
 /** 建表承诺：mapper / purge 都先 await 它，保证不会有访问跑到建表之前 */

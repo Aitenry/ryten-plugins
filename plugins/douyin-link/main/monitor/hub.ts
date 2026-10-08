@@ -109,7 +109,7 @@ export const DEFAULT_SETTINGS: LiveSettings = {
   audioOnConnect: true,
   volume: 0.8,
   maxItems: 200,
-  kinds: ['chat', 'member', 'like', 'social', 'stats', 'control', 'system'],
+  kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],
   // 实时通道默认开：借隐藏窗口页面的 ws 收逐条消息（比轮询实时）；失败自动回落到轮询
   realtimeStream: true,
   autoScroll: true,
@@ -1179,7 +1179,8 @@ export class AnalyzerHub {
         chat: row?.chat ?? 0,
         member: row?.member ?? 0,
         like: row?.likes ?? 0,
-        social: row?.social ?? 0
+        social: row?.social ?? 0,
+        gift: row?.gift ?? 0
       })
     }
     const topChat = await store.listUsers(webRid, 'chat', '', 10)
@@ -1193,6 +1194,7 @@ export class AnalyzerHub {
       lastAt: breakdown.lastAt,
       series,
       kinds: breakdown.kinds,
+      diamonds: totals.diamonds,
       topChat
     }
   }
@@ -1223,6 +1225,8 @@ export class AnalyzerHub {
         member: 0,
         like: 0,
         social: 0,
+        gift: 0,
+        diamonds: 0,
         users: 0,
         perMinute: 0,
         totalMessages: 0
@@ -1332,7 +1336,7 @@ export class AnalyzerHub {
     if (ids.size === 0) return { ...empty, voice: state.voice, hasInfo: Boolean(state.info) }
 
     const stored = await store.getUsers(webRid, [...ids])
-    const blank: UserStats = { chat: 0, enter: 0, like: 0, follow: 0 }
+    const blank: UserStats = { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 }
     const rows: PresenceRow[] = []
     for (const id of ids) {
       const session = recorder.profile(id)

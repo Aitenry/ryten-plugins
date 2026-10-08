@@ -18,6 +18,7 @@ export const zhCNToolTexts = {
     member: '进场',
     like: '点赞',
     social: '关注',
+    gift: '礼物',
     stats: '在线人数',
     control: '直播状态',
     system: '系统'
@@ -48,21 +49,21 @@ export const zhCNToolTexts = {
     audioFailed: '没能开始播放：这个直播间没有可拉的音频流，或地址解析失败（详见日志）。',
     summaryHeader: '**{{room}}** 最近 {{minutes}} 分钟',
     summaryTotals:
-      '- 消息 {{messages}} 条：弹幕 {{chat}} · 进场 {{member}} · 点赞 {{like}} · 关注 {{social}}；活跃用户 {{users}} 人',
+      '- 消息 {{messages}} 条：弹幕 {{chat}} · 进场 {{member}} · 点赞 {{like}} · 关注 {{social}} · 礼物 {{gift}}（{{diamonds}} 抖币）；活跃用户 {{users}} 人',
     summaryWindow: '- 数据时段：{{from}} → {{to}}',
     summaryKinds: '- 类型分布：{{kinds}}',
     summaryTopChat: '- 发言榜 Top：{{list}}',
     usersHeader: '**{{room}}** 用户榜（前 {{count}} 名，跨会话累计）',
     usersEmpty: '这个直播间还没有用户记录。',
     userLine:
-      '- {{user}} | 发言 {{chat}} · 进场 {{enter}} · 点赞 {{like}} · 关注 {{follow}} | 荣誉等级 {{honor}} · 粉丝团 {{fans}}',
+      '- {{user}} | 发言 {{chat}} · 进场 {{enter}} · 点赞 {{like}} · 关注 {{follow}} · 礼物 {{gift}}（{{diamonds}} 抖币） | 荣誉等级 {{honor}} · 粉丝团 {{fans}}',
     danmakuHeader: '消息检索：本页 {{count}} 条（命中 {{total}} 条，新 → 旧）：',
     danmakuEmpty: '没有匹配的消息（换个关键词，或确认这个直播间在监控中）。',
     line: '- [{{kind}}] {{time}} {{user}}{{text}}',
     countSuffix: ' ×{{count}}',
     compareHeader: '**多直播间对比**（最近 {{minutes}} 分钟）',
     compareRow:
-      '- {{room}} | 消息 {{messages}}（{{chat}} 弹幕 / {{member}} 进场 / {{like}} 点赞 / {{social}} 关注）| 活跃用户 {{users}} | {{rate}} 条/分 | 库里累计 {{total}} 条'
+      '- {{room}} | 消息 {{messages}}（{{chat}} 弹幕 / {{member}} 进场 / {{like}} 点赞 / {{social}} 关注 / {{gift}} 礼物 · {{diamonds}} 抖币）| 活跃用户 {{users}} | {{rate}} 条/分 | 库里累计 {{total}} 条'
   }
 }
 
@@ -75,6 +76,7 @@ export const enUSToolTexts: typeof zhCNToolTexts = {
     member: 'join',
     like: 'like',
     social: 'follow',
+    gift: 'gift',
     stats: 'viewers',
     control: 'status',
     system: 'system'
@@ -105,21 +107,21 @@ export const enUSToolTexts: typeof zhCNToolTexts = {
     audioFailed: 'Cannot start audio: this room has no pullable audio stream, or resolving failed (see the log).',
     summaryHeader: '**{{room}}** last {{minutes}} minutes',
     summaryTotals:
-      '- {{messages}} messages: chat {{chat}} · join {{member}} · like {{like}} · follow {{social}}; {{users}} active users',
+      '- {{messages}} messages: chat {{chat}} · join {{member}} · like {{like}} · follow {{social}} · gift {{gift}} ({{diamonds}} coins); {{users}} active users',
     summaryWindow: '- Data window: {{from}} → {{to}}',
     summaryKinds: '- Kind breakdown: {{kinds}}',
     summaryTopChat: '- Top chatters: {{list}}',
     usersHeader: '**{{room}}** user leaderboard (top {{count}}, across sessions)',
     usersEmpty: 'No user records for this room yet.',
     userLine:
-      '- {{user}} | chat {{chat}} · join {{enter}} · like {{like}} · follow {{follow}} | honor {{honor}} · fan club {{fans}}',
+      '- {{user}} | chat {{chat}} · join {{enter}} · like {{like}} · follow {{follow}} · gift {{gift}} ({{diamonds}} coins) | honor {{honor}} · fan club {{fans}}',
     danmakuHeader: 'Message search: {{count}} rows on this page ({{total}} matches, new → old):',
     danmakuEmpty: 'No matching messages (try another keyword, or make sure the room is being monitored).',
     line: '- [{{kind}}] {{time}} {{user}}{{text}}',
     countSuffix: ' ×{{count}}',
     compareHeader: '**Multi-room comparison** (last {{minutes}} minutes)',
     compareRow:
-      '- {{room}} | {{messages}} messages ({{chat}} chat / {{member}} join / {{like}} like / {{social}} follow) | {{users}} active users | {{rate}} msg/min | {{total}} stored'
+      '- {{room}} | {{messages}} messages ({{chat}} chat / {{member}} join / {{like}} like / {{social}} follow / {{gift}} gift · {{diamonds}} coins) | {{users}} active users | {{rate}} msg/min | {{total}} stored'
   }
 }
 
@@ -132,8 +134,8 @@ export function getToolTexts(): typeof zhCNToolTexts {
 export function toolDescriptions(): { zh: string; en: string } {
   return {
     zh:
-      '多直播间分析器（抖音直播）：rooms 看房间清单与状态；summary 出某个房间最近 N 分钟的分析报告（互动量/类型分布/发言榜）；messages 在自己存的库里检索消息（支持关键词与类型）；users 出用户榜（跨会话累计）；compare 做多房间对比；monitor 开关某个房间的监控；audio 开关声音（同一时间只有最新选中的那个房间出声，其它房间只监听弹幕）。只返回文字，不返回音频。',
+      '多直播间分析器（抖音直播）：rooms 看房间清单与状态；summary 出某个房间最近 N 分钟的分析报告（互动量/类型分布/发言榜，含礼物条数与抖币价值）；messages 在自己存的库里检索消息（支持关键词与类型）；users 出用户榜（跨会话累计，可按最近出现 / 发言最多 / 刷礼物最多排序）；compare 做多房间对比；monitor 开关某个房间的监控；audio 开关声音（同一时间只有最新选中的那个房间出声，其它房间只监听弹幕）。只返回文字，不返回音频。',
     en:
-      'Multi-room analyzer for Douyin live rooms: rooms lists rooms and states; summary returns an analysis report for one room over the last N minutes; messages searches the plugin\'s own message store (keyword and kind filters); users returns a leaderboard (across sessions); compare compares all rooms; monitor toggles monitoring; audio toggles sound (only the most recently focused room plays audio, the others just collect danmaku). Text only, no audio.'
+      'Multi-room analyzer for Douyin live rooms: rooms lists rooms and states; summary returns an analysis report for one room over the last N minutes (interactions, kind breakdown, top chatters, plus gift counts and coin value); messages searches the plugin\'s own message store (keyword and kind filters); users returns a leaderboard (across sessions; sort by most recent, most chat or top gifters); compare compares all rooms; monitor toggles monitoring; audio toggles sound (only the most recently focused room plays audio, the others just collect danmaku). Text only, no audio.'
   }
 }

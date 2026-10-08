@@ -38,7 +38,7 @@ export const douyinLinkRooms = pgTable('douyin_link_rooms', {
   lastSeenAt: doublePrecision('last_seen_at').notNull().default(0)
 })
 
-/** 消息流水（弹幕/进场/点赞/关注；stats 与系统提示不入库，它们不是互动） */
+/** 消息流水（弹幕/进场/点赞/关注/礼物；stats 与系统提示不入库，它们不是互动） */
 export const douyinLinkMessages = pgTable('douyin_link_messages', {
   id: serial().primaryKey().notNull(),
   webRid: text('web_rid').notNull(),
@@ -49,6 +49,8 @@ export const douyinLinkMessages = pgTable('douyin_link_messages', {
   userName: text('user_name').notNull().default(''),
   content: text().notNull().default(''),
   count: integer().notNull().default(0),
+  /** 礼物的抖币总价值（单价 × 数量）；非礼物消息一律 0，`0` 也表示「官方没给价」 */
+  diamonds: integer().notNull().default(0),
   atMs: doublePrecision('at_ms').notNull()
 })
 
@@ -75,6 +77,10 @@ export const douyinLinkUsers = pgTable(
     enter: integer().notNull().default(0),
     likes: integer().notNull().default(0),
     follows: integer().notNull().default(0),
+    /** 送出礼物的次数 */
+    gift: integer().notNull().default(0),
+    /** 送出礼物的抖币总额（0 = 没送过，或官方没给价） */
+    diamonds: integer().notNull().default(0),
     firstSeen: doublePrecision('first_seen').notNull().default(0),
     lastSeen: doublePrecision('last_seen').notNull().default(0)
   },
@@ -93,6 +99,9 @@ export const douyinLinkMinutes = pgTable(
     member: integer().notNull().default(0),
     likes: integer().notNull().default(0),
     social: integer().notNull().default(0),
+    /** 该分钟的礼物条数与抖币总额 */
+    gift: integer().notNull().default(0),
+    diamonds: integer().notNull().default(0),
     messages: integer().notNull().default(0),
     users: integer().notNull().default(0)
   },

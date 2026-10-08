@@ -20,6 +20,12 @@ import type { DanmakuHooks, DanmakuTarget } from './danmaku'
  * `WebcastResponse`。它连上时中枢会**暂停 HTTP 轮询**（`./danmaku`）——二者二选一，避免同一条消息
  * 被两个来源各记一次；ws 断了中枢再把 HTTP 轮询接回来。
  *
+ * 两条通道**收到的消息并不完全一样**（2026-10 实测，`spike/live-probe.mjs` 走 HTTP、
+ * `spike/ws-spike.mjs` 走页面 ws）：语音房的点歌（`WebcastLinkmicOrderSingMessage`）两边都推
+ * （msgId 能对上）；而真正的 `WebcastGiftMessage` 在 HTTP 420s + ws 79 帧/100s 的样本里
+ * **一条都没出现过**（房间里却肉眼能看到「X 送了…」，那是点歌）。所以礼物这一类**不能只押在 ws 上**，
+ * 两个解码器都得留（见 `./proto-messages.ts`）。
+ *
  * 帧结构与复用：ws 帧是 `PushFrame`（`payload` 在字段 8，常态 gzip），
  * 解压后就是**同一份 `WebcastResponse`**——直接交给 `decodeProtoResponse`，与 HTTP 走同一套解码。
  *
