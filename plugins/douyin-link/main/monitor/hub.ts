@@ -1420,20 +1420,24 @@ export class AnalyzerHub {
     const gifts = await store.giftBreakdown(webRid, fromMs, toMs)
     /**
      * 收礼物榜 / 送礼物榜（用户 2026-10-08 的要求）：
-     * - 收礼物榜**只要麦上的人**，按麦位序排（谁在麦上收了礼物、收了多少值）；
-     * - 送礼物榜按抖币排（谁送出的最值钱）。
+     * - 收礼物榜**只要麦上的人**（谁在麦上收了礼物、收了多少值）；
+     * - **两张榜都按抖币排行**（用户追加：「收礼物榜和送礼物榜都要按照抖币来排行，收礼物榜没有按照
+     *   抖币来排行」）——收礼榜原来先按麦位序，看着就不像按钱排的；麦位号仍然显示（那是信息），
+     *   但**不参与排序**。抖币相同时按件数、再按最近一次。
      * 麦位是**内存里的实时表**（`recorder.micList()`），窗口是时间的——两者口径不同，
      * 所以这里用「当前麦位」过滤窗口内的收礼聚合：没在麦上的收礼人不进这张榜（榜单说的是「麦上收获」）。
      * 没在监控这个房间时没有麦位表，收礼物榜就是空的（界面按空态显示，不编数据）。
      */
     const seats = new Map((this.states.get(webRid)?.recorder.micList() ?? []).map((item) => [item.userId, item.seat]))
+    const byCoins = (a: GiftRankRow, b: GiftRankRow): number =>
+      b.diamonds - a.diamonds || b.count - a.count || b.lastAt - a.lastAt
     const receivedAll = await store.giftRankByPerson(webRid, 'recipient', fromMs, toMs)
     const received: GiftRankRow[] = receivedAll
       .filter((row) => seats.has(row.userId))
       .map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 }))
-      .sort((a, b) => (a.seat || 999) - (b.seat || 999) || b.diamonds - a.diamonds)
+      .sort(byCoins)
     const sentAll = await store.giftRankByPerson(webRid, 'sender', fromMs, toMs)
-    const sent: GiftRankRow[] = sentAll.map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 }))
+    const sent: GiftRankRow[] = sentAll.map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 })).sort(byCoins)
     return {
       webRid,
       windowMinutes: minutes,
