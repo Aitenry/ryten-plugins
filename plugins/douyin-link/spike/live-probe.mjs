@@ -53,8 +53,8 @@ const input = positionals[0]
 const seconds = Number(positionals[1] ?? 120)
 /** dump 时的 hex 前缀长度（整条太长；要全文用 `--hex`） */
 const HEX_PREFIX = args.includes('--hex') ? Number.POSITIVE_INFINITY : 240
-/** 每个 method 最多 dump 几次（同一种消息的结构是一样的，别把日志冲爆） */
-const DUMP_LIMIT = args.includes('--hex') ? 1 : 3
+/** 每个 method 最多 dump 几次（同一种消息的结构是一样的，别把日志冲爆；`--dump-limit=N` 可调） */
+const DUMP_LIMIT = Number(args.find((a) => a.startsWith('--dump-limit='))?.slice('--dump-limit='.length) ?? 3)
 
 /** `--discover [房间号|链接]`：列房间（默认首页推荐；给了房间号就扫那个房间页面），不采集 */
 if (args.includes('--discover')) {

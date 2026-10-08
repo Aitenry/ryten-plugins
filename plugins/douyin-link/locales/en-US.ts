@@ -169,7 +169,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       newMessages: '{{count}} new messages',
       clickUser: 'Open this user\u2019s profile and message history',
       unknownUser: '(unknown user)',
-      senderUnknown: 'ID {{id}}',
+      /** Shown when only the id is known (used for both the sender and the recipient) */
+      idOnly: 'ID {{id}}',
       giftDiamonds: '{{count}} coins',
       giftValueUnknown: 'value unknown',
       interactions:
@@ -194,6 +195,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       social: 'followed the host',
       gift: 'sent a gift',
       giftNamed: 'sent {{name}}',
+      giftTo: 'to {{to}}',
       stats: 'Viewers',
       controlEnded: 'The stream has ended',
       controlChanged: 'Stream status changed'

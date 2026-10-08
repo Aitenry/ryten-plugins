@@ -220,6 +220,8 @@ export class RoomRecorder {
         content: item.text,
         count: item.count,
         diamonds: item.diamonds,
+        toUserId: item.toUserId,
+        toUserName: item.toUser,
         atMs: item.at
       })
       const user = item.userId ? this.userMap.get(item.userId) : undefined

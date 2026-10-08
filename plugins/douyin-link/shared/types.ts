@@ -125,7 +125,13 @@ export interface LiveInteractions {
   gift: number
 }
 
-/** 一条弹幕 / 一条直播间消息 */
+/**
+ * 一条弹幕 / 一条直播间消息。
+ *
+ * 礼物这一类多两个「收礼人」字段：真礼物在推送里有 `toUser`（`WebcastGiftMessage.8`），
+ * 语音房点歌那一帧里也有（`6.5.1.1` 是歌手 = 收到这份点唱礼物的人）。
+ * 其它类型一律为空串。
+ */
 export interface DanmakuItem {
   /** 自增序号（渲染层做 key；protobuf 里的 id 会丢精度，不用它） */
   id: number
@@ -137,7 +143,7 @@ export interface DanmakuItem {
   /**
    * 正文：
    * - chat = 弹幕内容；stats = 人数串；system/control = 提示原文；
-   * - **gift = 礼物名**（`GiftStruct.name`，拿不到时退回 `describe`）。
+   * - **gift = 礼物名**（真礼物取 `GiftStruct.name`；点歌那头取点唱礼物记录里的 `6.5.1.10`）。
    */
   text: string
   /**
@@ -148,10 +154,14 @@ export interface DanmakuItem {
   /**
    * 抖币价值：**只有 gift 用**（= 单价 × 数量），其余类型一律 0。
    *
-   * 单价来自推送里的 `GiftStruct.diamond_count`（字段号已实测）；拿不到就是 0，
-   * 界面上显示成「价值未知」而不是「免费」。
+   * 单价来自推送里的价格字段（真礼物是 `GiftStruct.diamond_count`，点歌是点唱礼物记录里的价格）；
+   * 拿不到就是 0，界面上显示成「价值未知」而不是「免费」。
    */
   diamonds: number
+  /** **收礼人**昵称（礼物才有：谁收到了这份礼物；拿不到时是空串） */
+  toUser: string
+  /** 收礼人 id（礼物才有；空串 = 不知道 / 这条不是礼物） */
+  toUserId: string
   /** 主进程收到的时刻（ms） */
   at: number
 }

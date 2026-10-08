@@ -37,6 +37,8 @@ const DDL: string[] = [
      content    TEXT NOT NULL DEFAULT '',
      count      INTEGER NOT NULL DEFAULT 0,
      diamonds   INTEGER NOT NULL DEFAULT 0,
+     to_user_id   TEXT NOT NULL DEFAULT '',
+     to_user_name TEXT NOT NULL DEFAULT '',
      at_ms      DOUBLE PRECISION NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_time ON douyin_link_messages (web_rid, at_ms DESC)`,
@@ -99,12 +101,12 @@ const DDL: string[] = [
      updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
    )`,
   /**
-   * 礼物功能的列迁移（**幂等**，0.7.1）。
+   * 礼物功能的列迁移（**幂等**，0.7.1 起）。
    *
-   * 背景：0.7.0 曾把礼物整体下线，并在这里 `DROP COLUMN` 掉了这些列。0.7.1 把礼物接回来
-   * （解释器见 `main/douyin/proto-messages.ts` 的 `decodeProtoGift` / `decodeProtoOrderSing`），
-   * 所以要：
-   * - 把 0.7.0 那几条 `DROP COLUMN ... gift/diamonds` 换成 `ADD COLUMN IF NOT EXISTS`——
+   * 背景：0.7.0 曾把礼物整体下线，并在这里 `DROP COLUMN` 掉了这些列（含「收礼人」两列）。
+   * 0.7.1 把礼物接回来、0.7.4 又把**收礼人**接回来（点歌那一帧里既有送礼人也有收礼人的
+   * `User`，见 `main/douyin/proto-messages.ts`），所以要：
+   * - 把 0.7.0 那几条 `DROP COLUMN` 换成 `ADD COLUMN IF NOT EXISTS`——
    *   `CREATE TABLE IF NOT EXISTS` 对**已存在的旧库完全无效**，不加这几条，老库永远缺列，
    *   写库时会直接报「column does not exist」；
    * - **不要再删 `kind = 'gift'` 的历史行**（0.7.0 那句 `DELETE` 必须去掉，否则每次启动都把
@@ -114,13 +116,12 @@ const DDL: string[] = [
    * 所以那张表继续 DROP，不再重建。
    */
   `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS to_user_id TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE douyin_link_messages ADD COLUMN IF NOT EXISTS to_user_name TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
-  /** 0.7.0 还删过「收礼人」两列，这次也不恢复（要收礼人就得再改 schema，等真需要时再说） */
-  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_id`,
-  `ALTER TABLE douyin_link_messages DROP COLUMN IF EXISTS to_user_name`,
   `DROP INDEX IF EXISTS idx_douyin_link_user_room_diamonds`,
   `DROP TABLE IF EXISTS douyin_link_gifts`
 ]

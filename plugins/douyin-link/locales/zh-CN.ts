@@ -179,7 +179,8 @@ export const DouyinLinkZhCN = {
       newMessages: '{{count}} 条新消息',
       clickUser: '点开看这个人的档案与历史弹幕',
       unknownUser: '（未知用户）',
-      senderUnknown: 'ID {{id}}',
+      /** 只有 id 没有昵称时照实显示（送礼人 / 收礼人都用它） */
+      idOnly: 'ID {{id}}',
       giftDiamonds: '{{count}} 抖币',
       giftValueUnknown: '价值未知',
       interactions:
@@ -204,6 +205,7 @@ export const DouyinLinkZhCN = {
       social: '关注了主播',
       gift: '送出了礼物',
       giftNamed: '送出了 {{name}}',
+      giftTo: '送给 {{to}}',
       stats: '在线人数',
       controlEnded: '直播已结束',
       controlChanged: '直播状态变化'

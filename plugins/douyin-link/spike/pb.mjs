@@ -102,8 +102,8 @@ export function asText(buf) {
   return text
 }
 
-/** 递归打字段树（深度 4；bytes 能当文本读就显示文本，否则当嵌套 message） */
-export function dumpTree(buf, depth = 0, label = '', sink = console.log) {
+/** 递归打字段树（默认深度 4；bytes 能当文本读就显示文本，否则当嵌套 message） */
+export function dumpTree(buf, depth = 0, label = '', sink = console.log, maxDepth = 3) {
   const indent = '  '.repeat(depth)
   let msg
   try {
@@ -132,7 +132,7 @@ export function dumpTree(buf, depth = 0, label = '', sink = console.log) {
         continue
       }
       sink(`${indent}${label}${no}: bytes(${bytes.length})`)
-      if (depth < 3 && bytes.length > 1) dumpTree(bytes, depth + 1, `${label}${no}.`, sink)
+      if (depth < maxDepth && bytes.length > 1) dumpTree(bytes, depth + 1, `${label}${no}.`, sink, maxDepth)
     }
   }
 }
