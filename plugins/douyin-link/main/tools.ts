@@ -42,7 +42,7 @@ export function createToolContribution(): {
           room?: string
           keyword?: string
           kind?: string
-          sort?: 'recent' | 'chat'
+          sort?: 'recent' | 'chat' | 'gift'
           minutes?: number
           limit?: number
           on?: boolean
@@ -92,6 +92,8 @@ export function createToolContribution(): {
                   member: row.member,
                   like: row.like,
                   social: row.social,
+                  gift: row.gift,
+                  diamonds: row.diamonds,
                   users: row.users,
                   rate: row.perMinute,
                   total: row.totalMessages
@@ -114,6 +116,8 @@ export function createToolContribution(): {
                 member: summary.totals.enter,
                 like: summary.totals.like,
                 social: summary.totals.follow,
+                gift: summary.totals.gift,
+                diamonds: summary.diamonds,
                 users: summary.users
               })
             ]
@@ -144,7 +148,7 @@ export function createToolContribution(): {
             const limit = clampLimit(input.limit, 20)
             const rows = await analyzerHub.listUsers(
               room.webRid,
-              input.sort === 'chat' ? input.sort : 'recent',
+              input.sort === 'chat' || input.sort === 'gift' ? input.sort : 'recent',
               String(input.keyword ?? ''),
               limit
             )
@@ -158,6 +162,8 @@ export function createToolContribution(): {
                   enter: row.stats.enter,
                   like: row.stats.like,
                   follow: row.stats.follow,
+                  gift: row.stats.gift,
+                  diamonds: row.stats.diamonds,
                   honor: row.honorLevel,
                   fans: row.fansClubLevel
                 })
@@ -200,7 +206,7 @@ export function createToolContribution(): {
             room: z.string().optional().describe('房间号或标题关键词；省略 = 分析中的房间（rooms/compare 不需要）'),
             keyword: z.string().optional().describe('messages/users 的关键词（正文或昵称）'),
             kind: z.string().optional().describe('messages 的类型：chat/member/like/social'),
-            sort: z.enum(['recent', 'chat']).optional().describe('users 的排序'),
+            sort: z.enum(['recent', 'chat', 'gift']).optional().describe('users 的排序（gift = 刷礼物榜，按抖币）'),
             minutes: z.number().optional().describe('summary/compare 的统计窗口（分钟，默认 60）'),
             limit: z.number().optional().describe('返回条数（默认 messages 30 / users 20，最多 200）'),
             on: z.boolean().optional().describe('monitor/audio 的开关（默认 true）')

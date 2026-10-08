@@ -82,6 +82,9 @@ export const DouyinLinkZhCN = {
       kpiMember: '进场',
       kpiLike: '点赞',
       kpiSocial: '关注',
+      kpiGift: '礼物',
+      kpiDiamonds: '礼物价值',
+      kpiDiamondsUnit: '抖币',
       kpiUsers: '活跃用户',
       kpiRate: '平均速率',
       perMinute: '条/分',
@@ -106,11 +109,14 @@ export const DouyinLinkZhCN = {
       searchUsersPlaceholder: '搜昵称 / 抖音号 / 用户 id',
       sortRecent: '最近出现',
       sortChat: '发言最多',
+      sortGift: '刷礼物最多',
       colUser: '用户',
       colDisplayId: '抖音号',
       colChat: '发言',
       colEnter: '进场',
       colLike: '点赞',
+      colGift: '礼物',
+      colDiamonds: '抖币',
       colLastSeen: '最近出现',
       /* 检索 */
       searchTitle: '消息检索（存在数据库里）',
@@ -173,8 +179,10 @@ export const DouyinLinkZhCN = {
       newMessages: '{{count}} 条新消息',
       clickUser: '点开看这个人的档案与历史弹幕',
       unknownUser: '（未知用户）',
+      giftDiamonds: '{{count}} 抖币',
+      giftValueUnknown: '价值未知',
       interactions:
-        '本场：弹幕 {{chat}} · 进场 {{enter}} · 关注 {{follow}} · 点赞 {{like}}',
+        '本场：弹幕 {{chat}} · 进场 {{enter}} · 关注 {{follow}} · 点赞 {{like}} · 礼物 {{gift}}',
       sessionUsers: '本场 {{count}} 人',
       sessionReceived: '本场 {{count}} 条',
       dbLine: '数据库：{{rooms}} 个直播间 · {{messages}} 条消息 · {{users}} 条用户记录 · {{sessions}} 次监控'
@@ -184,6 +192,7 @@ export const DouyinLinkZhCN = {
       member: '进场',
       like: '点赞',
       social: '关注',
+      gift: '礼物',
       stats: '在线人数',
       control: '直播状态',
       system: '系统'
@@ -192,6 +201,8 @@ export const DouyinLinkZhCN = {
       member: '进入了直播间',
       like: '点了赞',
       social: '关注了主播',
+      gift: '送出了礼物',
+      giftNamed: '送出了 {{name}}',
       stats: '在线人数',
       controlEnded: '直播已结束',
       controlChanged: '直播状态变化'
@@ -271,7 +282,7 @@ export const DouyinLinkZhCN = {
       autoScrollLabel: '弹幕列表自动跟随最新',
       realtimeLabel: '实时通道（实验性）',
       realtimeHint:
-        '借直播间页面的 websocket 收逐条消息（弹幕/进场/点赞等，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落。需要一个隐藏窗口，失败自动降级。',
+        '借直播间页面的 websocket 收逐条消息（弹幕/进场/点赞/**礼物**，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落。需要一个隐藏窗口，失败自动降级。',
 
       retentionLabel: '消息保留天数',
       retentionHint: '0 = 永久保留；启动与每 6 小时清一次，只删消息流水（用户统计与分钟聚合不动）',

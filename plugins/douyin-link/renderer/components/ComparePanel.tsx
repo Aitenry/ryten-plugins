@@ -129,6 +129,22 @@ export function ComparePanel(props: {
               { title: t('douyin-link.page.kpiLike'), dataIndex: 'like', width: 70, align: 'right' },
               { title: t('douyin-link.page.kpiSocial'), dataIndex: 'social', width: 70, align: 'right' },
               {
+                title: t('douyin-link.page.kpiGift'),
+                dataIndex: 'gift',
+                width: 70,
+                align: 'right',
+                render: (value: number) => <span className={value === 0 ? 'opacity-40' : undefined}>{value}</span>
+              },
+              {
+                title: t('douyin-link.page.kpiDiamonds'),
+                dataIndex: 'diamonds',
+                width: 90,
+                align: 'right',
+                render: (value: number) => (
+                  <span className={value === 0 ? 'opacity-40' : undefined}>{formatNumber(value)}</span>
+                )
+              },
+              {
                 title: t('douyin-link.page.colActiveUsers'),
                 dataIndex: 'users',
                 width: 84,

@@ -79,7 +79,7 @@ export const FALLBACK_SETTINGS: LiveSettings = {
   audioOnConnect: true,
   volume: 0.8,
   maxItems: 200,
-  kinds: ['chat', 'member', 'like', 'social', 'stats', 'control', 'system'],
+  kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],
   realtimeStream: true,
   autoScroll: true,
   monitorConcurrency: 3,
@@ -151,7 +151,8 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
       chat: asCount(totals.chat),
       enter: asCount(totals.enter),
       like: asCount(totals.like),
-      follow: asCount(totals.follow)
+      follow: asCount(totals.follow),
+      gift: asCount(totals.gift)
     },
     messages: asCount(raw.messages),
     users: asCount(raw.users),
@@ -159,6 +160,7 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
     lastAt: asCount(raw.lastAt),
     series: asList<RoomSummary['series'][number]>(raw.series),
     kinds: asList<RoomSummary['kinds'][number]>(raw.kinds),
+    diamonds: asCount(raw.diamonds),
     topChat: asList<UserRankRow>(raw.topChat)
   }
 }
@@ -249,7 +251,7 @@ export const api = {
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
   usersList: async (
     webRid: string,
-    sort: 'recent' | 'chat' = 'recent',
+    sort: 'recent' | 'chat' | 'gift' = 'recent',
     keyword = '',
     limit = 200
   ): Promise<UserRankRow[]> => asList<UserRankRow>(await invoke(`${PREFIX}users-list`, webRid, sort, keyword, limit)),

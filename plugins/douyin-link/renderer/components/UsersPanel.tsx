@@ -28,7 +28,7 @@ export function UsersPanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
-  const [sort, setSort] = useState<'recent' | 'chat'>('chat')
+  const [sort, setSort] = useState<'recent' | 'chat' | 'gift'>('chat')
   const [keyword, setKeyword] = useState('')
   const [rows, setRows] = useState<UserRankRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -95,10 +95,11 @@ export function UsersPanel(props: {
           <Segmented
             size="small"
             value={sort}
-            onChange={(value) => setSort(value as 'recent' | 'chat')}
+            onChange={(value) => setSort(value as 'recent' | 'chat' | 'gift')}
             options={[
               { value: 'recent', label: t('douyin-link.page.sortRecent') },
-              { value: 'chat', label: t('douyin-link.page.sortChat') }
+              { value: 'chat', label: t('douyin-link.page.sortChat') },
+              { value: 'gift', label: t('douyin-link.page.sortGift') }
             ]}
           />
         </div>
@@ -154,6 +155,28 @@ export function UsersPanel(props: {
                 width: 70,
                 align: 'right',
                 render: (_value, row) => <span>{formatNumber(row.stats.like)}</span>
+              },
+              {
+                title: t('douyin-link.page.colGift'),
+                dataIndex: 'gift',
+                width: 70,
+                align: 'right',
+                render: (_value, row) => (
+                  <span style={row.stats.gift > 0 ? { color: palette.warn } : undefined}>
+                    {formatNumber(row.stats.gift)}
+                  </span>
+                )
+              },
+              {
+                title: t('douyin-link.page.colDiamonds'),
+                dataIndex: 'diamonds',
+                width: 84,
+                align: 'right',
+                render: (_value, row) => (
+                  <span className={row.stats.diamonds > 0 ? undefined : 'opacity-40'}>
+                    {formatNumber(row.stats.diamonds)}
+                  </span>
+                )
               },
               {
                 title: t('douyin-link.page.colLastSeen'),

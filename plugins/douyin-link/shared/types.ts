@@ -36,20 +36,21 @@ export interface LiveRoomInfo {
 }
 
 /** 弹幕类型：界面按类型配色与过滤 */
-export type DanmakuKind = 'chat' | 'member' | 'like' | 'social' | 'stats' | 'control' | 'system'
+export type DanmakuKind = 'chat' | 'member' | 'like' | 'social' | 'gift' | 'stats' | 'control' | 'system'
 
 export const DANMAKU_KINDS: DanmakuKind[] = [
   'chat',
   'member',
   'like',
   'social',
+  'gift',
   'stats',
   'control',
   'system'
 ]
 
 /** 计数用到的类型（stats/control/system 不入库，它们不是「互动」） */
-export const COUNTED_KINDS: DanmakuKind[] = ['chat', 'member', 'like', 'social']
+export const COUNTED_KINDS: DanmakuKind[] = ['chat', 'member', 'like', 'social', 'gift']
 
 /**
  * 用户在直播间里的静态信息（主进程从弹幕帧里的 `User` 消息解出来，跨进程共用）。
@@ -95,6 +96,15 @@ export interface UserStats {
   like: number
   /** 关注直播间次数 */
   follow: number
+  /** 送出礼物的**次数**（连击按推送来的每一条算一次） */
+  gift: number
+  /**
+   * 送出礼物的**抖币总额**（0 = 官方没给价或全是免费礼物）。
+   *
+   * 口径：一条 `WebcastGiftMessage` 的价值 = `GiftStruct.diamond_count × 该条的数量`；
+   * 拿不到 `diamond_count` 时按 0 计（**宁可没有数字，也不给一个错的**）。
+   */
+  diamonds: number
 }
 
 /** 完整档案 = 静态信息 + 出现记录 + 该房间的累计统计 */
@@ -111,6 +121,8 @@ export interface LiveInteractions {
   enter: number
   like: number
   follow: number
+  /** 本场收到的礼物条数（抖币价值看每条消息的 `diamonds` 与用户/汇总的累计） */
+  gift: number
 }
 
 /** 一条弹幕 / 一条直播间消息 */
@@ -122,10 +134,24 @@ export interface DanmakuItem {
   user: string
   /** 发送者 id（渲染层拿它查用户档案；拿不到时是空串） */
   userId: string
-  /** 正文（chat = 弹幕内容；stats = 人数串） */
+  /**
+   * 正文：
+   * - chat = 弹幕内容；stats = 人数串；system/control = 提示原文；
+   * - **gift = 礼物名**（`GiftStruct.name`，拿不到时退回 `describe`）。
+   */
   text: string
-  /** 计数（点赞数等，0 = 无） */
+  /**
+   * 计数：点赞数（like）/ 进场后的在线人数（member）/ **该条消息里的礼物数量**（gift）。
+   * 0 = 无。
+   */
   count: number
+  /**
+   * 抖币价值：**只有 gift 用**（= 单价 × 数量），其余类型一律 0。
+   *
+   * 单价来自推送里的 `GiftStruct.diamond_count`（字段号已实测）；拿不到就是 0，
+   * 界面上显示成「价值未知」而不是「免费」。
+   */
+  diamonds: number
   /** 主进程收到的时刻（ms） */
   at: number
 }
@@ -372,7 +398,9 @@ export interface RoomSummary {
   firstAt: number
   lastAt: number
   /** 每秒一条的时间序列（按分钟聚合，主进程补齐缺口） */
-  series: Array<{ minute: number; chat: number; member: number; like: number; social: number }>
+  series: Array<{ minute: number; chat: number; member: number; like: number; social: number; gift: number }>
+  /** 窗口内的礼物抖币总额（0 = 没有礼物，或官方没给价） */
+  diamonds: number
   /** 类型分布 */
   kinds: Array<{ kind: DanmakuKind; count: number }>
   topChat: UserRankRow[]
@@ -436,6 +464,10 @@ export interface RoomCompareRow {
   member: number
   like: number
   social: number
+  /** 窗口内的礼物条数 */
+  gift: number
+  /** 窗口内的礼物抖币总额 */
+  diamonds: number
   users: number
   /** 平均速率（条/分，按窗口算） */
   perMinute: number

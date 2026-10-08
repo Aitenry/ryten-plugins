@@ -116,7 +116,8 @@ const USER_FIELDS: Record<string, number[]> = {
   WebcastEmojiChatMessage: [2],
   WebcastMemberMessage: [2],
   WebcastSocialMessage: [2],
-  WebcastLikeMessage: [5, 2]
+  WebcastLikeMessage: [5, 2],
+  WebcastGiftMessage: [7, 2]
 }
 
 /** 单条消息 → 一行 + 里面的用户（不认识的 method 返回 null） */
@@ -149,6 +150,11 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
     }
     case 'WebcastSocialMessage':
       return { ...nothing(), item: item('social', nickname, userId, '', 0), users: withUser(user ? [user] : []) }
+    case 'WebcastGiftMessage':
+      return decodeProtoGift(msg, user)
+    case 'WebcastLinkmicOrderSingMessage':
+      // 语音房「点歌」：房间里显示成「X 送了 想听 Y 演唱」，归到礼物这一类（见下面的解码器）
+      return decodeProtoOrderSing(msg)
     case 'WebcastRoomStatsMessage': {
       // 在线人数（JSON 模式根本收不到这条）：4 是展示串（"31在线观众"），5 是数字
       const total = pickVarintInRange(msg, [5, 9], 0, 100000000) ?? 0
@@ -178,6 +184,81 @@ export function decodeProtoMessage(method: string, payload: Buffer): ProtoDecode
     default:
       maybeDumpUnknown(method, payload)
       return null
+  }
+}
+
+/**
+ * 礼物消息（`WebcastGiftMessage`）。
+ *
+ * ⚠️ 字段号的来源要说清楚（本仓库的纪律是「宁可没有，不给错数」）：
+ * 这几条**不是**本机抓到的真帧量出来的——2026-10 对着语音房连采了两条通道（HTTP 轮询与页面 ws，
+ * 各几十分钟），`WebcastGiftMessage` **一条都没出现**（房间里肉眼可见的「X 送了…」是点歌，
+ * 见下面的 `decodeProtoOrderSing`）。所以这里的 `5 = repeatCount`、`6 = comboCount`、`7 = user`、
+ * `15 = gift(GiftStruct)`，以及 `GiftStruct` 的 `2 = describe`、`12 = diamondCount`、`16 = name`，
+ * 取的是社区公开的 webcast proto 定义（与抖音服务端一致的那份字段号表），
+ * 并按「猜错也不给错数」的口径实现：**只有 `diamondCount` 明确解出来才显示价值，否则一律 0 = 未知**。
+ *
+ * 抓到真礼物帧之后要做的第一件事：用 `spike/decoder-check.mjs --frame=WebcastGiftMessage:<hex>`
+ * 把它喂回这里，核对上面这几个字段号，再把这段注释改成「实测」。
+ *
+ * 显示口径：
+ * - 正文 = 礼物名（`name`，拿不到退回 `describe`；两个都没有就留空，行上只显示昵称）；
+ * - 数量 = `repeatCount`（缺省 1：免费礼物/单发消息常常不带这个字段）；
+ * - 抖币价值 = `diamondCount × 数量`；`diamondCount` 拿不到就是 **0 = 未知**，
+ *   界面据此显示「价值未知」而不是「0 抖币」。
+ *
+ * 连击不单独成一列：`repeatEnd = 0` 的连击服务端会**逐条推增量**，逐条落库本来就是逐条明细，
+ * 再合成一列反而会把「这一条到底送了几个」搞乱。
+ */
+function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
+  const gift = getMessage(msg, 15)
+  const nickname = user?.nickname ?? ''
+  const giftUser = user ? [user] : []
+  const name = (gift ? (pickString(gift, [16, 2], 40) ?? '') : '').trim()
+  const unit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
+  const repeat = pickVarintInRange(msg, [5], 1, 100000) ?? 1
+  if (!name && !nickname) return nothing()
+  return {
+    ...nothing(),
+    item: item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat),
+    users: giftUser
+  }
+}
+
+/**
+ * 点歌（`WebcastLinkmicOrderSingMessage`）：语音/聊天室里「点了歌」那条礼物栏消息。
+ *
+ * **为什么把它归到礼物这一类**（而不是新开一个类型）：房间里它的显示就是
+ * 「X 送了 想听 Y 演唱」——用户看到的那一条就在礼物栏里；而真正的 `WebcastGiftMessage`
+ * 在这类房间的推送里实测**一条都没有**（2026-10：HTTP 轮询 420s 收到 28 种消息、
+ * 页面 ws 收到 79 帧/100s，两边都没见过礼物帧，但房间里肉眼能看到送礼/点歌）。
+ * 只做后者，这个房间的「礼物」页签会永远是空的。
+ *
+ * 两条通道**都**会推这条点歌消息（实测：HTTP 抓 3 条、ws 抓 3 条，msgId 能对上），
+ * 所以解码放在这里（两条通道共用 `decodeProtoResponse`）就够，不必依赖 ws。
+ *
+ * 字段号实测（2026-10，真帧喂回 `spike/decoder-check.mjs --frame=…` 核对过）：顶层 `2` 是**事件类型**，
+ * 同一首歌会连着来几种：
+ * - `2 = 4`：**点歌本身**，payload 在 `6` —— `6.1` 单号串 `发送者id_歌手id_单号_0_歌曲id_1_Normal`、
+ *   `6.2` 歌曲状态、`6.3` **歌手的完整 `User`**、`6.4` 时间（秒）、`6.6` 歌曲封面。**这条才解码**；
+ * - `2 = 5`：这首歌的**播放状态变更**（payload 在 `7`：`7.2` 歌曲/MV、`7.3` 状态文案如「MV已被切换」、
+ *   `7.4` 同一个单号串、`7.5` 歌手 id）——它不是一条新点歌，解出来只会把列表刷满，所以**跳过**。
+ *
+ * 两条诚实性约束：
+ * - **发送者的 User 不在帧里**（单号串里只有发送者 id，而且可能是抖音号而不是内部用户 id），
+ *   所以行上没有昵称、`userId` 也留空——不编一个假名字，也不拿它去建用户行
+ *   （那会把一个不存在的人塞进「在线观众」）；
+ * - 点歌本身推不出抖币价，`diamonds` 一律 0（界面显示「价值未知」，不假装免费）。
+ */
+function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
+  const payload = getMessage(msg, 6)
+  if (!payload) return nothing()
+  const singer = parseProtoUser(getMessage(payload, 3))
+  const nickname = singer?.nickname ?? ''
+  return {
+    ...nothing(),
+    item: item('gift', '', '', nickname ? `想听 ${nickname} 演唱` : '点了一首歌', 1, 0),
+    users: singer ? [singer] : []
   }
 }
 
@@ -341,9 +422,10 @@ function item(
   user: string,
   userId: string,
   text: string,
-  count: number
+  count: number,
+  diamonds = 0
 ): DanmakuItem {
-  return { id: nextId++, kind, user, userId, text, count, at: Date.now() }
+  return { id: nextId++, kind, user, userId, text, count, diamonds, at: Date.now() }
 }
 
 /** 测试用：重置自增序号 */
@@ -365,6 +447,13 @@ export function __resetProtoIds(): void {
  * WebcastMemberMessage: 2 user, **3 memberCount**（实测 31 = 在线人数）
  * WebcastLikeMessage: 2 count, 3 total, 5 user
  * WebcastSocialMessage: 2 user
+ * WebcastGiftMessage: 2 giftId, 5 repeatCount, 6 comboCount, 7 user, 8 toUser, 9 repeatEnd,
+ *                     15 gift(GiftStruct: 2 describe, 5 id, 11 type, 12 diamondCount, 16 name)
+ *                     —— 来源是社区公开的 webcast proto（本机**还没抓到真礼物帧**，见 decodeProtoGift）
+ * WebcastLinkmicOrderSingMessage: 顶层 2 = 事件类型（**4 = 点歌**，payload 在 6：单号串 6.1、
+ *                     歌手 User 6.3、封面 6.6；**5 = 播放状态变更**，payload 在 7，跳过不解码）
+ *                     —— 实测；发送者的 User 不在帧里
+ * WebcastGiftMessage 的字段号来源见 `decodeProtoGift` 上方（社区 proto，本机尚未抓到真礼物帧）
  * WebcastRoomStatsMessage: 2/3/4 展示串（"31"、"31在线观众"）, 5 count（JSON 模式收不到这条）
  * WebcastRoomUserSeqMessage: 2 total, 3 popStr, 7 totalUserStr, 8 totalStr
  * WebcastRoomMessage: 2 content（进房欢迎语这类房间级提示）

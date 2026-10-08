@@ -82,12 +82,25 @@ export function OverviewPanel(props: {
     <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
       <div className="col-span-8 flex min-h-0 flex-col gap-3">
         <Panel className="shrink-0" title={t('douyin-link.page.kpiTitle', { window: minutes })}>
-          <div className="grid grid-cols-4 grid-rows-2 gap-2">
+          <div className="grid grid-cols-3 grid-rows-3 gap-2">
             <Kpi label={t('douyin-link.page.kpiMessages')} value={summary?.messages ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiChat')} value={totals?.chat ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiMember')} value={totals?.enter ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiLike')} value={totals?.like ?? 0} palette={palette} />
             <Kpi label={t('douyin-link.page.kpiSocial')} value={totals?.follow ?? 0} palette={palette} />
+            <Kpi
+              label={t('douyin-link.page.kpiGift')}
+              value={totals?.gift ?? 0}
+              accent={palette.warn}
+              palette={palette}
+            />
+            <Kpi
+              label={t('douyin-link.page.kpiDiamonds')}
+              value={summary?.diamonds ?? 0}
+              hint={t('douyin-link.page.kpiDiamondsUnit')}
+              accent={palette.warn}
+              palette={palette}
+            />
             <Kpi label={t('douyin-link.page.kpiUsers')} value={summary?.users ?? 0} palette={palette} />
             <Kpi
               label={t('douyin-link.page.kpiRate')}
@@ -156,7 +169,7 @@ function Kpi(props: {
   )
 }
 
-/** 分钟趋势：堆叠柱（弹幕/进场/点赞/关注）+ 三条网格线 + 首末时间 */
+/** 分钟趋势：堆叠柱（弹幕/进场/点赞/关注/礼物）+ 三条网格线 + 首末时间 */
 function TrendChart(props: {
   series: RoomSummary['series']
   size: { width: number; height: number }
@@ -170,7 +183,7 @@ function TrendChart(props: {
   const plotHeight = Math.max(10, size.height - padBottom - padTop)
   // 分钟多的时候合并成桶，柱宽才看得见（最多画 60 根）
   const bucket = Math.max(1, Math.ceil(series.length / 60))
-  const buckets: Array<{ at: number; chat: number; member: number; like: number; social: number }> = []
+  const buckets: Array<{ at: number; chat: number; member: number; like: number; social: number; gift: number }> = []
   for (let index = 0; index < series.length; index += bucket) {
     const slice = series.slice(index, index + bucket)
     buckets.push({
@@ -178,13 +191,14 @@ function TrendChart(props: {
       chat: sum(slice, 'chat'),
       member: sum(slice, 'member'),
       like: sum(slice, 'like'),
-      social: sum(slice, 'social')
+      social: sum(slice, 'social'),
+      gift: sum(slice, 'gift')
     })
   }
-  const totals = buckets.map((item) => item.chat + item.member + item.like + item.social)
+  const totals = buckets.map((item) => item.chat + item.member + item.like + item.social + item.gift)
   const max = Math.max(1, ...totals)
   const barWidth = Math.max(1, plotWidth / buckets.length - 1)
-  const colors = [palette.accent, palette.up, palette.down, palette.axis]
+  const colors = [palette.accent, palette.up, palette.down, palette.axis, palette.warn]
 
   return (
     <svg width={size.width} height={size.height} role="img">
@@ -205,7 +219,8 @@ function TrendChart(props: {
           [item.chat, colors[0]],
           [item.member, colors[1]],
           [item.like, colors[2]],
-          [item.social, colors[3]]
+          [item.social, colors[3]],
+          [item.gift, colors[4]]
         ]
         let drawn = 0
         return (
@@ -315,7 +330,7 @@ function sessionsSummary(t: Translate, sessions: MonitorSession[]): string {
   })
 }
 
-function sum(rows: RoomSummary['series'], key: 'chat' | 'member' | 'like' | 'social'): number {
+function sum(rows: RoomSummary['series'], key: 'chat' | 'member' | 'like' | 'social' | 'gift'): number {
   return rows.reduce((total, row) => total + row[key], 0)
 }
 

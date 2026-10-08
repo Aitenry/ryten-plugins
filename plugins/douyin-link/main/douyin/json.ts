@@ -318,6 +318,24 @@ export function decodeMessageJson(method: string, message: Json): JsonDecoded | 
     }
     case 'SocialMessage':
       return { ...nothing(), item: item('social', nickname, userId, '', 0), users: user ? [user] : [] }
+    case 'GiftMessage': {
+      /**
+       * 礼物（JSON 这条路只在服务端忽略 `resp_content_type=protobuf` 时才会用到）。
+       *
+       * 字段名与 protobuf 一一对应：`gift.name` / `gift.describe` / `gift.diamond_count`、
+       * `repeat_count`、`combo_count`。价格取不到就是 0 = **未知**（不编数）。
+       */
+      const gift = asObject(pickRaw(message, ['gift']))
+      const name = pickText(gift, ['name'], 40) || pickText(gift, ['describe'], 40)
+      const unit = pickInt(gift, ['diamond_count', 'diamondCount'])
+      const repeat = Math.max(1, pickInt(message, ['repeat_count', 'repeatCount'], 1))
+      if (!name && !nickname) return null
+      return {
+        ...nothing(),
+        item: item('gift', nickname, userId, name, repeat, unit * repeat),
+        users: user ? [user] : []
+      }
+    }
     case 'RoomUserSeqMessage': {
       // 在线人数 + 观众榜（榜单里每条都带完整用户信息，是「在线观众」的来源之一）
       const total = pickInt(message, ['total', 'total_user', 'totalUser'])
@@ -418,9 +436,10 @@ function item(
   user: string,
   userId: string,
   text: string,
-  count: number
+  count: number,
+  diamonds = 0
 ): DanmakuItem {
-  return { id: nextId++, kind, user, userId, text, count, at: Date.now() }
+  return { id: nextId++, kind, user, userId, text, count, diamonds, at: Date.now() }
 }
 
 /** 测试用：重置自增序号 */
@@ -439,5 +458,6 @@ export function __resetIds(): void {
  *      `subscribe{is_member,level}` `border`；
  * User（推送里更全，字段名同源）：`pay_grade.level`（荣誉等级）、`fans_club.data.level`（粉丝团）、
  *      `badge_image_list`、`display_id`、`follow_info.following_count|follower_count`。
+ * GiftMessage：`gift.name` / `gift.describe` / `gift.diamond_count`、`repeat_count`、`combo_count`。
  * RoomDataSyncMessage：`syncKey` = RoomLinkmicMicDisplayInfoSyncData → `payload`（base64 protobuf）。
  */

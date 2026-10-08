@@ -106,7 +106,8 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number) =>
       hub.listUsers(
         String(webRid ?? ''),
-        sort === 'chat' ? sort : 'recent',
+        // 排序白名单（gift = 刷礼物榜，按抖币排）
+        sort === 'chat' || sort === 'gift' ? sort : 'recent',
         String(keyword ?? ''),
         typeof limit === 'number' ? limit : 200
       ),
