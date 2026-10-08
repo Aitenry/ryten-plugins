@@ -183,6 +183,11 @@ export const DouyinLinkZhCN = {
       idOnly: 'ID {{id}}',
       giftDiamonds: '{{count}} 抖币',
       giftValueUnknown: '价值未知',
+      giftBoard: '礼物榜（送了什么 · 值多少）',
+      giftBoardEmpty: '这个窗口里还没有礼物',
+      giftNameUnknown: '（礼物名未知）',
+      userGiftsTitle: '这个人的礼物',
+      userGiftsTotal: '共 {{count}} 件 · {{diamonds}} 抖币',
       interactions:
         '本场：弹幕 {{chat}} · 进场 {{enter}} · 关注 {{follow}} · 点赞 {{like}} · 礼物 {{gift}}',
       sessionUsers: '本场 {{count}} 人',

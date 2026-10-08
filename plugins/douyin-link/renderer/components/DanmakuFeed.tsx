@@ -117,14 +117,19 @@ export function DanmakuFeed(props: {
     setAtBottom(true)
   }
 
+  /**
+   * 分类上的计数：**必须和列表用同一个池子**（`pool`，已经过「显示类型」过滤）。
+   * 早先这里数的是 `props.items`（未过滤），于是旧设置文件里没有 `gift` 时会出现
+   * 「礼物 1」的计数、点进去却是「这一类还没有消息」（用户 2026-10-08 截图反馈）。
+   */
   const counts = useMemo(() => {
     const map = new Map<ViewKey, number>()
-    for (const item of props.items) {
+    for (const item of pool) {
       if (item.kind === 'control' || item.kind === 'system' || item.kind === 'stats') continue
       map.set(item.kind as ViewKey, (map.get(item.kind as ViewKey) ?? 0) + 1)
     }
     return map
-  }, [props.items])
+  }, [pool])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">

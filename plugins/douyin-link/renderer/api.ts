@@ -6,6 +6,7 @@ import type {
   DanmakuKind,
   DbStats,
   FailureInfo,
+  GiftBreakdownRow,
   LiveSettings,
   MessagePage,
   MessageQuery,
@@ -161,6 +162,7 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
     series: asList<RoomSummary['series'][number]>(raw.series),
     kinds: asList<RoomSummary['kinds'][number]>(raw.kinds),
     diamonds: asCount(raw.diamonds),
+    gifts: asList<RoomSummary['gifts'][number]>(raw.gifts),
     topChat: asList<UserRankRow>(raw.topChat)
   }
 }
@@ -274,6 +276,9 @@ export const api = {
     const raw = await invoke(`${PREFIX}user-get`, webRid, userId)
     return isRecord(raw) ? (raw as unknown as UserProfile) : null
   },
+  /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
+  userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>
+    asList<GiftBreakdownRow>(await invoke(`${PREFIX}user-gifts`, webRid, userId)),
   /** 头像 data URL（渲染层 CSP 不许外链图片，主进程下载后按 url 缓存） */
   userAvatar: async (webRid: string, userId: string): Promise<string> =>
     asText(await invoke(`${PREFIX}user-avatar`, webRid, userId)),

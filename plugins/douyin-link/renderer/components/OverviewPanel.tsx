@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Segmented } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
-import type { MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
+import type { GiftBreakdownRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api from '../api'
 import { ChartBox, EmptyHint, Panel, type PluginPalette, usePluginPalette } from './ui'
 
@@ -136,6 +136,13 @@ export function OverviewPanel(props: {
       <div className="col-span-4 flex min-h-0 flex-col gap-3">
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.topChat')}>
           <RankList rows={summary?.topChat ?? []} webRid={webRid} t={t} palette={palette} />
+        </Panel>
+        {/*
+          礼物榜：**「送了什么、值多少」唯一能一眼看全的地方**。
+          没有它，界面上只有「礼物 N 次」这种计数（用户 2026-10-08 反馈「没有地方看」）。
+        */}
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.giftBoard')}>
+          <GiftBoard rows={summary?.gifts ?? []} t={t} palette={palette} />
         </Panel>
         <Panel className="shrink-0" title={t('douyin-link.page.range')}>
           <Segmented
@@ -280,6 +287,50 @@ function KindBars(props: {
           </span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** 礼物榜：礼物名 · 件数 · 抖币（价格未知的显示成「未知」，不写成 0） */
+function GiftBoard(props: {
+  rows: GiftBreakdownRow[]
+  t: Translate
+  palette: PluginPalette
+}): React.JSX.Element {
+  if (props.rows.length === 0) {
+    return <span className="text-xs opacity-50">{props.t('douyin-link.page.giftBoardEmpty')}</span>
+  }
+  const max = Math.max(1, ...props.rows.map((row) => (row.diamonds > 0 ? row.diamonds : row.count)))
+  return (
+    <div className="flex flex-col gap-1.5">
+      {props.rows.slice(0, 8).map((row) => {
+        const value = row.diamonds > 0 ? row.diamonds : row.count
+        return (
+          <div key={row.name || '(unknown)'} className="flex min-w-0 items-center gap-2 text-[10px]">
+            <span className="min-w-0 flex-1 truncate" title={row.name}>
+              {row.name || props.t('douyin-link.page.giftNameUnknown')}
+            </span>
+            <span
+              className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full"
+              style={{ backgroundColor: props.palette.track }}
+            >
+              <span
+                className="block h-full rounded-full"
+                style={{
+                  width: `${Math.max(3, (value / max) * 100)}%`,
+                  backgroundColor: props.palette.warn
+                }}
+              />
+            </span>
+            <span className="w-10 shrink-0 text-right opacity-70">×{formatNumber(row.count)}</span>
+            <span className="w-16 shrink-0 text-right font-medium" style={{ color: props.palette.warn }}>
+              {row.diamonds > 0
+                ? props.t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                : props.t('douyin-link.page.giftValueUnknown')}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }

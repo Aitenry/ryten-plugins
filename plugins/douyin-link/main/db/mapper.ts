@@ -4,6 +4,7 @@ import { withOrm } from '@host/main/database/orm'
 import type {
   DanmakuKind,
   DbStats,
+  GiftBreakdownRow,
   LiveRoomInfo,
   MessagePage,
   MessageQuery,
@@ -702,8 +703,79 @@ export async function messageCount(webRid: string, fromMs: number, toMs: number)
   })
 }
 
-/** 类型分布 + 时间范围（概览页签） */
-export async function kindBreakdown(
+/**
+ * 礼物流水按**礼物名**聚合（概览的礼物榜）。
+ *
+ * 排序按抖币（值钱在前），价格未知（点歌这类目录没给价的）退到按件数——
+ * 否则一个全是「价格未知」的窗口会变成随机顺序。
+ */
+export async function giftBreakdown(
+  webRid: string,
+  fromMs: number,
+  toMs: number,
+  limit = 40
+): Promise<GiftBreakdownRow[]> {
+  await schemaReady
+  return withOrm('douyin-link.giftBreakdown', async (db) => {
+    const rows = await db
+      .select({
+        name: douyinLinkMessages.content,
+        count: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        users: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.webRid, webRid),
+          eq(douyinLinkMessages.kind, 'gift'),
+          gte(douyinLinkMessages.atMs, fromMs),
+          lte(douyinLinkMessages.atMs, toMs)
+        )
+      )
+      .groupBy(douyinLinkMessages.content)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+      .limit(Math.min(Math.max(1, limit), 200))
+    return rows.map((row) => ({
+      name: row.name,
+      count: row.count,
+      diamonds: row.diamonds,
+      users: row.users
+    }))
+  })
+}
+
+/** 某个人送过的礼物（按礼物名聚合；用户榜悬停看明细用） */
+export async function userGiftBreakdown(
+  webRid: string,
+  userId: string,
+  limit = 12
+): Promise<GiftBreakdownRow[]> {
+  if (!webRid || !userId) return []
+  await schemaReady
+  return withOrm('douyin-link.userGiftBreakdown', async (db) => {
+    const rows = await db
+      .select({
+        name: douyinLinkMessages.content,
+        count: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.webRid, webRid),
+          eq(douyinLinkMessages.userId, userId),
+          eq(douyinLinkMessages.kind, 'gift')
+        )
+      )
+      .groupBy(douyinLinkMessages.content)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+      .limit(Math.min(Math.max(1, limit), 50))
+    return rows.map((row) => ({ name: row.name, count: row.count, diamonds: row.diamonds, users: 1 }))
+  })
+}
+
+/** 类型分布 + 时间范围（概览页签） */export async function kindBreakdown(
   webRid: string,
   fromMs: number,
   toMs: number
