@@ -43,6 +43,7 @@ import type { RoomResolveResult } from '../douyin/room'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
 import { since, withTimeout } from '../util/deadline'
+import { isAnonymousName } from '../../shared/anonymous'
 
 /**
  * 分析中枢：**所有网络与数据都在这里**（渲染层只是视图）。
@@ -280,6 +281,11 @@ export class AnalyzerHub {
     )
     this.startTimers()
     void this.cleanup()
+    /**
+     * 装载时**自愈一遍匿名昵称**（脱马甲）：历史行里那些占位名，只要这个人后来在房间里
+     * 露过面（说话/进场/上房榜），现在就能换成真名。放在启动后跑一次，不阻塞 init。
+     */
+    void this.revealAnonymous().catch((error) => logger.warn('[douyin-link] 脱马甲失败:', describe(error)))
     /**
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
@@ -982,11 +988,12 @@ export class AnalyzerHub {
   private handleItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
     if (items.length === 0 && users.length === 0) return
     /**
-     * 礼物/点歌那一类里，帧里只有发送者的 **id**（点歌单号串的第一段），没有昵称。
-     * 先用**我们自己的数据**把名字补上再落库/推界面（见 `resolveGiftSenders`）——
-     * 否则「歌单」这条消息在列表里就是「（未知用户） 送出了 想听 X 演唱」，等于白记。
+     * 礼物/点歌那一类里，帧里只有发送者的 **id**（点歌单号串的第一段），没有昵称；
+     * **匿名送礼**时帧里给的名字则是占位串（空串或「☞ 匿名 -」）。两种情况都用我们自己的数据补：
+     * 先本场见过的人，再查库（见 `resolveGiftSenders`）——这就是用户要的「脱马甲」的入口
+     * （用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）。
      */
-    const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && !item.user)
+    const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && isAnonymousName(item.user))
     if (unnamed.length === 0) {
       this.applyItems(state, items, users, roomEnded)
       return
@@ -1014,6 +1021,9 @@ export class AnalyzerHub {
    * 为什么必须有这一步：点歌/礼物帧里没有发送者的 `User`，只有点歌单号串里的 id；
    * 而发送礼物的人**通常不在本场说过话**（`userMap` 里没有），但他多半在进场消息或房间榜里
    * 露过面、库里也留着上一轮的档案。查到的档案一并交给 recorder，顺手把昵称/头像进用户库。
+   *
+   * **匿名送礼**（帧里给的是空串或「☞ 匿名 -」）走同一条路：`isAnonymousName` 把占位名也当成
+   * 「没有名字」，于是这个人只要在房间里露过面，我们就能把马甲脱掉、直接显示真名。
    */
   private async resolveGiftSenders(state: RoomState, items: DanmakuItem[]): Promise<UserInfo[]> {
     const found: UserInfo[] = []
@@ -1030,9 +1040,9 @@ export class AnalyzerHub {
     try {
       const rows = await store.getUsers(state.webRid, missing)
       for (const item of items) {
-        if (item.user) continue
+        if (item.user && !isAnonymousName(item.user)) continue
         const row = rows.get(item.userId)
-        if (!row?.nickname) continue
+        if (!row?.nickname || isAnonymousName(row.nickname)) continue
         item.user = row.nickname
         found.push({
           id: row.userId,
@@ -1688,6 +1698,28 @@ export class AnalyzerHub {
    */
   async dayRecords(webRid: string, limit = 90): Promise<DayRecordRow[]> {
     return store.dayRecords(webRid, limit)
+  }
+
+  /**
+   * **脱马甲**（用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）：
+   * 把库里「匿名 / 空名」的行换回这个 id 在我们自己数据里的真名（见 `store.revealAnonymousNames`）。
+   *
+   * 两种触发：插件装载时跑一遍（历史行自愈），以及房间行的「⋯」菜单里手动跑（立刻见效）。
+   * 名字变了就把列表缓存作废、重推房间，界面上的榜与列表跟着刷新。
+   */
+  async revealAnonymous(webRid = ''): Promise<{ revealed: number; remaining: number }> {
+    const started = Date.now()
+    const result = await store.revealAnonymousNames(webRid)
+    if (result.revealed > 0) {
+      this.storeCache.at = 0
+      this.dbCache.at = 0
+      this.emitRooms(true)
+    }
+    logger.info(
+      `[douyin-link] 脱马甲${webRid ? `（${webRid}）` : ''}：还原 ${result.revealed} 条匿名昵称，` +
+        `还剩 ${result.remaining} 条认不出（${since(started)}）`
+    )
+    return result
   }
 
   async clearUsers(webRid = ''): Promise<void> {

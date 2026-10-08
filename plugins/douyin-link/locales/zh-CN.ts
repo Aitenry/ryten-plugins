@@ -102,6 +102,8 @@ export const DouyinLinkZhCN = {
       windowAll: '全部',
       rangeSpan: '时长 {{duration}}',
       rangeWholeDay: '这一天全部',
+      revealAnonymous: '脱马甲（还原匿名昵称）',
+      revealDone: '已还原 {{revealed}} 条匿名昵称，还剩 {{remaining}} 条认不出',
       rangeEmpty: '还没有数据（先开始监控）',
       dayRecords: '每日记录（{{count}} 天）',
       dayRecordsEmpty: '还没有记录过这个房间',

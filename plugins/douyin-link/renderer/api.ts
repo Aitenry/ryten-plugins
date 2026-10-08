@@ -264,6 +264,15 @@ export const api = {
   /** 每一天的直播记录（左侧房间旁边的列表） */
   dayRecords: async (webRid: string, limit = 90): Promise<DayRecordRow[]> =>
     asList<DayRecordRow>(await invoke(`${PREFIX}day-records`, webRid, limit)),
+  /**
+   * 脱马甲：把匿名/空名的行还原成这个 id 的真名（用户 2026-10-08：
+   * 「可以脱神秘人的衣服，可以知道这个人是谁」）。返回还原了几条、还剩几条认不出。
+   */
+  revealAnonymous: async (webRid = ''): Promise<{ revealed: number; remaining: number }> => {
+    const raw = await invoke(`${PREFIX}reveal-anonymous`, webRid)
+    if (!isRecord(raw)) return { revealed: 0, remaining: 0 }
+    return { revealed: asCount(raw.revealed), remaining: asCount(raw.remaining) }
+  },
   roomsCompare: async (minutes = 60): Promise<RoomCompareRow[]> =>
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
   usersList: async (

@@ -97,6 +97,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       windowAll: 'All',
       rangeSpan: 'span {{duration}}',
       rangeWholeDay: 'Whole day',
+      revealAnonymous: 'Unmask anonymous users',
+      revealDone: 'Restored {{revealed}} anonymous names, {{remaining}} still unknown',
       rangeEmpty: 'No data yet (start monitoring)',
       dayRecords: 'Daily records ({{count}} days)',
       dayRecordsEmpty: 'Nothing recorded for this room yet',

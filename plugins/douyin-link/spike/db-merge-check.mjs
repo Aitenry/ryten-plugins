@@ -86,6 +86,7 @@ import { insertMessages } from './mapper'
 import { giftRankByPerson, queryMessages } from './mapper'
 import { deleteMessagesBefore, deleteMinutesBefore } from './mapper'
 import { dayRecords } from './mapper'
+import { revealAnonymousNames } from './mapper'
 import { douyinLinkMessages, douyinLinkUsers } from './schema'
 
 const row = (over) => ({
@@ -191,6 +192,26 @@ await withOrm('check.user', async (db) =>
 const sendersNamed = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
 
 /*
+ * 脱马甲（用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）：
+ * - S5：礼物行名字是空的，但**用户档案里有真名** → 还原成档案里的名字；
+ * - S6：礼物行的名字是抖音给的占位串「☞ 匿名 -」，同一 id 后来发过一条弹幕 → 用弹幕里的真名还原；
+ * - S7：只有一条匿名礼物、别处从没露过面 → **保持原样**（宁可还显示匿名，也不猜）。
+ */
+await insertMessages([
+  row({ userId: 'S5', userName: '', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 20000 }),
+  row({ userId: 'S6', userName: '☞              匿名  -', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 21000 }),
+  row({ kind: 'chat', userId: 'S6', userName: '真名己', content: '大家好', atMs: 22000 }),
+  row({ userId: 'S7', userName: '', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 23000 })
+])
+await withOrm('check.user', async (db) =>
+  db.insert(douyinLinkUsers).values({ webRid: '108011161837', userId: 'S5', nickname: '用户表里的戊' })
+)
+const reveal = await revealAnonymousNames('108011161837')
+const revealedS5 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S5' })
+const revealedS6 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S6' })
+const revealedS7 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S7' })
+
+/*
  * 永久保存的兜底（2026-10-08「我需要永久存储」）：
  * hub 的 cleanup 在保留期为 0 时根本不调这两个函数，但这里再验一层——**非正 cutoff 一律不删**，
  * 一个坏参数（0 / NaN）不该把整张表清空。
@@ -229,7 +250,14 @@ export default JSON.stringify({
     contents: pageOlder.rows.map((r) => r.text)
   },
   days: days.map((d) => ({ day: d.day, messages: d.messages, gifts: d.gifts, diamonds: d.diamonds, users: d.users })),
-  sendersNamed: sendersNamed.map((s) => ({ userId: s.userId, name: s.name }))
+  sendersNamed: sendersNamed.map((s) => ({ userId: s.userId, name: s.name })),
+  reveal: {
+    revealed: reveal.revealed,
+    remaining: reveal.remaining,
+    s5: revealedS5.rows[0]?.user ?? null,
+    s6: revealedS6.rows[0]?.user ?? null,
+    s7: revealedS7.rows[0]?.user ?? null
+  }
 })
 `
 
@@ -326,6 +354,13 @@ check('每日记录：更早的数据各自成一天（按天倒序）', result.
 /* 榜单昵称兜底：消息里没名字就用用户表里的昵称，别给用户看裸 id */
 check('送礼榜：消息里带昵称的用消息里的', result.sendersNamed.find((s) => s.userId === 'S1')?.name, '送礼甲')
 check('送礼榜：消息里没昵称的退回用户表昵称', result.sendersNamed.find((s) => s.userId === 'S4')?.name, '用户表里的丁')
+
+/* 脱马甲 */
+check('脱马甲：空名 → 用户档案里的真名', result.reveal.s5, '用户表里的戊')
+check('脱马甲：占位名「☞ 匿名 -」→ 同一 id 弹幕里的真名', result.reveal.s6, '真名己')
+check('脱马甲：从未露过面的 id 保持原样（不猜）', result.reveal.s7, '')
+check('脱马甲：确实还原了不止一条', result.reveal.revealed >= 2, true)
+check('脱马甲：还剩认不出的（S7 那条）', result.reveal.remaining >= 1, true)
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 
 rmSync(workDir, { recursive: true, force: true })

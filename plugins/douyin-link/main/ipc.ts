@@ -126,6 +126,8 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
           ? { from, to }
           : undefined
       ),
+    // 脱马甲：把匿名/空名的行还原成这个 id 的真名（不传 webRid = 所有房间）
+    'plugin:douyin-link:reveal-anonymous': (webRid?: string) => hub.revealAnonymous(String(webRid ?? '')),
     // 每一天的直播记录（左侧房间旁边的列表）
     'plugin:douyin-link:day-records': (webRid?: string, limit?: number) =>
       hub.dayRecords(String(webRid ?? ''), typeof limit === 'number' ? limit : 90),
