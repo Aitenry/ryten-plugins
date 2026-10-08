@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "tag": "v0.1.5",
+  "tag": "v0.1.6",
   "plugins": [
     {
       "id": "douyin-link",
       "name": "抖音直播分析器",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "description": "多直播间分析器：同时监控多个抖音直播间（默认走「实时通道」——借一个隐藏窗口的直播间页面 websocket 收逐条消息，弹幕/进场/点赞/礼物都更实时；不可用时自动回落到主进程直连轮询），音频只跟最新选中的那个房间（其它房间继续监听）；弹幕/进场/点赞/关注/**礼物**全部落数据库（礼物带礼物名、数量与抖币价值；语音房里「X 送了 想听 Y 演唱」的点歌也归到这一类），可按关键词与类型检索、出 KPI 与趋势、看发言榜与抖币贡献、做多房间对比；「在线观众」页签把**麦上用户**（聊天室麦位，按麦位序置顶）、直播间接口给的房间成员、以及本场活跃过的人合成一张表，点任意一行可打开用户档案并翻历史弹幕（本房间 / 全部房间、只看弹幕 / 全部互动）；打开应用会接着监控开关开着的房间（可在设置里关掉）。",
       "builtin": false,
       "entry": {
@@ -23,9 +23,9 @@
         "icon": "RiLiveLine",
         "order": 60
       },
-      "asset": "douyin-link-0.7.1.zip",
-      "size": 67517,
-      "sha256": "0c561fcdfa3a7983b5c28ac2e468299a07534059ff373e4123cf50c874f4585a"
+      "asset": "douyin-link-0.7.2.zip",
+      "size": 67930,
+      "sha256": "f2c5f70dd7e589f2e723e912b2dd66d888c024e098c6b76f90e515f656e773f2"
     },
     {
       "id": "music-player",
@@ -51,7 +51,7 @@
       },
       "asset": "music-player-0.1.0.zip",
       "size": 24500,
-      "sha256": "80eea5d9651d2b34342e0c5ded4762c969d60edd480e2be4b86716909fbbcea2"
+      "sha256": "b3a3feed676e476f94e27309c126b00a9d3a8f75be301e02f8419bc663b9ae66"
     },
     {
       "id": "personal-ledger",
@@ -76,7 +76,7 @@
       },
       "asset": "personal-ledger-1.1.6.zip",
       "size": 53976,
-      "sha256": "7c262449d2028c52a3e2e5ee263cdfc23b2f9e89e6fe69c69817695a54bc362b"
+      "sha256": "4a0681b72a56743aae238d03ac44a62ad3548d33bcd255746ccd3a3d82850bc9"
     },
     {
       "id": "task-planner",
@@ -102,7 +102,7 @@
       },
       "asset": "task-planner-0.1.0.zip",
       "size": 20092,
-      "sha256": "197f4761979d1e71a81120b1daafe93747f2cf7d2034dd58ad15e5a8fea29030"
+      "sha256": "4293b2452331684cbef94d4b0f15fb0aa82d40f57a50fa7c5426c21abf5cb28f"
     }
   ]
 }
