@@ -251,7 +251,7 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResol
   const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
   return {
     ...nothing(),
-    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'proto-gift' },
+    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'proto-gift', giftRecord: true },
     users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
   }
 }
@@ -409,7 +409,16 @@ function decodeProtoOrderSing(msg: PbMessage, gifts: GiftResolver | undefined, r
   const unique = new Map(users.map((entry) => [entry.id, entry]))
   return {
     ...nothing(),
-    item: { ...base, toUser: recipient?.nickname ?? '', toUserId: recipient?.id ?? '', trace: 'proto-order' },
+    item: {
+      ...base,
+      toUser: recipient?.nickname ?? '',
+      toUserId: recipient?.id ?? '',
+      trace: 'proto-order',
+      /** 这一帧有没有礼物记录（`6.5.1`）：落库合并时只有「有记录」的那条能覆盖正文与价格 */
+      giftRecord: Boolean(record),
+      /** 单号串给落库用：同一单的几次推送合并成一行（见 types 的 `DanmakuItem.orderKey`） */
+      orderKey
+    },
     users: [...unique.values()]
   }
 }

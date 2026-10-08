@@ -54,6 +54,11 @@ export const douyinLinkMessages = pgTable('douyin_link_messages', {
   /** 收礼人（礼物才有：谁收到了这份礼物） */
   toUserId: text('to_user_id').notNull().default(''),
   toUserName: text('to_user_name').notNull().default(''),
+  /**
+   * 点歌单号串（只有点歌那类有）：同一单的几次推送靠它合并成一行
+   * （不带礼物记录的先到、带记录的后到 → 后者更新前者，见 `mapper.insertMessages`）。
+   */
+  orderKey: text('order_key').notNull().default(''),
   atMs: doublePrecision('at_ms').notNull()
 })
 

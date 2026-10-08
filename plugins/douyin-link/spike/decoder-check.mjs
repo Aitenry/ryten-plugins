@@ -33,7 +33,7 @@
  * 这里用同名结构的合成帧代替。
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -187,10 +187,10 @@ writeFileSync(
   'utf8'
 )
 
-async function bundle(entry) {
+async function bundle(entry, sub = 'main/douyin') {
   const outfile = join(workDir, `${entry.replace(/[^\w]/g, '_')}.mjs`)
   await build({
-    entryPoints: [join(ROOT, 'plugins/douyin-link/main/douyin', entry)],
+    entryPoints: [join(ROOT, 'plugins/douyin-link', sub, entry)],
     outfile,
     bundle: true,
     format: 'esm',
@@ -225,6 +225,8 @@ function check(label, actual, expected) {
 
 const proto = await bundle('proto-messages.ts')
 const json = await bundle('json.ts')
+/** 落库时「同一单两帧合并成一行」的规则（纯函数，见 main/gift/merge.ts） */
+const mergeMod = await bundle('merge.ts', 'main/gift')
 
 /** `--frame=Method:hex`：把真帧喂回解码器，只看它解出什么（不做断言） */
 const frameArg = process.argv.find((arg) => arg.startsWith('--frame='))
@@ -389,6 +391,70 @@ const weird = proto.decodeProtoMessage(
 )
 check('点歌 → 单号串认不出来时 userId 为空', weird.item.userId, '')
 
+/* ------------------------------------------------------------------ 同一单 → 一行 */
+/*
+ * 真机库里出过成对的「`content=''`（16 秒~3.5 分钟后）`content='爱的纸鹤'`」两行，礼物榜里就多出
+ * 「（礼物名未知）」。两帧带的是**同一个单号串**，落库必须合成一行（见 main/gift/merge.ts）。
+ * 这里用真帧的两种先后顺序把规则跑一遍（先来哪条都出现过）。
+ */
+const sameOrderId = '55500000000000000000000005'
+const weak = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFollowUpFrame({ orderId: sameOrderId, singer: 'Snow' })
+)
+const strong = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  orderSingFrame({ orderId: sameOrderId, singer: 'Snow', giftId: 4353, price: 1200 }),
+  catalog
+)
+check('同一单两帧 → 单号串一致且非空', weak.item.orderKey === strong.item.orderKey && weak.item.orderKey.length > 0, true)
+check('同一单两帧 → 记录标记分得开', [strong.item.giftRecord, weak.item.giftRecord], [true, false])
+check('带记录的那帧 → 目录名 + 价', [strong.item.text, strong.item.diamonds, strong.item.toUser], ['跑车', 1200, 'Snow'])
+
+/** 库里的一行 = 合并结果（**没有** giftRecord 这个字段，和表里的列一致） */
+const toStoredRow = (row) => {
+  const { giftRecord, ...rest } = row
+  return rest
+}
+/** 按 `main/db/mapper.insertMessages` 的口径模拟落库：同一单号串永远只留一行 */
+const storeOrder = (frames) => {
+  let current = null
+  frames.forEach((frame, index) => {
+    const row = {
+      content: frame.item.text,
+      count: frame.item.count,
+      diamonds: frame.item.diamonds,
+      userId: frame.item.userId,
+      userName: frame.item.user,
+      toUserId: frame.item.toUserId,
+      toUserName: frame.item.toUser,
+      giftRecord: frame.item.giftRecord,
+      // 解码器不填到达时刻（那是中枢收到帧时补的），这里按先后给两个时刻：1000 → 2000
+      atMs: 1000 * (index + 1)
+    }
+    current = current ? mergeMod.mergeGiftRows(mergeMod.storedGiftMergeInput(current), row) : toStoredRow(row)
+  })
+  return current
+}
+
+/* 顺序一：没记录的先到（真机库里就是这个顺序，先落了一行空正文） */
+const weakFirst = storeOrder([weak, strong])
+check('先到没记录、后到带记录 → 礼物名与价格补上', [weakFirst.content, weakFirst.diamonds], ['跑车', 1200])
+check('先到没记录、后到带记录 → 收礼人补上', [weakFirst.toUserName, weakFirst.toUserId], ['Snow', '7667087264728728634'])
+check('合并结果里没有 giftRecord 这种非列字段', Object.keys(weakFirst).includes('giftRecord'), false)
+check('时间取先到的那一刻', weakFirst.atMs, 1000)
+
+/* 顺序二：带记录的先到——后到的那条**不许**把礼物名抹成「想听 X 演唱」 */
+const strongFirst = storeOrder([strong, weak])
+check('先到带记录、后到没记录 → 礼物名不被抹掉', [strongFirst.content, strongFirst.diamonds], ['跑车', 1200])
+
+/* 两条都没记录：不留空正文，退回房间的说法；价格仍是「未知」而不是 0 抖币 */
+const allWeak = storeOrder([weak, weak])
+check('两条都没记录 → 正文退回「想听 X 演唱」', [allWeak.content, allWeak.diamonds], ['想听 Snow 演唱', 0])
+
+/* 真礼物（有记录的另一种来源）也带记录标记，合并时才有资格覆盖 */
+check('真礼物帧 → giftRecord=true', [gift.item.giftRecord, unknown.item.giftRecord], [true, true])
+
 /* 别的消息不该带出抖币 */
 const chat = proto.decodeProtoMessage('WebcastChatMessage', chatFrame())
 check('弹幕 → kind / 抖币 0', [chat.item.kind, chat.item.diamonds], ['chat', 0])
@@ -401,6 +467,119 @@ const jsonGift = json.decodeMessageJson('WebcastGiftMessage', {
 })
 check('JSON 礼物 → 名字 / 数量 / 总额', [jsonGift.item.text, jsonGift.item.count, jsonGift.item.diamonds], ['玫瑰', 3, 3])
 check('JSON 弹幕 → 抖币 0', json.decodeMessageJson('WebcastChatMessage', { content: 'hi', user: { id_str: '1', nickname: 'a' } }).item.diamonds, 0)
+
+/* ------------------------------------------------------- 真帧回放（--replay=探针日志） */
+/*
+ * 为什么要有这一段：上面的断言用的都是**手搓的**帧。手搓的帧只能证明「代码按我想的跑」，
+ * 证明不了「真机推来的帧也是这个结构」。而用户要的是「礼物 tab 里能看见礼物名和价格」，
+ * 所以拿 `live-probe.mjs --hex --dump-all` 抓下来的**真帧**（同一房间、同一条通道）整段回放一遍：
+ * 每条点歌帧走真解码器（真目录查名字与价），再走真合并规则，最后逐行检查——
+ * 只要还有一行没名字，就说明修没修好。
+ */
+const replayArg = process.argv.find((arg) => arg.startsWith('--replay='))
+if (replayArg) {
+  const logPath = replayArg.slice('--replay='.length)
+  const catalogArg = process.argv.find((arg) => arg.startsWith('--catalog='))
+  const catalogPath =
+    catalogArg?.slice('--catalog='.length) ?? join(process.env.TEMP ?? tmpdir(), 'dy-catalog-map.json')
+  const logBuf = readFileSync(logPath)
+  // 探针日志是 PowerShell `*>` 写的 **UTF-16LE**（读成 utf8 会一条都匹配不上，踩过）
+  const logText =
+    logBuf[0] === 0xff && logBuf[1] === 0xfe
+      ? logBuf.subarray(2).toString('utf16le')
+      : logBuf[0] === 0xfe && logBuf[1] === 0xff
+        ? logBuf.subarray(2).swap16().toString('utf16le')
+        : logBuf.toString('utf8')
+  let catalogPairs = {}
+  try {
+    catalogPairs = JSON.parse(readFileSync(catalogPath, 'utf8'))
+  } catch {
+    console.log(`! 读不到礼物目录 ${catalogPath}（用空目录继续：名字会退回帧里的标签）`)
+  }
+  const replayCatalog = fakeCatalog(catalogPairs)
+
+  const frames = []
+  let truncated = 0
+  const lines = logText.split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const head = /^=== dump #\d+ (\w+) len=(\d+) ===$/.exec(lines[index] ?? '')
+    if (!head) continue
+    const hexLine = /^hex=([0-9a-fA-F]+)$/.exec((lines[index + 1] ?? '').trim())
+    if (!hexLine) continue
+    const body = Buffer.from(hexLine[1], 'hex')
+    if (body.length !== Number(head[2])) {
+      truncated += 1
+      continue
+    }
+    frames.push({ method: head[1], body })
+  }
+
+  const probeBefore = (await logCalls()).length
+  const orderRows = new Map()
+  const plainRows = []
+  const decoded = { gift: 0, order: 0, dropped: 0 }
+  const mergeCount = new Map()
+  let arrival = 0
+  for (const frame of frames) {
+    arrival += 1
+    const result = proto.decodeProtoMessage(frame.method, frame.body, replayCatalog)
+    const item = result?.item
+    if (!item) {
+      decoded.dropped += 1
+      continue
+    }
+    if (item.kind !== 'gift') continue
+    if (frame.method === 'WebcastGiftMessage') decoded.gift += 1
+    if (frame.method === 'WebcastLinkmicOrderSingMessage') decoded.order += 1
+    const row = {
+      content: item.text,
+      count: item.count,
+      diamonds: item.diamonds,
+      userId: item.userId,
+      userName: item.user,
+      toUserId: item.toUserId,
+      toUserName: item.toUser,
+      giftRecord: item.giftRecord,
+      atMs: arrival
+    }
+    if (!item.orderKey) {
+      plainRows.push(row)
+      continue
+    }
+    mergeCount.set(item.orderKey, (mergeCount.get(item.orderKey) ?? 0) + 1)
+    const current = orderRows.get(item.orderKey)
+    orderRows.set(
+      item.orderKey,
+      current ? mergeMod.mergeGiftRows(mergeMod.storedGiftMergeInput(current), row) : toStoredRow(row)
+    )
+  }
+  const replayRows = [...orderRows.values(), ...plainRows]
+  const unnamed = replayRows.filter((row) => !row.content)
+  const priced = replayRows.filter((row) => row.diamonds > 0)
+  const merged = [...mergeCount.values()].filter((n) => n > 1).length
+  const probeAfter = await logCalls()
+  const replayDiagnostics = probeAfter
+    .slice(probeBefore)
+    .filter(([, text]) => text.includes('gift-empty') || text.includes('gift-unknown'))
+
+  console.log(
+    `\n真帧回放：${logPath}\n  可解码帧 ${frames.length}（跳过截断帧 ${truncated}）· ` +
+      `真礼物 ${decoded.gift} · 点歌 ${decoded.order} · 解码器丢弃 ${decoded.dropped}\n` +
+      `  目录 ${Object.keys(catalogPairs).length} 件 · 合并后礼物行 ${replayRows.length}` +
+      `（其中 ${merged} 单是两次推送合成）· 有价 ${priced.length} 行`
+  )
+  console.log('  行样例（最多 12 行）：')
+  for (const row of replayRows.slice(-12)) {
+    console.log(
+      `    ${row.diamonds > 0 ? `${row.diamonds} 抖币` : '价值未知'}  ${row.content}  ` +
+        `${row.userName || row.userId || '（无送礼人）'} → ${row.toUserName || '（无收礼人）'}`
+    )
+  }
+  check('真帧回放 → 每一行都有礼物名（不能是「礼物名未知」）', unnamed.length, 0)
+  check('真帧回放 → 至少一行查到官方目录价（真礼物名 + 抖币）', priced.length >= 1, true)
+  check('真帧回放 → 解码器不再写「解不出名字」的诊断', replayDiagnostics.length, 0)
+  check('真帧回放 → 同一单的多次推送确实合并了', merged >= 1, true)
+}
 
 rmSync(workDir, { recursive: true, force: true })
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)

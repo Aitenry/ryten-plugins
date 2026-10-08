@@ -23,6 +23,7 @@ import {
   douyinLinkUsers
 } from './schema'
 import { schemaReady } from './ddl'
+import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
 
 /**
  * 抖音直播分析器 的数据访问层。
@@ -51,6 +52,16 @@ export interface MessageRow {
   /** 收礼人（礼物才有） */
   toUserId: string
   toUserName: string
+  /**
+   * 点歌单号串（只有点歌那类有）。同一单的几次推送靠它**合并成一行**：
+   * 不带礼物记录的那条先到、带记录的后到，落库时后者**更新**前者，而不是再插一行。
+   */
+  orderKey: string
+  /**
+   * **这一帧里带着礼物记录**（能解出礼物名与价格）。只用于落库时决定「谁覆盖谁」，
+   * **不是表里的列**——写库前由 `toMessageInsert` 剥掉。
+   */
+  giftRecord: boolean
   atMs: number
 }
 
@@ -202,15 +213,67 @@ export async function forgetRoom(webRid: string): Promise<void> {
 
 /* ------------------------------------------------------------------ 消息 */
 
-/** 批量插消息（按批分片，别让一条 INSERT 的参数个数顶到上限） */
+/**
+ * 批量插消息（按批分片，别让一条 INSERT 的参数个数顶到上限）。
+ *
+ * **带单号串的点歌行要「一单一行」**（2026-10-08 按用户库里的真实数据修）：
+ * 同一个订单服务端会推好几次——一条**没有礼物记录**的（只有单号串与歌手）、
+ * 一条**带礼物记录**的（那一条才有礼物名与抖币价），两条相隔 16 秒~3.5 分钟，
+ * **先来哪条都出现过**。用户库里因此出现成对的「`content=''` + `content='爱的纸鹤'`」两行，
+ * 礼物榜里就多出「（礼物名未知）」。所以这里：带单号串的行先按 `(web_rid, order_key)` 找那一行，
+ * 找到就**合并**（`mergeGiftRows`）、找不到才插——同一单永远只有一行。
+ */
 export async function insertMessages(rows: MessageRow[]): Promise<void> {
   if (rows.length === 0) return
   await schemaReady
   await withOrm('douyin-link.insertMessages', async (db) => {
-    for (let index = 0; index < rows.length; index += MSG_CHUNK) {
-      await db.insert(douyinLinkMessages).values(rows.slice(index, index + MSG_CHUNK))
+    const ordered = rows.filter((row) => row.kind === 'gift' && row.orderKey)
+    const plain = rows.filter((row) => !(row.kind === 'gift' && row.orderKey))
+    for (const row of ordered) {
+      const found = await db
+        .select()
+        .from(douyinLinkMessages)
+        .where(
+          and(
+            eq(douyinLinkMessages.webRid, row.webRid),
+            eq(douyinLinkMessages.kind, 'gift'),
+            eq(douyinLinkMessages.orderKey, row.orderKey)
+          )
+        )
+        .orderBy(asc(douyinLinkMessages.id))
+        .limit(1)
+      const current = found[0]
+      if (!current) {
+        await db.insert(douyinLinkMessages).values(toMessageInsert(row))
+        continue
+      }
+      await db
+        .update(douyinLinkMessages)
+        .set(mergeGiftRows(storedGiftMergeInput(current), row))
+        .where(eq(douyinLinkMessages.id, current.id))
+    }
+    for (let index = 0; index < plain.length; index += MSG_CHUNK) {
+      await db.insert(douyinLinkMessages).values(plain.slice(index, index + MSG_CHUNK).map(toMessageInsert))
     }
   })
+}
+
+/** 只留表里真有的列（`giftRecord` 是合并信号，塞进 `values()` 会被当成未知列） */
+function toMessageInsert(row: MessageRow): Omit<MessageRow, 'giftRecord'> {
+  return {
+    webRid: row.webRid,
+    sessionId: row.sessionId,
+    kind: row.kind,
+    userId: row.userId,
+    userName: row.userName,
+    content: row.content,
+    count: row.count,
+    diamonds: row.diamonds,
+    toUserId: row.toUserId,
+    toUserName: row.toUserName,
+    orderKey: row.orderKey,
+    atMs: row.atMs
+  }
 }
 
 /** 条件检索（跨房间也行：`webRid` 空 = 所有房间） */
