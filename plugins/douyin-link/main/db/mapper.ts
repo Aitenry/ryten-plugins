@@ -461,9 +461,13 @@ export async function listUsers(
     const order =
       sort === 'chat'
         ? [desc(douyinLinkUsers.chat), desc(douyinLinkUsers.lastSeen)]
-        : // 刷礼物榜按**抖币**排（不是条数）：十连小心心和一个大礼物谁更值，只有抖币说得清
+        : /**
+           * 刷礼物榜先按**抖币**排（十连小心心和一个大礼物谁更值，只有抖币说得清），
+           * 抖币并列或拿不到价（语音房的点歌就是没价格的那类）时退到**送礼次数**，
+           * 免得整张榜在所有价格都未知时变成「按最近出现」排。
+           */
           sort === 'gift'
-          ? [desc(douyinLinkUsers.diamonds), desc(douyinLinkUsers.lastSeen)]
+          ? [desc(douyinLinkUsers.diamonds), desc(douyinLinkUsers.gift), desc(douyinLinkUsers.lastSeen)]
           : [desc(douyinLinkUsers.lastSeen)]
     const rows = await db
       .select()

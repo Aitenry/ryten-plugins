@@ -244,11 +244,21 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null): ProtoDecoded {
  * - `2 = 5`：这首歌的**播放状态变更**（payload 在 `7`：`7.2` 歌曲/MV、`7.3` 状态文案如「MV已被切换」、
  *   `7.4` 同一个单号串、`7.5` 歌手 id）——它不是一条新点歌，解出来只会把列表刷满，所以**跳过**。
  *
- * 两条诚实性约束：
- * - **发送者的 User 不在帧里**（单号串里只有发送者 id，而且可能是抖音号而不是内部用户 id），
- *   所以行上没有昵称、`userId` 也留空——不编一个假名字，也不拿它去建用户行
- *   （那会把一个不存在的人塞进「在线观众」）；
+ * 单号串的第一段就是**送出这份点唱礼物的人**（`item.userId`）。这不是猜的，同一份抓帧日志里能对上两次
+ * （2026-10，`spike/ws-spike.mjs` 的 `WebcastRoomRankMessage` 里带着用户 id→昵称）：
+ * - 单号串 `58709692971_7667087264728728634_…`（歌手 `摇尾乞怜ఇ`）+ 榜单里 `58709692971 = 皓晨`
+ *   → 房间里显示的就是「皓晨 送了 想听 摇尾乞怜ఇ 演唱」（用户当时看到的正是这条）；
+ * - 单号串 `3540905398897175_2965843922913211_…`（歌手 `困ఇ`）+ 榜单里 `3540905398897175 = 无Wei`
+ *   → 「无Wei 送了 想听 困ఇ 演唱」。
+ *
+ * 三条诚实性约束：
+ * - **昵称不在这一帧里**：帧里只有歌手的 `User` 和发送者的 id。所以这里只写 `userId`，
+ *   昵称交给中枢用**我们自己的数据**补（本场见过的人 → 库里查；见 `main/monitor/hub.ts` 的
+ *   `resolveGiftSenders`），查不到就照实显示 id，不编名字；
  * - 点歌本身推不出抖币价，`diamonds` 一律 0（界面显示「价值未知」，不假装免费）。
+ *   同一帧里其实还带一份点唱礼物记录（`6.5.1.10` = 「点唱礼物」，另有两个数字字段含义未实测），
+ *   在把价格字段实测钉死之前**不用它算钱**；
+ * - `2 = 5` 那几帧也带同一个单号串，但它们是播放状态变更，不是新的送礼——照旧跳过。
  */
 function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
   const payload = getMessage(msg, 6)
@@ -257,9 +267,19 @@ function decodeProtoOrderSing(msg: PbMessage): ProtoDecoded {
   const nickname = singer?.nickname ?? ''
   return {
     ...nothing(),
-    item: item('gift', '', '', nickname ? `想听 ${nickname} 演唱` : '点了一首歌', 1, 0),
+    item: item('gift', '', orderSingSenderId(payload), nickname ? `想听 ${nickname} 演唱` : '点了一首歌', 1, 0),
     users: singer ? [singer] : []
   }
+}
+
+/**
+ * 单号串 `发送者id_歌手id_点歌单id_0_歌曲id_1_Normal` 的第一段（送出礼物的人）。
+ * 只在它**确实是一串数字**时才认（认不出来就返回空串，界面上显示未知用户，而不是写半截垃圾）。
+ */
+function orderSingSenderId(payload: PbMessage): string {
+  const key = pickString(payload, [1, 4], 160) ?? ''
+  const first = key.split('_')[0] ?? ''
+  return /^\d{4,}$/.test(first) ? first : ''
 }
 
 /**

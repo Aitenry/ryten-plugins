@@ -206,6 +206,11 @@ export class AnalyzerHub {
   /** 攒着还没推给界面的弹幕与心跳（见 schedulePush：逐帧广播会把界面和主进程一起淹掉） */
   private pendingMessages = new Map<string, DanmakuItem[]>()
   private pendingTicks = new Map<string, RoomTick>()
+  /**
+   * 每个房间「吃一批消息」的串行链（见 handleItems）：
+   * 给送礼人补昵称要查库（异步），串起来才能保证批次不会互相超车。
+   */
+  private readonly ingestChain = new Map<string, Promise<void>>()
   private pushTimer: ReturnType<typeof setTimeout> | null = null
   private usersPushAt = 0
   private pendingUsers: UserBatch[] = []
@@ -879,6 +884,84 @@ export class AnalyzerHub {
 
   private handleItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
     if (items.length === 0 && users.length === 0) return
+    /**
+     * 礼物/点歌那一类里，帧里只有发送者的 **id**（点歌单号串的第一段），没有昵称。
+     * 先用**我们自己的数据**把名字补上再落库/推界面（见 `resolveGiftSenders`）——
+     * 否则「歌单」这条消息在列表里就是「（未知用户） 送出了 想听 X 演唱」，等于白记。
+     */
+    const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && !item.user)
+    if (unnamed.length === 0) {
+      this.applyItems(state, items, users, roomEnded)
+      return
+    }
+    /**
+     * 补昵称要查库（异步），所以这一批不能立刻吃进去；**按房间串起来**保证先后顺序——
+     * 否则慢的那一批会被后到的批次抢先，弹幕流的顺序就乱了。
+     */
+    const previous = this.ingestChain.get(state.webRid) ?? Promise.resolve()
+    const next = previous.then(async () => {
+      try {
+        const extra = await this.resolveGiftSenders(state, unnamed)
+        this.applyItems(state, items, extra.length > 0 ? [...users, ...extra] : users, roomEnded)
+      } catch (error) {
+        logger.warn(`[douyin-link] ${state.webRid} 处理这一批消息失败:`, describe(error))
+        this.applyItems(state, items, users, roomEnded)
+      }
+    })
+    this.ingestChain.set(state.webRid, next.catch(() => undefined))
+  }
+
+  /**
+   * 给「只有 id 的送礼人」补昵称：**先本场见过的人，再查库**（跨会话留下的档案）。
+   *
+   * 为什么必须有这一步：点歌/礼物帧里没有发送者的 `User`，只有点歌单号串里的 id；
+   * 而发送礼物的人**通常不在本场说过话**（`userMap` 里没有），但他多半在进场消息或房间榜里
+   * 露过面、库里也留着上一轮的档案。查到的档案一并交给 recorder，顺手把昵称/头像进用户库。
+   */
+  private async resolveGiftSenders(state: RoomState, items: DanmakuItem[]): Promise<UserInfo[]> {
+    const found: UserInfo[] = []
+    const missing: string[] = []
+    for (const item of items) {
+      const session = state.recorder.profile(item.userId)
+      if (session?.nickname) {
+        item.user = session.nickname
+        continue
+      }
+      missing.push(item.userId)
+    }
+    if (missing.length === 0) return found
+    try {
+      const rows = await store.getUsers(state.webRid, missing)
+      for (const item of items) {
+        if (item.user) continue
+        const row = rows.get(item.userId)
+        if (!row?.nickname) continue
+        item.user = row.nickname
+        found.push({
+          id: row.userId,
+          displayId: row.displayId,
+          nickname: row.nickname,
+          gender: row.gender,
+          signature: row.signature,
+          city: row.city,
+          avatar: row.avatar,
+          following: row.following,
+          follower: row.follower,
+          honorLevel: row.honorLevel,
+          fansClubLevel: row.fansClubLevel,
+          badges: row.badges,
+          secUid: row.secUid
+        })
+      }
+    } catch (error) {
+      // 查库失败不该让这一批消息消失：宁可先记 id，下一条再补名字
+      logger.warn(`[douyin-link] ${state.webRid} 补送礼人昵称失败:`, describe(error))
+    }
+    return found
+  }
+
+  /** 把一批消息真正吃进去（计数/落库/推界面）；送礼人昵称补好之后由 `handleItems` 调这里 */
+  private applyItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
     const touched = state.recorder.ingest(items, users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)
 

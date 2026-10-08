@@ -187,13 +187,25 @@ const priceless = proto.decodeProtoMessage(
 check('礼物没带价格 → 抖币 0', priceless.item.diamonds, 0)
 check('礼物没带价格 → 数量缺省 1', priceless.item.count, 1)
 
-/* 点歌：文案用歌手的昵称，发送者不在帧里所以留空（不编名字、也不塞假 userId） */
+/* 点歌：文案用歌手的昵称；**发送者只有单号串里的 id**（帧里没有他的 User）——
+   这个 id 就是「送礼物的人」，昵称由主进程用本场数据/库补，解码器只负责把 id 拿出来 */
 const sing = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ singer: '摇尾乞怜' }))
 check('点歌 → kind', sing.item.kind, 'gift')
 check('点歌 → 文案', sing.item.text, '想听 摇尾乞怜 演唱')
-check('点歌 → 没有发送者', [sing.item.user, sing.item.userId], ['', ''])
+check('点歌 → 送礼人 id（单号串第一段）', sing.item.userId, '58709692971')
+check('点歌 → 帧里没有昵称（留给中枢补）', sing.item.user, '')
 check('点歌 → 抖币未知', sing.item.diamonds, 0)
 check('点歌 → 把歌手写进用户库', sing.users.map((u) => u.nickname), ['摇尾乞怜'])
+
+/* 单号串第一段不是数字（结构变了/看错了）时，不许写半截垃圾进 userId */
+const weird = proto.decodeProtoMessage(
+  'WebcastLinkmicOrderSingMessage',
+  Buffer.concat([
+    pbVarint(2, 4),
+    pbMessage(6, Buffer.concat([pbString(1, 'abc_def'), pbMessage(3, user(7667087264728728634n, '歌手'))]))
+  ])
+)
+check('点歌 → 单号串认不出来时 userId 为空', weird.item.userId, '')
 
 /* 别的消息不该带出抖币 */
 const chat = proto.decodeProtoMessage('WebcastChatMessage', chatFrame())
