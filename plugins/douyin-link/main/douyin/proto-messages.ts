@@ -365,15 +365,19 @@ function decodeProtoOrderSing(msg: PbMessage, gifts: GiftResolver | undefined, r
   if (!payload) return nothing()
   const singer = parseProtoUser(getMessage(payload, 3))
   // 6.5 = 这份点歌礼物的记录；6.5.1 = 记录本体
-  // （1 收礼人 User、2 送礼人 User、3 单号串、5 礼物 id、6 单个抖币价、10 场景标签）
+  // （1 收礼人 User、2 送礼人 User、3 单号串、5 **房间固定的点唱礼物 id**、6 它的价、10 场景标签）
   const envelope = getMessage(payload, 5)
   const record = envelope ? getMessage(envelope, 1) : undefined
   const recipient = (record ? parseProtoUser(getMessage(record, 1)) : null) ?? singer
   const sender = record ? parseProtoUser(getMessage(record, 2)) : null
   const key = (record ? getString(record, 3, 160) : '') || (getString(payload, 1, 160) ?? '')
   const label = (record ? getString(record, 10, 40) : '') ?? ''
-  const giftId = record ? (getVarint(record, 5) ?? 0) : 0
+  /** 记录里的礼物（实测**永远是 3200 = 爱的纸鹤 99**，是房间固定那件「点唱礼物」，不是用户送的那件） */
+  const recordGiftId = record ? (getVarint(record, 5) ?? 0) : 0
   const frameUnit = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
+  /** 用户**实际送的**那件礼物：单号串第 5 段（见 `orderSingGiftId`） */
+  const keyGiftId = orderSingGiftId(key, gifts)
+  const giftId = keyGiftId || recordGiftId
   /**
    * 同一个点歌单会**反复推**：只有「刚点下去」那条带礼物记录（`6.5.1`），后面几条只有单号串与歌手
    * （实测：同一单号串先来带记录的、后来不带；库里因此出现「同一单两行、一行没名字」）。
@@ -389,15 +393,26 @@ function decodeProtoOrderSing(msg: PbMessage, gifts: GiftResolver | undefined, r
     }
   }
   /**
-   * 名字与价格**以官方目录为准**（帧里只有 id 和一个场景标签「点唱礼物」，
-   * 而同一个房间里不同的人点歌用的是不同的礼物——截图里就有独角兽/跑车两种）。
-   * 目录查不到时退回帧里的标签与价格；连礼物记录都没有的帧退回房间自己的说法
-   * 「想听 X 演唱」（别留一行空白正文）。
+   * 名字与价格**以官方目录为准**，而且**按用户送的那件礼物查**（单号串第 5 段）。
+   *
+   * 为什么不是记录里的 `5`（2026-10-08 修）：用户明明看到有人送「跑车」，插件却显示
+   * 「爱的纸鹤 / 99」或者干脆「未知」。把 26 个探针日志里 40 条点歌帧全扫一遍才看清：
+   * 记录里的 `5` **永远是 3200（爱的纸鹤 99）**——那是房间固定的点唱礼物；而单号串第 5 段有 10 种取值，
+   * **10/10 都能在官方目录里查到**（跑车 4353 ×9、闪耀星辰 5564 ×6、无限热爱 15711 ×3、
+   * 彩虹炸毛 15472、捏捏小脸 5557、礼花筒 2114、爱的纸鹤 3200、比心 781、一束花开 5831、
+   * 暮光星辰 13564），随机撞上目录的概率是 1e-12 级——**那一段就是礼物 id**。
+   * 价格同理取目录价：记录里的 99 是那件固定礼物的价，拿它当「跑车」的价就错了 12 倍。
+   *
+   * 记录帧里的 `(id, 价)` 仍然拿去做目录自检（读法错了会在日志里 warn）；
+   * 目录查不到（Key 段认不出来）时退回记录里的那份，再不行退回房间自己的说法「想听 X 演唱」。
+   * **不再用场景标签当礼物名**（`10 = 点唱礼物` 本来就不是礼物名，显示成名字只会让人以为
+   * 「送了就叫礼物」——用户 2026-10-08 的原话）。
    */
   const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
-  if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
-  const name = hit?.name || label || (recipient?.nickname ? `想听 ${recipient.nickname} 演唱` : '')
-  const unit = hit?.diamonds || frameUnit
+  if (recordGiftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(recordGiftId, frameUnit)
+  const name = hit?.name || (recipient?.nickname ? `想听 ${recipient.nickname} 演唱` : '')
+  /** 认出了用户送的那件礼物就只信目录价（记录里的 99 是点唱礼物那件的价，跟它无关） */
+  const unit = keyGiftId > 0 ? (hit?.diamonds ?? 0) : hit?.diamonds || frameUnit
   const senderId = sender?.id ?? orderSingSenderId(key)
   /**
    * 名字还是空的：**这一条将来在库里就是「礼物名未知」，而且再也补不回来**，
@@ -445,6 +460,24 @@ const seenOrders = new Set<string>()
 /** 单号串去掉「歌曲 id」那段之前的整串都算同一单（`6.1` 与 `6.5.1.3` 是同一个串） */
 function orderSingKey(key: string): string {
   return /^\d+_\d+_\d+/.test(key) ? key : ''
+}
+
+/**
+ * 单号串 `发送者id_歌手id_点歌单id_0_<礼物 id>_1_Normal` 里**第 5 段 = 用户送出的那件礼物 id**。
+ *
+ * 这不是猜的（2026-10-08，26 个探针日志 / 40 条真帧全扫过）：10 个不同的第 5 段
+ * （4353、5564、15711、15472、5557、2114、3200、781、5831、13564）**10/10 都能在官方礼物目录里查到**
+ * ——分别是跑车 4353（×9）、闪耀星辰 5564（×6）、无限热爱 15711（×3）、彩虹炸毛、捏捏小脸、礼花筒、
+ * 爱的纸鹤、比心、一束花开、暮光星辰。随机数字撞上目录 1281 件的概率在 1e-12 量级，
+ * 所以它是礼物 id 而不是歌曲 id（同一房间里不同价位的点歌礼物，正是这个房间的「点歌菜单」）。
+ *
+ * **只有在目录里查得到才认**：认不出来就返回 0（退回记录帧里那份），绝不拿一个查不到的 id 去显示。
+ */
+function orderSingGiftId(key: string, gifts?: GiftResolver): number {
+  const segment = key.split('_')[4] ?? ''
+  if (!/^\d{3,}$/.test(segment)) return 0
+  const id = Number(segment)
+  return gifts?.resolve(id) ? id : 0
 }
 
 /**
