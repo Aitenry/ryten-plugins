@@ -1,4 +1,4 @@
-﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Modal, Tag } from 'antd'
 import { RiDeleteBin6Line, RiTeamLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
@@ -127,6 +127,8 @@ export default function Page(): React.JSX.Element {
   const tabRef = useRef<TabKey>('overview')
   /** 「用户榜需要刷新」的欠账：不在用户页签时不查库，切回去补一次 */
   const usersReloadPending = useRef(false)
+  /** 已经为该房间补过「库里的历史」的房间（每个房间只自动补一次） */
+  const historyLoaded = useRef<Set<string>>(new Set())
   const maxItems = settings?.maxItems ?? 200
 
   const active = useMemo(() => rooms.find((room) => room.webRid === activeRoom) ?? null, [rooms, activeRoom])
@@ -411,6 +413,21 @@ export default function Page(): React.JSX.Element {
     },
     [activeRoom, loadRoomData, reloadDays]
   )
+
+  /**
+   * 选中的房间**列表是空的就补一段库里的历史**（用户 2026-10-08：「弹幕也一样」——
+   * 下播 / 关掉监控 / 重启应用之后内存里那一段没了，实时页就整片空白，而数据都在库里）。
+   *
+   * 触发时机：应用刚打开、切房间、下播后重启。每个房间只自动试一次（`historyLoaded`），
+   * 免得「库里真的没有消息」时反复查库。
+   */
+  useEffect(() => {
+    if (!activeRoom || historyLoaded.current.has(activeRoom)) return
+    const list = itemsByRoom.get(activeRoom)
+    if (list && list.length > 0) return
+    historyLoaded.current.add(activeRoom)
+    void loadRoomData(activeRoom)
+  }, [activeRoom, itemsByRoom, loadRoomData])
 
   /**
    * 「加载更早」：按当前列表里**最早那条的时间**往库里再翻一页（老消息在前）。

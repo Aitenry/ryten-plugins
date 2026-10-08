@@ -290,11 +290,13 @@ export class AnalyzerHub {
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
      * 真机验证也踩到过：重启后 CDP 抓不到任何面板，因为根本没选中房间）。
+     *
+     * 一个都没在监控（下播了、用户把开关关了）就退一步选**最近活跃过的房间**：
+     * 用户 2026-10-08 反馈「下播后就看不见了」——数据都在库里，界面上总得先选中它才看得到。
      */
     if (!this.activeRoom) {
-      const candidate = [...this.states.values()]
-        .filter((state) => state.monitor)
-        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]
+      const byActive = [...this.states.values()].sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+      const candidate = byActive.find((state) => state.monitor) ?? byActive[0]
       if (candidate) this.activeRoom = candidate.webRid
     }
     if (this.settings.resumeOnStart) {
@@ -1435,20 +1437,19 @@ export class AnalyzerHub {
     const gifts = await store.giftBreakdown(webRid, fromMs, toMs)
     /**
      * 收礼物榜 / 送礼物榜（用户 2026-10-08 的要求）：
-     * - 收礼物榜**只要麦上的人**（谁在麦上收了礼物、收了多少值）；
      * - **两张榜都按抖币排行**（用户追加：「收礼物榜和送礼物榜都要按照抖币来排行，收礼物榜没有按照
      *   抖币来排行」）——收礼榜原来先按麦位序，看着就不像按钱排的；麦位号仍然显示（那是信息），
      *   但**不参与排序**。抖币相同时按件数、再按最近一次。
-     * 麦位是**内存里的实时表**（`recorder.micList()`），窗口是时间的——两者口径不同，
-     * 所以这里用「当前麦位」过滤窗口内的收礼聚合：没在麦上的收礼人不进这张榜（榜单说的是「麦上收获」）。
-     * 没在监控这个房间时没有麦位表，收礼物榜就是空的（界面按空态显示，不编数据）。
+     * - 收礼榜**不再把「不在麦上」的人滤掉**（用户追加：「收礼物榜不能，下播后就看不见了」）：
+     *   麦位是**内存里的实时表**，只有「正在监控 + 没重启过」时才有；下播、关掉监控、重启应用之后
+     *   它都是空的——照旧过滤的话收礼榜整张空掉，而数据明明都在库里。现在列**这一段时间里所有
+     *   收到礼物的人**，在麦上的人带麦位号，其余照常按抖币排在榜上。
      */
     const seats = new Map((this.states.get(webRid)?.recorder.micList() ?? []).map((item) => [item.userId, item.seat]))
     const byCoins = (a: GiftRankRow, b: GiftRankRow): number =>
       b.diamonds - a.diamonds || b.count - a.count || b.lastAt - a.lastAt
     const receivedAll = await store.giftRankByPerson(webRid, 'recipient', fromMs, toMs)
     const received: GiftRankRow[] = receivedAll
-      .filter((row) => seats.has(row.userId))
       .map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 }))
       .sort(byCoins)
     const sentAll = await store.giftRankByPerson(webRid, 'sender', fromMs, toMs)

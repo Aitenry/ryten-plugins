@@ -526,14 +526,8 @@ function GiftRankBoard(props: {
               title={t('douyin-link.page.giftRowHint')}
               onClick={() => props.onOpen({ userId: row.userId, name: row.name, direction })}
             >
-              {direction === 'received' ? (
-                <span
-                  className="w-6 shrink-0 truncate opacity-50"
-                  title={t('douyin-link.page.seatLabel', { seat: row.seat })}
-                >
-                  {row.seat > 0 ? `${row.seat}号` : ''}
-                </span>
-              ) : null}
+              {/* 名字前面**不带「N号」**（用户 2026-10-08：「移除前面的x号的内容」）：
+                  榜单按抖币排、也不再只列麦上的人，那个前缀只会误导；麦位去「在线观众」看 */}
               <span className="min-w-0 flex-1 truncate" title={row.name || row.userId}>
                 {row.name || row.userId}
               </span>

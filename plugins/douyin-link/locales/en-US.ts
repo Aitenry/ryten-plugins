@@ -192,7 +192,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       giftValueUnknown: 'value unknown',
       giftReceivedBoard: 'Received gifts',
       giftSentBoard: 'Sent gifts',
-      giftReceivedEmpty: 'Nobody on mic has received a gift yet',
+      giftReceivedEmpty: 'Nobody has received a gift in this range yet',
       giftSentEmpty: 'Nobody has sent a gift in this window yet',
       giftRowHint: 'Open this user\u2019s gift history',
       giftHistoryTitle: 'Gift history',
