@@ -11,6 +11,7 @@ import {
   type DbStats,
   type FailureInfo,
   type GiftBreakdownRow,
+  type GiftRankRow,
   type LiveRoomInfo,
   type LiveSettings,
   type MessageBatch,
@@ -1305,6 +1306,22 @@ export class AnalyzerHub {
     const topChat = await store.listUsers(webRid, 'chat', '', 10)
     // 礼物榜：窗口内按礼物名聚合（「送了什么、值多少」在界面上只有这里+实时列表能看到）
     const gifts = await store.giftBreakdown(webRid, fromMs, toMs)
+    /**
+     * 收礼物榜 / 送礼物榜（用户 2026-10-08 的要求）：
+     * - 收礼物榜**只要麦上的人**，按麦位序排（谁在麦上收了礼物、收了多少值）；
+     * - 送礼物榜按抖币排（谁送出的最值钱）。
+     * 麦位是**内存里的实时表**（`recorder.micList()`），窗口是时间的——两者口径不同，
+     * 所以这里用「当前麦位」过滤窗口内的收礼聚合：没在麦上的收礼人不进这张榜（榜单说的是「麦上收获」）。
+     * 没在监控这个房间时没有麦位表，收礼物榜就是空的（界面按空态显示，不编数据）。
+     */
+    const seats = new Map((this.states.get(webRid)?.recorder.micList() ?? []).map((item) => [item.userId, item.seat]))
+    const receivedAll = await store.giftRankByPerson(webRid, 'recipient', fromMs, toMs)
+    const received: GiftRankRow[] = receivedAll
+      .filter((row) => seats.has(row.userId))
+      .map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 }))
+      .sort((a, b) => (a.seat || 999) - (b.seat || 999) || b.diamonds - a.diamonds)
+    const sentAll = await store.giftRankByPerson(webRid, 'sender', fromMs, toMs)
+    const sent: GiftRankRow[] = sentAll.map((row) => ({ ...row, seat: seats.get(row.userId) ?? 0 }))
     return {
       webRid,
       windowMinutes: minutes,
@@ -1317,6 +1334,8 @@ export class AnalyzerHub {
       kinds: breakdown.kinds,
       diamonds: totals.diamonds,
       gifts,
+      received,
+      sent,
       topChat
     }
   }
@@ -1382,6 +1401,30 @@ export class AnalyzerHub {
   /** 某个人送过的礼物（用户榜悬停时按需查；只查库，不进内存） */
   async userGifts(webRid: string, userId: string): Promise<GiftBreakdownRow[]> {
     return store.userGiftBreakdown(webRid, userId)
+  }
+
+  /**
+   * 礼物榜点一行后的**礼物历史**（用户 2026-10-08：「点击后可查看历史礼物数据」）。
+   *
+   * `direction`：`sent` = 这个人送出去的、`received` = 这个人收到的——两者都走消息流水
+   * （`queryMessages` 的 `userId` / `toUserId` 过滤），所以看到的是**明细**：
+   * 时间、礼物名、件数、抖币、对方是谁。分页与「共 N 条」由界面管。
+   */
+  async giftHistory(
+    webRid: string,
+    userId: string,
+    direction: 'sent' | 'received',
+    limit = 30,
+    offset = 0
+  ): Promise<MessagePage> {
+    if (!userId) return { rows: [], total: 0 }
+    return store.queryMessages({
+      webRid,
+      kind: 'gift',
+      ...(direction === 'received' ? { toUserId: userId } : { userId }),
+      limit,
+      offset
+    })
   }
 
   /** 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并） */

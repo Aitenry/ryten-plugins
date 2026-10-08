@@ -116,6 +116,21 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 某个人送过的礼物（用户榜悬停看明细）
     'plugin:douyin-link:user-gifts': (webRid?: string, userId?: string) =>
       hub.userGifts(String(webRid ?? ''), String(userId ?? '')),
+    // 礼物榜点一行：这个人的礼物历史（sent = 他送的 / received = 他收到的），明细分页
+    'plugin:douyin-link:gift-history': (
+      webRid?: string,
+      userId?: string,
+      direction?: string,
+      limit?: number,
+      offset?: number
+    ) =>
+      hub.giftHistory(
+        String(webRid ?? ''),
+        String(userId ?? ''),
+        direction === 'received' ? 'received' : 'sent',
+        typeof limit === 'number' ? limit : 30,
+        typeof offset === 'number' ? offset : 0
+      ),
     // 「在线观众」：麦上（聊天室）+ 接口给的房间成员 + 本场活跃，合并成一份列表
     'plugin:douyin-link:presence-list': (webRid?: string) => hub.presence(String(webRid ?? '')),
     // 头像：渲染层 CSP 不许外链图片，所以由主进程下载成 data URL 再给界面

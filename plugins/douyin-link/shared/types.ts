@@ -436,9 +436,36 @@ export interface RoomSummary {
   diamonds: number
   /** 窗口内的礼物流水按礼物名聚合（「送了什么、值多少」看这里；空数组 = 窗口内没有礼物） */
   gifts: GiftBreakdownRow[]
+  /**
+   * **收礼物榜**：窗口内**在麦上**的那些人各收到了多少礼物值（用户 2026-10-08 的要求：
+   * 「改为收礼物榜，并且只要麦上收礼物的人员礼物值」）。空数组 = 没有麦位信息或麦上没人收过礼物。
+   */
+  received: GiftRankRow[]
+  /** **送礼物榜**：窗口内谁送出的礼物值最多（同名次同钻，按人聚合） */
+  sent: GiftRankRow[]
   /** 类型分布 */
   kinds: Array<{ kind: DanmakuKind; count: number }>
   topChat: UserRankRow[]
+}
+
+/**
+ * 礼物榜（收礼 / 送礼）的一行：**一个人**在窗口内的礼物合计。
+ *
+ * 与 `GiftBreakdownRow`（按礼物名聚合）互补：那个回答「送了什么」，这个回答「谁收/谁送、值多少」，
+ * 点一行能翻出这个人的礼物历史（送礼人或收礼人口径）。
+ */
+export interface GiftRankRow {
+  userId: string
+  /** 昵称（库里记的最近一次；拿不到就是空串，界面显示用户 id） */
+  name: string
+  /** 礼物件数 */
+  count: number
+  /** 抖币总额（0 = 这些礼物官方都没给价） */
+  diamonds: number
+  /** 最近一次礼物时间（ms） */
+  lastAt: number
+  /** 麦位序号（1 起；0 = 不在麦上）。收礼物榜只收 > 0 的人，并按麦位序排 */
+  seat: number
 }
 
 /**
@@ -485,7 +512,13 @@ export interface MessageQuery {
   /** 关键词（匹配正文或昵称） */
   keyword?: string
   kind?: DanmakuKind | ''
+  /** 发送者 id */
   userId?: string
+  /**
+   * **收礼人 id**（礼物才有：`messages.to_user_id`）。
+   * 「某人收到的礼物历史」就是 `kind = 'gift'` + 这个条件。
+   */
+  toUserId?: string
   /** 时间范围（ms） */
   from?: number
   to?: number

@@ -1,10 +1,11 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, ilike, inArray, lte, ne, or, sql } from 'drizzle-orm'
 import logger from 'electron-log'
 import { withOrm } from '@host/main/database/orm'
 import type {
   DanmakuKind,
   DbStats,
   GiftBreakdownRow,
+  GiftRankRow,
   LiveRoomInfo,
   MessagePage,
   MessageQuery,
@@ -284,6 +285,8 @@ export async function queryMessages(query: MessageQuery): Promise<MessagePage> {
     if (query.webRid) filters.push(eq(douyinLinkMessages.webRid, query.webRid))
     if (query.kind) filters.push(eq(douyinLinkMessages.kind, query.kind))
     if (query.userId) filters.push(eq(douyinLinkMessages.userId, query.userId))
+    // 收礼人（礼物才有）：某人「收到的礼物历史」就是 kind='gift' + 这个条件
+    if (query.toUserId) filters.push(eq(douyinLinkMessages.toUserId, query.toUserId))
     if (typeof query.from === 'number' && query.from > 0) filters.push(gte(douyinLinkMessages.atMs, query.from))
     if (typeof query.to === 'number' && query.to > 0) filters.push(lte(douyinLinkMessages.atMs, query.to))
     const keyword = (query.keyword ?? '').trim()
@@ -835,6 +838,61 @@ export async function userGiftBreakdown(
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(Math.min(Math.max(1, limit), 50))
     return rows.map((row) => ({ name: row.name, count: row.count, diamonds: row.diamonds, users: 1 }))
+  })
+}
+
+/**
+ * 礼物榜的**按人**聚合（收礼物榜 / 送礼物榜共用）。
+ *
+ * `by = 'recipient'` 按收礼人（`to_user_id`）分组、`by = 'sender'` 按送礼人（`user_id`）分组。
+ * 只统计 `kind = 'gift'`；分组列是空串的行直接排除（不知道是谁的礼物不该出现在榜单上，
+ * 对应 SQL 里的 `<> ''`）。排序：抖币在前，价格未知的按件数兜底，再按最近时间。
+ */
+export async function giftRankByPerson(
+  webRid: string,
+  by: 'sender' | 'recipient',
+  fromMs: number,
+  toMs: number,
+  limit = 30
+): Promise<Array<Omit<GiftRankRow, 'seat'>>>
+{
+  if (!webRid) return []
+  await schemaReady
+  const idColumn = by === 'recipient' ? douyinLinkMessages.toUserId : douyinLinkMessages.userId
+  const nameColumn = by === 'recipient' ? douyinLinkMessages.toUserName : douyinLinkMessages.userName
+  return withOrm(`douyin-link.giftRank.${by}`, async (db) => {
+    const rows = await db
+      .select({
+        userId: idColumn,
+        name: sql<string>`max(${nameColumn})`,
+        count: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        lastAt: sql<number>`max(${douyinLinkMessages.atMs})::double precision`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.webRid, webRid),
+          eq(douyinLinkMessages.kind, 'gift'),
+          ne(idColumn, ''),
+          gte(douyinLinkMessages.atMs, fromMs),
+          lte(douyinLinkMessages.atMs, toMs)
+        )
+      )
+      .groupBy(idColumn)
+      .orderBy(
+        desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`),
+        desc(sql`count(*)`),
+        desc(sql`max(${douyinLinkMessages.atMs})`)
+      )
+      .limit(Math.min(Math.max(1, limit), 200))
+    return rows.map((row) => ({
+      userId: row.userId,
+      name: row.name ?? '',
+      count: row.count,
+      diamonds: row.diamonds,
+      lastAt: row.lastAt
+    }))
   })
 }
 

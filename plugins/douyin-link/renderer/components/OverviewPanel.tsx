@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Segmented } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
-import type { GiftBreakdownRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
+import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api from '../api'
-import { ChartBox, EmptyHint, Panel, type PluginPalette, usePluginPalette } from './ui'
+import { ChartBox, EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -30,6 +30,11 @@ export function OverviewPanel(props: {
   room: RoomRuntime | null
   minutes: number
   onMinutes: (minutes: number) => void
+  /**
+   * 点礼物榜的一行 → 打开这个人的礼物历史。
+   * 参数就是榜上那一行（`userId` / 昵称 / 方向：`sent` = 他送的、`received` = 他收到的）。
+   */
+  onOpenGifts: (target: { userId: string; name: string; direction: 'sent' | 'received' }) => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
@@ -138,11 +143,28 @@ export function OverviewPanel(props: {
           <RankList rows={summary?.topChat ?? []} webRid={webRid} t={t} palette={palette} />
         </Panel>
         {/*
-          礼物榜：**「送了什么、值多少」唯一能一眼看全的地方**。
-          没有它，界面上只有「礼物 N 次」这种计数（用户 2026-10-08 反馈「没有地方看」）。
+          收礼物榜 / 送礼物榜（用户 2026-10-08 的要求）：
+          「礼物榜（送了什么 · 值多少）」那种按礼物名的榜单去掉了括号里的说明，拆成两张**按人**的榜：
+          - 收礼物榜**只要麦上的人**（谁在麦上收了礼物、收了多少值），点一行看他收到的礼物历史；
+          - 送礼物榜是谁送出的最值钱，点一行看他送出的礼物历史。
         */}
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.giftBoard')}>
-          <GiftBoard rows={summary?.gifts ?? []} t={t} palette={palette} />
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.giftReceivedBoard')}>
+          <GiftRankBoard
+            rows={summary?.received ?? []}
+            direction="received"
+            t={t}
+            palette={palette}
+            onOpen={props.onOpenGifts}
+          />
+        </Panel>
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.giftSentBoard')}>
+          <GiftRankBoard
+            rows={summary?.sent ?? []}
+            direction="sent"
+            t={t}
+            palette={palette}
+            onOpen={props.onOpenGifts}
+          />
         </Panel>
         <Panel className="shrink-0" title={t('douyin-link.page.range')}>
           <Segmented
@@ -291,46 +313,75 @@ function KindBars(props: {
   )
 }
 
-/** 礼物榜：礼物名 · 件数 · 抖币（价格未知的显示成「未知」，不写成 0） */
-function GiftBoard(props: {
-  rows: GiftBreakdownRow[]
+/**
+ * 礼物榜（收礼 / 送礼共用一张）：**一行一个人**——名字 · 件数 · 抖币，点一行看他的礼物历史。
+ *
+ * 两个口径的差别只有三点：收礼榜的行带麦位号（只列麦上的人）、空态文案、点开的历史方向。
+ * 抖币拿不到（官方没给价）的行显示「价值未知」，不写成 0。
+ */
+function GiftRankBoard(props: {
+  rows: GiftRankRow[]
+  direction: 'sent' | 'received'
   t: Translate
   palette: PluginPalette
+  onOpen: (target: { userId: string; name: string; direction: 'sent' | 'received' }) => void
 }): React.JSX.Element {
-  if (props.rows.length === 0) {
-    return <span className="text-xs opacity-50">{props.t('douyin-link.page.giftBoardEmpty')}</span>
+  const { rows, direction, t, palette } = props
+  if (rows.length === 0) {
+    return (
+      <span className="text-xs opacity-50">
+        {t(direction === 'received' ? 'douyin-link.page.giftReceivedEmpty' : 'douyin-link.page.giftSentEmpty')}
+      </span>
+    )
   }
-  const max = Math.max(1, ...props.rows.map((row) => (row.diamonds > 0 ? row.diamonds : row.count)))
+  const max = Math.max(1, ...rows.map((row) => (row.diamonds > 0 ? row.diamonds : row.count)))
   return (
-    <div className="flex flex-col gap-1.5">
-      {props.rows.slice(0, 8).map((row) => {
-        const value = row.diamonds > 0 ? row.diamonds : row.count
-        return (
-          <div key={row.name || '(unknown)'} className="flex min-w-0 items-center gap-2 text-[10px]">
-            <span className="min-w-0 flex-1 truncate" title={row.name}>
-              {row.name || props.t('douyin-link.page.giftNameUnknown')}
-            </span>
-            <span
-              className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full"
-              style={{ backgroundColor: props.palette.track }}
+    /* 榜长超过面板高度时**面板内自己滚**（不放滚动条就会把下面的行截掉、看不见）；
+       行数上限交给数据库（每张榜最多 30 行），这里不再 slice。 */
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ScrollStyle />
+      <div data-rb-scroll="" className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
+        {rows.map((row) => {
+          const value = row.diamonds > 0 ? row.diamonds : row.count
+          return (
+            <button
+              key={row.userId}
+              type="button"
+              data-rb-row=""
+              className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left text-[10px]"
+              title={t('douyin-link.page.giftRowHint')}
+              onClick={() => props.onOpen({ userId: row.userId, name: row.name, direction })}
             >
+              {direction === 'received' ? (
+                <span
+                  className="w-6 shrink-0 truncate opacity-50"
+                  title={t('douyin-link.page.seatLabel', { seat: row.seat })}
+                >
+                  {row.seat > 0 ? `${row.seat}号` : ''}
+                </span>
+              ) : null}
+              <span className="min-w-0 flex-1 truncate" title={row.name || row.userId}>
+                {row.name || row.userId}
+              </span>
               <span
-                className="block h-full rounded-full"
-                style={{
-                  width: `${Math.max(3, (value / max) * 100)}%`,
-                  backgroundColor: props.palette.warn
-                }}
-              />
-            </span>
-            <span className="w-10 shrink-0 text-right opacity-70">×{formatNumber(row.count)}</span>
-            <span className="w-16 shrink-0 text-right font-medium" style={{ color: props.palette.warn }}>
-              {row.diamonds > 0
-                ? props.t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
-                : props.t('douyin-link.page.giftValueUnknown')}
-            </span>
-          </div>
-        )
-      })}
+                className="h-1.5 w-14 shrink-0 overflow-hidden rounded-full"
+                style={{ backgroundColor: palette.track }}
+              >
+                <span
+                  className="block h-full rounded-full"
+                  style={{ width: `${Math.max(3, (value / max) * 100)}%`, backgroundColor: palette.warn }}
+                />
+              </span>
+              <span className="w-8 shrink-0 text-right opacity-60">×{formatNumber(row.count)}</span>
+              <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
+                {row.diamonds > 0
+                  ? t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                  : t('douyin-link.page.giftValueUnknown')}
+              </span>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -344,26 +395,33 @@ function RankList(props: {
   if (props.rows.length === 0) return <span className="text-xs opacity-50">{props.t('douyin-link.page.noData')}</span>
   const max = Math.max(1, ...props.rows.map((row) => row.stats.chat))
   return (
-    <div className="flex flex-col gap-1.5">
-      {props.rows.slice(0, 8).map((row, index) => {
-        const value = row.stats.chat
-        return (
-          <div key={row.userId} className="flex min-w-0 items-center gap-2 text-[10px]">
-            <span className="w-4 shrink-0 text-right opacity-50">{index + 1}</span>
-            <span className="min-w-0 flex-1 truncate">{row.nickname || row.userId}</span>
-            <span className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full" style={{ backgroundColor: props.palette.track }}>
+    /* 与礼物榜同一个口径：行多了面板内自己滚，别把超出部分截掉 */
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ScrollStyle />
+      <div data-rb-scroll="" className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
+        {props.rows.map((row, index) => {
+          const value = row.stats.chat
+          return (
+            <div key={row.userId} className="flex min-w-0 items-center gap-2 text-[10px]">
+              <span className="w-4 shrink-0 text-right opacity-50">{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate">{row.nickname || row.userId}</span>
               <span
-                className="block h-full rounded-full"
-                style={{
-                  width: `${Math.max(3, (value / max) * 100)}%`,
-                  backgroundColor: props.palette.accent
-                }}
-              />
-            </span>
-            <span className="w-14 shrink-0 text-right font-medium">{formatNumber(value)}</span>
-          </div>
-        )
-      })}
+                className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full"
+                style={{ backgroundColor: props.palette.track }}
+              >
+                <span
+                  className="block h-full rounded-full"
+                  style={{
+                    width: `${Math.max(3, (value / max) * 100)}%`,
+                    backgroundColor: props.palette.accent
+                  }}
+                />
+              </span>
+              <span className="w-14 shrink-0 text-right font-medium">{formatNumber(value)}</span>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
