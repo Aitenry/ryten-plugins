@@ -48,6 +48,9 @@ const port = Number(args.find((a) => a.startsWith('--port='))?.slice('--port='.l
 const positionals = args.filter((a) => !a.startsWith('-'))
 const input = positionals[0]
 const seconds = Number(positionals[1] ?? 300)
+/** `--reload-after=N`：第 N 秒像插件那样刷新一次页面；`--reenable`：刷新后再 enable 一次 Network 域 */
+const reloadAfter = Number(args.find((a) => a.startsWith('--reload-after='))?.slice('--reload-after='.length) ?? 0)
+const reenable = args.includes('--reenable')
 
 if (!input) {
   console.error('用法：node ws-spike.mjs <房间号|直播间链接> [秒数] [--stop-on=Method] [--headed]')
@@ -64,7 +67,11 @@ if (!chrome) {
   process.exit(2)
 }
 
-const profileDir = mkdtempSync(join(tmpdir(), 'douyin-ws-spike-'))
+/** 用户数据目录：默认每次新建（干净）；给 `--profile=<dir>` 就**固定复用**——
+ *  同一份设备身份与 Cookie 跨多次运行累积，更像「一直待在这个房间的设备」。 */
+const profileArg = args.find((a) => a.startsWith('--profile='))?.slice('--profile='.length)
+const profileDir = profileArg || mkdtempSync(join(tmpdir(), 'douyin-ws-spike-'))
+const keepProfile = Boolean(profileArg)
 const roomUrl = `https://live.douyin.com/${webRid}`
 console.log(`# 用 ${chrome} 打开 ${roomUrl}（采集 ${seconds}s${stopOn ? `，收到 ${stopOn} 即停` : ''}）`)
 console.log(`# 用户数据目录 ${profileDir}`)
@@ -101,7 +108,8 @@ function cleanup() {
     /* ignore */
   }
   try {
-    rmSync(profileDir, { recursive: true, force: true, maxRetries: 3 })
+    // --profile= 指定时保留（下次接着用同一份身份）
+    if (!keepProfile) rmSync(profileDir, { recursive: true, force: true, maxRetries: 3 })
   } catch {
     /* Windows 上浏览器可能还占着文件，删不掉就算了（临时目录） */
   }
@@ -316,11 +324,30 @@ console.log('# 已导航到直播间页，等页面的推送 ws…')
 const deadline = Date.now() + Math.max(10, seconds) * 1000
 let lastBeat = Date.now()
 let lastWsCount = -1
+const reloadAt = reloadAfter > 0 ? Date.now() + reloadAfter * 1000 : 0
+let reloaded = false
+let lastFrames = 0
 while (Date.now() < deadline && !hit) {
   await sleep(500)
   if (child.exitCode !== null) {
     console.log(`! 浏览器退出了（code ${child.exitCode}）`)
     break
+  }
+  /**
+   * 刷新实验（复刻插件每 10 分钟 reload 隐藏窗口）：
+   * 用 `--reload-after=N [--reenable]` 看刷新后推送帧会不会断——
+   * 用户的日志里，刷新后「页面已连上推送 ws」却整整 2 分钟没有帧（idle 失败），
+   * 这正是消息丢失的窗口。
+   */
+  if (reloadAt && !reloaded && Date.now() >= reloadAt) {
+    reloaded = true
+    console.log(`# [实验] 第 ${reloadAfter}s 刷新页面（reenable=${reenable}）`)
+    await send('Page.reload', { ignoreCache: false })
+    if (reenable) await send('Network.enable')
+  }
+  if (Date.now() - lastBeat > 15000) {
+    console.log(`# [帧数] 累计 ${frames} 帧（较上次 +${frames - lastFrames}）`)
+    lastFrames = frames
   }
   // 心跳：页面到底加载成什么样、有没有在建 ws（headless 被风控时的唯一线索）
   if (Date.now() - lastBeat > 15000) {
