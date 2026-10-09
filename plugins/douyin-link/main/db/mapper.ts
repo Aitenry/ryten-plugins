@@ -967,6 +967,138 @@ export async function giftRankByPerson(
   })
 }
 
+/* ------------------------------------------------- 跨直播间聚合（数据大屏） */
+
+/**
+ * 跨直播间**按人**聚合的礼物榜（数据大屏的「总送 / 总收礼物榜」）。
+ *
+ * 与 `giftRankByPerson` 的唯一区别是**不按 webRid 过滤**：分组键只有人
+ * （`sender` 用 `user_id`、`recipient` 用 `to_user_id`），所以同一个人在多个直播间的礼物
+ * 会合并成一行。昵称回退逻辑不变：优先消息里记的名字，再退回用户表。
+ */
+export async function giftRankByPersonAll(
+  by: 'sender' | 'recipient',
+  fromMs: number,
+  toMs: number,
+  limit = 30
+): Promise<Array<Omit<GiftRankRow, 'seat'>>> {
+  await schemaReady
+  const idColumn = by === 'recipient' ? douyinLinkMessages.toUserId : douyinLinkMessages.userId
+  const nameColumn = by === 'recipient' ? douyinLinkMessages.toUserName : douyinLinkMessages.userName
+  return withOrm(`douyin-link.giftRankAll.${by}`, async (db) => {
+    const rows = await db
+      .select({
+        userId: idColumn,
+        name: sql<string>`coalesce(nullif(max(${nameColumn}), ''), max(${douyinLinkUsers.nickname}), '')`,
+        count: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        lastAt: sql<number>`max(${douyinLinkMessages.atMs})::double precision`
+      })
+      .from(douyinLinkMessages)
+      .leftJoin(
+        douyinLinkUsers,
+        and(eq(douyinLinkUsers.webRid, douyinLinkMessages.webRid), eq(douyinLinkUsers.userId, idColumn))
+      )
+      .where(
+        and(
+          eq(douyinLinkMessages.kind, 'gift'),
+          ne(idColumn, ''),
+          gte(douyinLinkMessages.atMs, fromMs),
+          lte(douyinLinkMessages.atMs, toMs)
+        )
+      )
+      .groupBy(idColumn)
+      .orderBy(
+        desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`),
+        desc(sql`count(*)`),
+        desc(sql`max(${douyinLinkMessages.atMs})`)
+      )
+      .limit(Math.min(Math.max(1, limit), 200))
+    return rows.map((row) => ({
+      userId: row.userId,
+      name: row.name ?? '',
+      count: row.count,
+      diamonds: row.diamonds,
+      lastAt: row.lastAt
+    }))
+  })
+}
+
+/** 跨直播间的礼物种类榜（按礼物名聚合，不按房间过滤） */
+export async function giftBreakdownAll(fromMs: number, toMs: number, limit = 40): Promise<GiftBreakdownRow[]> {
+  await schemaReady
+  return withOrm('douyin-link.giftBreakdownAll', async (db) => {
+    const rows = await db
+      .select({
+        name: douyinLinkMessages.content,
+        count: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        users: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.kind, 'gift'),
+          gte(douyinLinkMessages.atMs, fromMs),
+          lte(douyinLinkMessages.atMs, toMs)
+        )
+      )
+      .groupBy(douyinLinkMessages.content)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+      .limit(Math.min(Math.max(1, limit), 200))
+    return rows.map((row) => ({ name: row.name, count: row.count, diamonds: row.diamonds, users: row.users }))
+  })
+}
+
+/**
+ * 跨直播间的分钟序列（数据大屏的全局趋势）：把各房间**同一分钟**的计数相加。
+ *
+ * `users` 跨房相加没有意义（那是每房的去重人数），固定给 0；全局人数由 `activeUsersAll` 单独算。
+ */
+export async function minuteSeriesAll(fromMinute: number, toMinute: number): Promise<MinuteRow[]> {
+  await schemaReady
+  return withOrm('douyin-link.minuteSeriesAll', async (db) => {
+    const rows = await db
+      .select({
+        minute: douyinLinkMinutes.minute,
+        chat: sql<number>`coalesce(sum(${douyinLinkMinutes.chat}), 0)::int`,
+        member: sql<number>`coalesce(sum(${douyinLinkMinutes.member}), 0)::int`,
+        likes: sql<number>`coalesce(sum(${douyinLinkMinutes.likes}), 0)::int`,
+        social: sql<number>`coalesce(sum(${douyinLinkMinutes.social}), 0)::int`,
+        gift: sql<number>`coalesce(sum(${douyinLinkMinutes.gift}), 0)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMinutes.diamonds}), 0)::int`,
+        messages: sql<number>`coalesce(sum(${douyinLinkMinutes.messages}), 0)::int`
+      })
+      .from(douyinLinkMinutes)
+      .where(and(gte(douyinLinkMinutes.minute, fromMinute), lte(douyinLinkMinutes.minute, toMinute)))
+      .groupBy(douyinLinkMinutes.minute)
+      .orderBy(asc(douyinLinkMinutes.minute))
+    return rows.map((row) => ({
+      minute: row.minute,
+      chat: row.chat,
+      member: row.member,
+      likes: row.likes,
+      social: row.social,
+      gift: row.gift,
+      diamonds: row.diamonds,
+      messages: row.messages,
+      users: 0
+    }))
+  })
+}
+
+/** 窗口内跨直播间**去重**的活跃用户数（数据大屏的「活跃用户」KPI） */
+export async function activeUsersAll(fromMs: number, toMs: number): Promise<number> {
+  await schemaReady
+  return withOrm('douyin-link.activeUsersAll', async (db) => {
+    const rows = await db
+      .select({ value: sql<number>`count(distinct nullif(${douyinLinkMessages.userId}, ''))::int` })
+      .from(douyinLinkMessages)
+      .where(and(gte(douyinLinkMessages.atMs, fromMs), lte(douyinLinkMessages.atMs, toMs)))
+    return rows[0]?.value ?? 0
+  })
+}
+
 /** 类型分布 + 时间范围（概览页签） */export async function kindBreakdown(
   webRid: string,
   fromMs: number,

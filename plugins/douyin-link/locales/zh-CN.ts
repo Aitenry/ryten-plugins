@@ -76,6 +76,23 @@ export const DouyinLinkZhCN = {
       tabUsers: '用户',
       tabSearch: '检索',
       tabCompare: '对比',
+      tabAll: '全局分析',
+      /* 模式切换（左栏「全部停止」旁）：直播间 / 数据大屏 */
+      modeRoom: '直播间',
+      modeDashboard: '数据大屏',
+      dashboardTitle: '数据大屏',
+      dashboardHint: '所有直播间合起来看',
+      /* 全局分析（数据大屏）*/
+      allKpiTitle: '全局关键指标（{{window}}）',
+      allKpiRooms: '直播间',
+      allKpiLive: '在播 {{count}}',
+      allTrendTitle: '全局趋势',
+      allFlowTitle: '直播间流水分析',
+      allGiftReceivedBoard: '总收礼物榜',
+      allGiftSentBoard: '总送礼物榜',
+      allGiftTypesBoard: '礼物种类榜',
+      allGiftTypesEmpty: '这个窗口里还没有礼物',
+      allEmpty: '还没有数据',
       /* 概览 */
       kpiTitle: '关键指标（{{window}}）',
       kpiRecent: '最近 {{window}}',

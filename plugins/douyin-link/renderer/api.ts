@@ -1,5 +1,7 @@
 import { DANMAKU_KINDS, isQualityKey } from '../shared/types'
 import type {
+  AllAnalysisPush,
+  AllRoomsAnalysis,
   AnalyzerSnapshot,
   AudioMessage,
   DanmakuItem,
@@ -9,6 +11,7 @@ import type {
   ExportResult,
   FailureInfo,
   GiftBreakdownRow,
+  GiftRankRow,
   ImportResult,
   LiveSettings,
   MessagePage,
@@ -177,6 +180,37 @@ export function normalizeRoomSummary(value: unknown, webRid: string, minutes: nu
   }
 }
 
+/**
+ * 跨直播间聚合分析（数据大屏）：数组字段一律兜空数组；`minutes` 缺省用请求时传的那个
+ * （推送来得比 props 晚一拍时的兜底）。
+ */
+export function normalizeAllRoomsAnalysis(value: unknown, minutes: number): AllRoomsAnalysis {
+  const raw = isRecord(value) ? value : {}
+  const windowMinutes =
+    typeof raw.minutes === 'number' && Number.isFinite(raw.minutes) ? raw.minutes : minutes
+  return {
+    minutes: windowMinutes,
+    windowMinutes: asCount(raw.windowMinutes),
+    rooms: asCount(raw.rooms),
+    liveRooms: asCount(raw.liveRooms),
+    messages: asCount(raw.messages),
+    chat: asCount(raw.chat),
+    member: asCount(raw.member),
+    like: asCount(raw.like),
+    social: asCount(raw.social),
+    gift: asCount(raw.gift),
+    diamonds: asCount(raw.diamonds),
+    users: asCount(raw.users),
+    firstAt: asCount(raw.firstAt),
+    lastAt: asCount(raw.lastAt),
+    series: asList<AllRoomsAnalysis['series'][number]>(raw.series),
+    sent: asList<GiftRankRow>(raw.sent),
+    received: asList<GiftRankRow>(raw.received),
+    gifts: asList<GiftBreakdownRow>(raw.gifts),
+    perRoom: asList<RoomCompareRow>(raw.perRoom)
+  }
+}
+
 /** 消息检索的一页：缺字段就回空页（用户档案里的「历史弹幕」按空态渲染） */
 export function normalizeMessagePage(value: unknown): MessagePage {
   const raw = isRecord(value) ? value : {}
@@ -311,6 +345,19 @@ export const api = {
   },
   roomsCompare: async (minutes = 60): Promise<RoomCompareRow[]> =>
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
+  /**
+   * 跨直播间聚合分析（数据大屏的「全局分析」）。查一次并**顺带登记**实时推送
+   * （同 `roomSummary` 的登记语义：落库后会按同一窗口推回来）。
+   */
+  allAnalysis: async (minutes = 60, range?: { from: number; to: number } | null): Promise<AllRoomsAnalysis> =>
+    normalizeAllRoomsAnalysis(
+      await invoke(`${PREFIX}all-analysis`, minutes, range?.from, range?.to),
+      minutes
+    ),
+  /** 停止全局分析的实时推送（切回单房间模式 / 卸载时调）；发出去就不管回话 */
+  allAnalysisUnwatch: (): void => {
+    void invoke(`${PREFIX}all-analysis-unwatch`)
+  },
   usersList: async (
     webRid: string,
     sort: 'recent' | 'chat' | 'gift' = 'recent',
@@ -419,6 +466,15 @@ export const api = {
     window.api.plugin.on(`${PREFIX}summary`, (payload) => {
       const push = payload as SummaryPush
       if (push && typeof push.webRid === 'string' && push.summary) callback(push)
+    }),
+  /**
+   * 跨直播间聚合分析的实时推送（数据大屏的全局页签）。
+   * 回调里拿到的 `analysis` 是主进程原始形状，界面用 `normalizeAllRoomsAnalysis` 收口。
+   */
+  onAllAnalysis: (callback: (push: AllAnalysisPush) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}all`, (payload) => {
+      const push = payload as AllAnalysisPush
+      if (push && push.analysis) callback(push)
     }),
   onUsers: (callback: (batch: UserBatch) => void): (() => void) =>
     window.api.plugin.on(`${PREFIX}users`, (payload) => {

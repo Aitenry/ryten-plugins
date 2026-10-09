@@ -4,6 +4,7 @@ import { app } from 'electron'
 import logger from 'electron-log'
 import type { LiveSettings } from '../shared/types'
 import {
+  ALL_EVENT,
   AUDIO_EVENT,
   MESSAGES_EVENT,
   ROOMS_EVENT,
@@ -142,6 +143,19 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     },
     /** 界面不再看这个房间的概览（切房间/卸载）：停掉它的实时推送 */
     'plugin:douyin-link:summary-unwatch': (webRid?: string) => hub.unwatchSummary(String(webRid ?? '')),
+
+    // 跨直播间聚合分析（数据大屏的「全局分析」）：查一次 + 登记实时推送（登记语义同 room-summary）
+    'plugin:douyin-link:all-analysis': (minutes?: number, from?: number, to?: number) => {
+      const window = typeof minutes === 'number' ? minutes : 60
+      const range =
+        typeof from === 'number' && typeof to === 'number' && Number.isFinite(from) && Number.isFinite(to) && to > from
+          ? { from, to }
+          : undefined
+      hub.watchAllAnalysis(window, range)
+      return hub.allRoomsAnalysis(window, range)
+    },
+    /** 界面不再看全局分析（切回单房间模式/卸载）：停掉它的实时推送 */
+    'plugin:douyin-link:all-analysis-unwatch': () => hub.unwatchAllAnalysis(),
     // 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）
     'plugin:douyin-link:reveal-mystery': (userId?: string) => hub.revealMystery(String(userId ?? '')),
     // 每一天的直播记录（左侧房间旁边的列表）
@@ -233,4 +247,12 @@ export function initAnalyzer(ctx: MainPluginContext): void {
 }
 
 /** 事件通道名（install 里 registerEvent 用） */
-export const EVENTS = [ROOMS_EVENT, MESSAGES_EVENT, USERS_EVENT, TICKS_EVENT, AUDIO_EVENT, SUMMARY_EVENT]
+export const EVENTS = [
+  ROOMS_EVENT,
+  MESSAGES_EVENT,
+  USERS_EVENT,
+  TICKS_EVENT,
+  AUDIO_EVENT,
+  SUMMARY_EVENT,
+  ALL_EVENT
+]

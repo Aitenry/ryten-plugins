@@ -4,6 +4,8 @@ import { safeSend } from '@host/main/safe-send'
 import {
   QUALITY_KEYS,
   parseWebRid,
+  type AllAnalysisPush,
+  type AllRoomsAnalysis,
   type AnalyzerSnapshot,
   type AudioMessage,
   type DanmakuItem,
@@ -92,6 +94,15 @@ export const TICKS_EVENT = 'plugin:douyin-link:ticks'
  */
 export const SUMMARY_EVENT = 'plugin:douyin-link:summary'
 
+/**
+ * 主进程 → 渲染层：**跨直播间聚合分析**（数据大屏的全局分析）。
+ *
+ * 与 `SUMMARY_EVENT` 同款（落库后按界面请求的窗口重算推回），但口径是**所有房间合起来**：
+ * 全局 KPI / 趋势、跨房按人合并的两张礼物榜、每房间流水横截面。它是全窗口扫描，
+ * 所以推送节流比概览更宽（见 `ALL_PUSH_MS`），且**只在界面登记了才计算**。
+ */
+export const ALL_EVENT = 'plugin:douyin-link:all'
+
 /** 一个房间在内存里最多留多少条最近弹幕 */
 const RECENT_CAP = 400
 /** 「名字空的礼物行」最多记几条日志（见 noteEmptyGifts） */
@@ -104,6 +115,13 @@ const ROOMS_PUSH_THROTTLE_MS = 1000
  * 攒起来的脏标记合并掉——真正的节流来自「有数据才标脏」，不是这个值。
  */
 const SUMMARY_PUSH_MS = 300
+/**
+ * 全局分析（数据大屏）的推送去抖间隔。
+ *
+ * 比概览宽得多：它一次要跑好几条**跨房全窗口**聚合（礼物榜 ×2、礼物种类榜、分钟序列、
+ * 去重人数），跑在宿主的 PGlite 上，太频繁会把宿主的流式输出一起挤住。
+ */
+const ALL_PUSH_MS = 4000
 /** 窗口右端早于「现在」这么多就算历史区间：不会再落进新数据，不必实时重算 */
 const SUMMARY_LIVE_GRACE_MS = 60 * 1000
 const USERS_PUSH_THROTTLE_MS = 1500
@@ -273,6 +291,16 @@ export class AnalyzerHub {
   private summaryTimer: ReturnType<typeof setTimeout> | null = null
   /** 概览推送是否在算（避免同一时刻叠几次聚合查询） */
   private summaryPushing = false
+  /**
+   * 界面正在看的全局分析窗口（`watchAllAnalysis` 登记；`null` = 没人在看）。
+   * 与概览不同，全局只有一份，所以用一个字段而不是 Map。
+   */
+  private allWatch: { minutes: number; range?: { from: number; to: number } } | null = null
+  /** 有数据落库、全局分析需要重算（推完清空） */
+  private allDirty = false
+  private allTimer: ReturnType<typeof setTimeout> | null = null
+  /** 全局推送是否在算（避免同一时刻叠几次跨房聚合） */
+  private allPushing = false
   private storeCache = { at: 0, data: new Map<string, store.RoomStore>() }
   private dbCache = { at: 0, data: null as DbStats | null }
   private started = false
@@ -365,6 +393,10 @@ export class AnalyzerHub {
     this.summaryTimer = null
     this.summaryWatch.clear()
     this.summaryDirty.clear()
+    if (this.allTimer) clearTimeout(this.allTimer)
+    this.allTimer = null
+    this.allWatch = null
+    this.allDirty = false
     this.pendingMessages.clear()
     this.pendingTicks.clear()
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
@@ -1291,6 +1323,7 @@ export class AnalyzerHub {
 
   /** 攒批落库：消息流水 / 分钟桶 / 用户统计（三类增量一次 flush 写完） */
   private async flush(): Promise<void> {
+    let flushed = false
     for (const state of this.states.values()) {
       const recorder = state.recorder
       const messages = recorder.takeMessages()
@@ -1304,6 +1337,7 @@ export class AnalyzerHub {
         this.addFlushedDeltas(state, messages)
         // 此刻数据才真正在库里：概览要看到的就是这一份，标脏让实时推送重算
         this.markSummaryDirty(state.webRid)
+        flushed = true
       } catch (error) {
         logger.warn(`[douyin-link] ${state.webRid} 落库失败（这批增量会丢）:`, describe(error))
       }
@@ -1311,6 +1345,8 @@ export class AnalyzerHub {
       // PGlite 跑在宿主进程里，连着几个 await 不让步就会把别人的输出挤停。
       await yieldToLoop()
     }
+    // 全局分析（数据大屏）是**跨房**聚合，与具体哪个房间无关：整批落库之后再标一次脏即可
+    if (flushed) this.markAllDirty()
     this.pushRoomsThrottled(true)
     void this.refreshRoomsLight()
   }
@@ -1528,6 +1564,200 @@ export class AnalyzerHub {
     } finally {
       this.summaryPushing = false
       if (this.summaryDirty.size > 0) this.scheduleSummaryPush()
+    }
+  }
+
+  /* --------------------------------------------------- 全局分析（数据大屏） */
+
+  /** 登记：界面正在看全局分析（数据大屏的全局页签）。之后落库会按这个窗口实时推回。 */
+  watchAllAnalysis(minutes: number, range?: { from: number; to: number }): void {
+    this.allWatch = { minutes, range }
+  }
+
+  /** 界面不再看全局分析（切回单房间模式 / 卸载）：停掉它的实时推送 */
+  unwatchAllAnalysis(): void {
+    this.allWatch = null
+    this.allDirty = false
+  }
+
+  /** 有数据落库 → 全局分析该重算（没人在看就不记） */
+  private markAllDirty(): void {
+    if (!this.allWatch) return
+    this.allDirty = true
+    this.scheduleAllPush()
+  }
+
+  /** 安排一次全局推送（已经安排过就不重复安排；正在算就等它结束后自查） */
+  private scheduleAllPush(): void {
+    if (this.allTimer || this.allPushing) return
+    this.allTimer = setTimeout(() => {
+      this.allTimer = null
+      void this.pushAllAnalyses()
+    }, ALL_PUSH_MS)
+  }
+
+  /** 把全局分析按界面登记的窗口重算并推给界面（串行 + 单飞，避免叠几轮跨房聚合） */
+  private async pushAllAnalyses(): Promise<void> {
+    const watch = this.allWatch
+    if (this.allPushing || !this.allDirty || !watch) {
+      this.allDirty = false
+      return
+    }
+    this.allDirty = false
+    // 历史区间（右端早于现在）不会再落进新数据，重算也是同一份，跳过
+    if (watch.range && watch.range.to < Date.now() - SUMMARY_LIVE_GRACE_MS) return
+    this.allPushing = true
+    try {
+      const analysis = await this.allRoomsAnalysis(watch.minutes, watch.range)
+      this.broadcast(ALL_EVENT, { analysis } satisfies AllAnalysisPush)
+    } catch (error) {
+      logger.warn('[douyin-link] 全局分析推送失败:', describe(error))
+    } finally {
+      this.allPushing = false
+      if (this.allDirty) this.scheduleAllPush()
+    }
+  }
+
+  /**
+   * 跨直播间聚合分析（数据大屏的「全局分析」页签的数据源）。
+   *
+   * 口径与 `summary` / `compare` 一致，只是把「所有房间」合起来：
+   * - 全局 KPI / 趋势是各房间窗口聚合的**合计**（趋势按分钟跨房相加、补空并分桶）；
+   * - 全局人数单独用 `activeUsersAll`（按 userId 去重，跨房出现的同一个人只算一次）；
+   * - 两张按人的礼物榜**跨房合并**（同一个人一行）；`perRoom` 是每房间的流水横截面。
+   */
+  async allRoomsAnalysis(windowMinutes = 60, range?: { from: number; to: number }): Promise<AllRoomsAnalysis> {
+    const requested = Math.round(windowMinutes)
+    const all = !range && !(requested > 0)
+    const minutes = all ? 0 : Math.min(Math.max(5, requested), 1440)
+    const toMs = range ? Math.max(1, Math.round(range.to)) : Date.now()
+    const fromMs = range ? Math.max(0, Math.round(range.from)) : all ? 0 : toMs - minutes * 60000
+
+    // 每房间横截面（口径同 compare）+ 活跃分钟；内存态的房间清单补全标题 / 相位 / 声音
+    const aggregates = await store.windowAggregates(fromMs, toMs)
+    const active = await store.activeMinutes(minuteOf(fromMs), minuteOf(toMs))
+    const stores = await this.roomStores()
+    const perRoom: RoomCompareRow[] = []
+    let messages = 0
+    let chat = 0
+    let member = 0
+    let like = 0
+    let social = 0
+    let gift = 0
+    let diamonds = 0
+    for (const state of this.states.values()) {
+      const base = aggregates.get(state.webRid)
+      const stored = stores.get(state.webRid)
+      const row: RoomCompareRow = base ?? {
+        webRid: state.webRid,
+        title: '',
+        anchor: '',
+        status: 'unknown',
+        phase: 'off',
+        audio: false,
+        activeMinutes: 0,
+        windowMinutes: minutes,
+        messages: 0,
+        chat: 0,
+        member: 0,
+        like: 0,
+        social: 0,
+        gift: 0,
+        diamonds: 0,
+        users: 0,
+        perMinute: 0,
+        totalMessages: 0
+      }
+      const merged: RoomCompareRow = {
+        ...row,
+        title: state.info?.title || state.title,
+        anchor: state.info?.anchor || state.anchor,
+        status: state.status,
+        phase: state.phase,
+        audio: this.audioRoom === state.webRid,
+        activeMinutes: active.get(state.webRid) ?? 0,
+        windowMinutes: minutes,
+        perMinute: minutes > 0 ? Math.round((row.messages / minutes) * 10) / 10 : 0,
+        totalMessages: stored?.messages ?? row.messages
+      }
+      perRoom.push(merged)
+      messages += merged.messages
+      chat += merged.chat
+      member += merged.member
+      like += merged.like
+      social += merged.social
+      gift += merged.gift
+      diamonds += merged.diamonds
+    }
+    perRoom.sort((a, b) => b.messages - a.messages)
+
+    /**
+     * 全局趋势：跨房按分钟相加、补齐缺口并分桶（最多 240 个点）。
+     * `all` 模式下起点取库里最早一条的分钟（`databaseStats` 有 15s 缓存，不会每次都查）。
+     */
+    const startMinute = all ? minuteOf((await this.databaseStats()).firstMessageAt || toMs) : minuteOf(fromMs)
+    const endMinute = minuteOf(toMs)
+    const rawSeries = await store.minuteSeriesAll(startMinute, endMinute)
+    const step = Math.max(1, Math.ceil((endMinute - startMinute + 1) / 240))
+    const buckets = new Map<number, (typeof rawSeries)[number]>()
+    for (const row of rawSeries) {
+      const key = startMinute + Math.floor((row.minute - startMinute) / step) * step
+      const bucket = buckets.get(key)
+      if (!bucket) buckets.set(key, { ...row, minute: key })
+      else {
+        bucket.chat += row.chat
+        bucket.member += row.member
+        bucket.likes += row.likes
+        bucket.social += row.social
+        bucket.gift += row.gift
+      }
+    }
+    const series: AllRoomsAnalysis['series'] = []
+    for (let minute = startMinute; minute <= endMinute; minute += step) {
+      const row = buckets.get(minute)
+      series.push({
+        minute: minute * 60000,
+        chat: row?.chat ?? 0,
+        member: row?.member ?? 0,
+        like: row?.likes ?? 0,
+        social: row?.social ?? 0,
+        gift: row?.gift ?? 0
+      })
+    }
+    const firstAt = rawSeries.length > 0 ? rawSeries[0].minute * 60000 : 0
+    const lastAt = rawSeries.length > 0 ? rawSeries[rawSeries.length - 1].minute * 60000 + 59999 : 0
+
+    // 榜单/礼物榜跨房合并（seat 在全局没有意义，恒 0）
+    const sent = (await store.giftRankByPersonAll('sender', fromMs, toMs, 50)).map((row) => ({ ...row, seat: 0 }))
+    const received = (await store.giftRankByPersonAll('recipient', fromMs, toMs, 50)).map((row) => ({
+      ...row,
+      seat: 0
+    }))
+    const gifts = await store.giftBreakdownAll(fromMs, toMs, 40)
+    const users = await store.activeUsersAll(fromMs, toMs)
+    let liveRooms = 0
+    for (const state of this.states.values()) if (state.status === 'live') liveRooms += 1
+
+    return {
+      minutes,
+      windowMinutes: minutes,
+      rooms: this.states.size,
+      liveRooms,
+      messages,
+      chat,
+      member,
+      like,
+      social,
+      gift,
+      diamonds,
+      users,
+      firstAt,
+      lastAt,
+      series,
+      sent,
+      received,
+      gifts,
+      perRoom
     }
   }
 

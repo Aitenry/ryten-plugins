@@ -503,6 +503,51 @@ export interface SummaryPush {
 }
 
 /**
+ * **跨直播间**的聚合分析（「数据大屏模式」的全局分析页签）。
+ *
+ * 与 `RoomSummary`（单房间）相对：这里的所有口径都是**所有直播间合起来**的——
+ * 两张按人的礼物榜把同一个人跨房间的礼物合并成一行（`user_id` / `to_user_id` 分组），
+ * 全局人数按 userId 去重（不重复计跨房出现的同一个人），`perRoom` 给出每房间的流水横截面。
+ */
+export interface AllRoomsAnalysis {
+  /** 有效的统计窗口（分钟；0 = 全部） */
+  minutes: number
+  /** 实际跨度（分钟；用于平均速率的分母） */
+  windowMinutes: number
+  /** 房间总数 / 在播数 */
+  rooms: number
+  liveRooms: number
+  messages: number
+  chat: number
+  member: number
+  like: number
+  social: number
+  /** 礼物件数 */
+  gift: number
+  /** 礼物抖币总额 */
+  diamonds: number
+  /** 全局活跃用户（按 userId 去重，跨房出现的同一个人只算一次） */
+  users: number
+  firstAt: number
+  lastAt: number
+  /** 全局分钟趋势（跨房合计，主进程补齐缺口并分桶） */
+  series: Array<{ minute: number; chat: number; member: number; like: number; social: number; gift: number }>
+  /** 总送礼物榜（跨房按人合并；`seat` 恒 0） */
+  sent: GiftRankRow[]
+  /** 总收礼物榜（跨房按人合并；`seat` 恒 0） */
+  received: GiftRankRow[]
+  /** 礼物种类榜（跨房按礼物名聚合） */
+  gifts: GiftBreakdownRow[]
+  /** 每个直播间的流水横截面（口径同对比页签） */
+  perRoom: RoomCompareRow[]
+}
+
+/** 主进程推送的全局分析快照（数据大屏的实时更新；形状同 `SummaryPush`） */
+export interface AllAnalysisPush {
+  analysis: AllRoomsAnalysis
+}
+
+/**
  * 礼物榜（收礼 / 送礼）的一行：**一个人**在窗口内的礼物合计。
  *
  * 与 `GiftBreakdownRow`（按礼物名聚合）互补：那个回答「送了什么」，这个回答「谁收/谁送、值多少」，

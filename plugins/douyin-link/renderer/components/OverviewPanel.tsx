@@ -311,7 +311,7 @@ type TrendKey = (typeof TREND_KEYS)[number]
  * - 悬停到某根柱子上：柱子上打一条竖线、那一根提亮，旁边弹出**结构化面板**
  *   （标题行 = 这段时间 + 合计，发丝线，下面按系列左右对齐列数字）。
  */
-function TrendChart(props: {
+export function TrendChart(props: {
   series: RoomSummary['series']
   size: { width: number; height: number }
   palette: PluginPalette
@@ -522,7 +522,7 @@ function KindBars(props: {
  * 两个口径的差别只有三点：收礼榜的行带麦位号（只列麦上的人）、空态文案、点开的历史方向。
  * 抖币拿不到（官方没给价）的行显示「价值未知」，不写成 0。
  */
-function GiftRankBoard(props: {
+export function GiftRankBoard(props: {
   rows: GiftRankRow[]
   direction: 'sent' | 'received'
   t: Translate

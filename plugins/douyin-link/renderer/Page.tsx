@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Modal, Tag } from 'antd'
+import { Button, Modal, Segmented, Tag } from 'antd'
 import { RiDeleteBin6Line, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
@@ -16,6 +16,7 @@ import type {
 import { isAnonymousId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { ComparePanel } from './components/ComparePanel'
+import { AllRoomsPanel } from './components/AllRoomsPanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
 import { OverviewPanel } from './components/OverviewPanel'
 import { PresencePanel } from './components/PresencePanel'
@@ -36,10 +37,17 @@ import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
 import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
-import { duration, formatNumber, stamp } from './components/OverviewPanel'
+import { duration, formatNumber, stamp, WINDOWS, windowLabel } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
-type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'compare'
+type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'compare' | 'all'
+/** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合 + 检索 / 对比） */
+type ViewMode = 'room' | 'dashboard'
+/** 各模式下合法的页签（切模式时用它把停在别处的 tab 收回来） */
+const ROOM_TABS: TabKey[] = ['overview', 'live', 'presence', 'users']
+const DASHBOARD_TABS: TabKey[] = ['all', 'search', 'compare']
+const DEFAULT_ROOM_TAB: TabKey = 'overview'
+const DEFAULT_DASHBOARD_TAB: TabKey = 'all'
 
 /**
  * 实时列表里一次往库里翻多少条 / 内存里最多挂多少条。
@@ -93,6 +101,8 @@ export default function Page(): React.JSX.Element {
   const [usersByRoom, setUsersByRoom] = useState<Map<string, Map<string, UserProfile>>>(() => new Map())
   const [usersReloadKey, setUsersReloadKey] = useState(0)
   const [tab, setTab] = useState<TabKey>('overview')
+  /** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合）；切换按钮在左栏「全部停止」旁 */
+  const [mode, setMode] = useState<ViewMode>('room')
   const [minutes, setMinutes] = useState(60)
   const [busy, setBusy] = useState(false)
   const [openUser, setOpenUser] = useState('')
@@ -435,6 +445,26 @@ export default function Page(): React.JSX.Element {
   )
 
   /**
+   * 切模式：把页签收回到该模式合法的那个。
+   * `tab` 是单值，而「检索 / 对比」只在数据大屏里、单房间页签只在直播间模式里——
+   * 不收回来会停在一个当前模式没有的页签上（空白）。
+   */
+  const changeMode = useCallback((next: ViewMode): void => {
+    setMode(next)
+    const valid = next === 'room' ? ROOM_TABS : DASHBOARD_TABS
+    setTab((current) => (valid.includes(current) ? current : next === 'room' ? DEFAULT_ROOM_TAB : DEFAULT_DASHBOARD_TAB))
+  }, [])
+
+  /** 数据大屏里点一行/一个房间 → 切到该直播间并回到直播间模式（看它的详情） */
+  const openRoom = useCallback(
+    (webRid: string): void => {
+      selectRoom(webRid)
+      changeMode('room')
+    },
+    [changeMode, selectRoom]
+  )
+
+  /**
    * 选中的房间**列表是空的就补一段库里的历史**（用户 2026-10-08：「弹幕也一样」——
    * 下播 / 关掉监控 / 重启应用之后内存里那一段没了，实时页就整片空白，而数据都在库里）。
    *
@@ -570,7 +600,7 @@ export default function Page(): React.JSX.Element {
    * 页签清单：**胶囊条与页签容器共用同一份**（`items` 与 antd 的 `items` 同形）。
    * 胶囊条住在房间头的统计行右端（见 RoomHeader 的 `tabBar`），容器占满剩下的高度。
    */
-  const tabItems: PillTabItem[] = [
+  const roomTabItems: PillTabItem[] = [
     {
       key: 'overview',
       label: t('douyin-link.page.tabOverview'),
@@ -662,13 +692,35 @@ export default function Page(): React.JSX.Element {
           <UsersPanel room={active} reloadKey={usersReloadKey} onOpenUser={setOpenUser} />
         </Pane>
       )
+    }
+  ]
+
+  /**
+   * 数据大屏的页签：全局分析（跨房聚合）/ 检索 / 对比。
+   *
+   * 「检索」「对比」从单房间视图**抽离**到这里——它们本来就是跨房间的，
+   * 不依赖「分析中的房间」；放在数据大屏里，单房间视图只剩跟这个房间强相关的页签。
+   */
+  const dashboardTabItems: PillTabItem[] = [
+    {
+      key: 'all',
+      label: t('douyin-link.page.tabAll'),
+      children: (
+        <Pane>
+          <AllRoomsPanel
+            minutes={minutes}
+            onSelectRoom={openRoom}
+            onOpenGifts={(target) => setOpenGifts(target)}
+          />
+        </Pane>
+      )
     },
     {
       key: 'search',
       label: t('douyin-link.page.tabSearch'),
       children: (
         <Pane>
-          <SearchPanel rooms={rooms} activeRoom={activeRoom} />
+          <SearchPanel rooms={rooms} activeRoom="" />
         </Pane>
       )
     },
@@ -677,16 +729,20 @@ export default function Page(): React.JSX.Element {
       label: t('douyin-link.page.tabCompare'),
       children: (
         <Pane>
-          <ComparePanel
-            minutes={minutes}
-            onMinutes={setMinutes}
-            activeRoom={activeRoom}
-            onSelect={selectRoom}
-          />
+          <ComparePanel minutes={minutes} onMinutes={setMinutes} activeRoom={activeRoom} onSelect={openRoom} />
         </Pane>
       )
     }
   ]
+
+  /** 当前模式下的页签（胶囊条与容器共用） */
+  const activeTabItems = mode === 'room' ? roomTabItems : dashboardTabItems
+
+  /**
+   * 数据大屏的礼物历史范围：**跟随全局窗口**（最近 `minutes` 分钟；「全部」= 不限范围）。
+   * 不能复用 `effectiveRange`——它绑的是「分析中的房间」那一天，跟跨房榜单的窗口对不上。
+   */
+  const dashboardGiftRange = minutes > 0 ? { from: Date.now() - minutes * 60000, to: Date.now() } : null
 
   return (
     /* 页头整条去掉了：标题与「数据库：… / 声音状态」都由宿主界面和下面的面板给出了，
@@ -698,6 +754,8 @@ export default function Page(): React.JSX.Element {
             rooms={rooms}
             activeRoom={activeRoom}
             busy={busy}
+            mode={mode}
+            onMode={changeMode}
             onAdd={(input) => void addRoom(input)}
             onSelect={selectRoom}
             onToggleMonitor={toggleMonitor}
@@ -707,39 +765,67 @@ export default function Page(): React.JSX.Element {
             onClearMessages={clearRoomMessages}
           />
           {addFailure ? <FailureLine failure={addFailure} /> : null}
-          {activeRoom ? (
+          {/* 「每日记录」是某个房间的当天记录：只在直播间模式、且选中了房间时出现 */}
+          {mode === 'room' && activeRoom ? (
             <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
           ) : null}
         </div>
 
         <div className="col-span-9 flex min-h-0 flex-col gap-3">
-          <Panel
-            className="shrink-0"
-            title={active ? active.title || active.webRid : t('douyin-link.page.noActive')}
-            extra={
-              <div className="flex min-w-0 items-center gap-2">
-                {sessionLine ? (
-                  /* 数字长了就截断（原生 title 兜住全文），不能把房间名挤没了 */
-                  <span
-                    className="truncate text-xs font-normal opacity-60"
-                    style={{ maxWidth: 'min(560px, 52vw)' }}
-                    title={sessionLine}
-                  >
-                    {sessionLine}
-                  </span>
-                ) : null}
-                {phaseTag}
+          {mode === 'room' ? (
+            <Panel
+              className="shrink-0"
+              title={active ? active.title || active.webRid : t('douyin-link.page.noActive')}
+              extra={
+                <div className="flex min-w-0 items-center gap-2">
+                  {sessionLine ? (
+                    /* 数字长了就截断（原生 title 兜住全文），不能把房间名挤没了 */
+                    <span
+                      className="truncate text-xs font-normal opacity-60"
+                      style={{ maxWidth: 'min(560px, 52vw)' }}
+                      title={sessionLine}
+                    >
+                      {sessionLine}
+                    </span>
+                  ) : null}
+                  {phaseTag}
+                </div>
+              }
+            >
+              <RoomHeader
+                room={active}
+                t={t}
+                tabBar={<PillTabBar items={activeTabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />}
+              />
+            </Panel>
+          ) : (
+            /* 数据大屏头部：标题 + 全局窗口（跟随页面的 minutes）+ 胶囊页签条 */
+            <Panel
+              className="shrink-0"
+              title={t('douyin-link.page.dashboardTitle')}
+              extra={
+                <Segmented
+                  size="small"
+                  value={minutes}
+                  onChange={(value) => setMinutes(Number(value))}
+                  options={WINDOWS.map((window) => ({ value: window, label: windowLabel(t, window) }))}
+                />
+              }
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="text-xs opacity-60">{t('douyin-link.page.dashboardHint')}</span>
+                <div className="ml-auto flex min-w-0 shrink-0 items-center">
+                  <PillTabBar
+                    items={activeTabItems}
+                    activeKey={tab}
+                    onChange={(key) => setTab(key as TabKey)}
+                  />
+                </div>
               </div>
-            }
-          >
-            <RoomHeader
-              room={active}
-              t={t}
-              tabBar={<PillTabBar items={tabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />}
-            />
-          </Panel>
+            </Panel>
+          )}
 
-          <PillTabsBody activeKey={tab} onChange={(key) => setTab(key as TabKey)} items={tabItems} />
+          <PillTabsBody activeKey={tab} onChange={(key) => setTab(key as TabKey)} items={activeTabItems} />
         </div>
       </div>
 
@@ -752,14 +838,15 @@ export default function Page(): React.JSX.Element {
         />
       ) : null}
 
-      {/* 礼物榜点开的历史（他送的 / 他收到的）：与榜单同一段范围——今天就是今天，不翻旧账 */}
-      {openGifts && activeRoom ? (
+      {/* 礼物榜点开的历史（他送的 / 他收到的）：与榜单同一段范围——今天就是今天，不翻旧账。
+          数据大屏里的榜单是跨房间的，所以 webRid 传空串（走跨房查询），也不再要求选中房间。 */}
+      {openGifts ? (
         <GiftHistoryModal
-          webRid={activeRoom}
+          webRid={mode === 'room' ? activeRoom : ''}
           userId={openGifts.userId}
           name={openGifts.name}
           direction={openGifts.direction}
-          range={effectiveRange}
+          range={mode === 'room' ? effectiveRange : dashboardGiftRange}
           onClose={() => setOpenGifts(null)}
         />
       ) : null}
