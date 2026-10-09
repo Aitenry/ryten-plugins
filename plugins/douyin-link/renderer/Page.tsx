@@ -13,7 +13,6 @@ import type {
   RoomRuntime,
   UserProfile
 } from '../shared/types'
-import { isAnonymousName } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { ComparePanel } from './components/ComparePanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
@@ -862,12 +861,12 @@ function UserProfileModal(props: {
   const [revealing, setRevealing] = useState(false)
 
   /**
-   * 能不能「查看神秘人信息」：这个 id 是数字串，且我们**没有一个真名**可用——
-   * 要么档案里的昵称是占位串（匿名），要么干脆没有档案（纯匿名的送礼人往往只留了一个 id）。
-   * 有真名的人不显示这个按钮（没必要，也不该把普通人的资料也去查一遍）。
+   * 能不能「查看真实资料」：只要这个 id 是数字串就放出来——**不再猜谁「算匿名」**。
+   * 以前靠昵称是不是占位串（「神秘人」/「匿名」）来判，结果像 `dou7684317` 这种平台生成的
+   * 马甲名、或某些匿名用户漏判，按钮就被藏了。用户 2026-10-09：「我需要匿名用户也可以查询其信息」——
+   * 那就一律给按钮：点不点、查不查由用户自己决定，查不到（`notFound`）界面照实说。
    */
-  const revealable =
-    !loading && /^\d{4,}$/.test(props.userId) && (!profile?.nickname || isAnonymousName(profile?.nickname))
+  const revealable = !loading && /^\d{4,}$/.test(props.userId)
 
   useEffect(() => {
     let alive = true

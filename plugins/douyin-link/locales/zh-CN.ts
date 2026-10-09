@@ -267,11 +267,11 @@ export const DouyinLinkZhCN = {
       historyAny: '全部互动',
       historyEmpty: '库里还没有这个人的消息（先监控一会儿，或把范围切到「全部房间」）',
       historyRefresh: '重新查一次',
-      /* 神秘人还原（用户档案弹窗里，匿名的人才会出现） */
-      revealSecret: '这个人开启了匿名（神秘人），真实身份被抖音藏起来了',
-      revealButton: '查看神秘人信息',
+      /* 真实资料还原（用户档案弹窗里，对所有有 id 的人都出现） */
+      revealSecret: '按用户 id 查一下这个人在抖音上的真实资料',
+      revealButton: '查看真实资料',
       revealLoading: '正在查询…',
-      revealTitle: '神秘人真实信息',
+      revealTitle: '抖音真实资料',
       revealFollower: '粉丝',
       revealFollowing: '关注',
       revealWorks: '作品',

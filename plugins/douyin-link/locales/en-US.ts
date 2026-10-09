@@ -257,11 +257,11 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       historyAny: 'All kinds',
       historyEmpty: 'No stored messages from this user yet (monitor for a while, or switch the scope to "All rooms")',
       historyRefresh: 'Query again',
-      /* Mystery-man reveal (only shows up for anonymous users in the profile dialog) */
-      revealSecret: 'This user is anonymous (mystery man); Douyin is hiding their real identity',
-      revealButton: 'Reveal mystery man',
+      /* Real-profile reveal (shows up for every user with an id in the profile dialog) */
+      revealSecret: 'Look up this user’s real Douyin profile by id',
+      revealButton: 'Reveal real profile',
       revealLoading: 'Looking up…',
-      revealTitle: 'Real identity',
+      revealTitle: 'Real Douyin profile',
       revealFollower: 'Followers',
       revealFollowing: 'Following',
       revealWorks: 'Videos',
