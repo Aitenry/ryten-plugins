@@ -259,6 +259,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       historyRefresh: 'Query again',
       /* Real-profile reveal (shows up for every user with an id in the profile dialog) */
       revealSecret: 'Look up this user’s real Douyin profile by id',
+      revealAnonymousOnly:
+        'Douyin only sends a placeholder id (111111) for this anonymous user — the real account is not recoverable from the data',
       revealButton: 'Reveal real profile',
       revealLoading: 'Looking up…',
       revealTitle: 'Real Douyin profile',

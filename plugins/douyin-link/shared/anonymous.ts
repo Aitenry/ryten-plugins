@@ -14,6 +14,20 @@
 /** 出现这些词（忽略空格与大小写）就当作匿名占位名 */
 const ANON_NAME_HINTS = ['匿名', 'anonymous', '神秘人'] as const
 
+/**
+ * 抖音给「隐藏身份」用户发的**共用占位 id**（2026-10-09 批量抓帧实测，几十条无一例外）。
+ *
+ * 这种用户帧里 `id` / 抖音号 / `secUid` **全是它**（或为空）：真实账号标识被抖音抹掉了，
+ * 拿它去查资料只会 `notFound`。它和「昵称占位」（`匿名`/`神秘人`）是两回事——
+ * 但都指向同一个结论：**这条身份在数据里不可还原**。
+ */
+export const ANONYMOUS_ID = '111111'
+
+/** 这个 id 是不是「匿名占位」（拿它查资料一定查不到，别浪费一次请求） */
+export function isAnonymousId(id: string | null | undefined): boolean {
+  return String(id ?? '').trim() === ANONYMOUS_ID
+}
+
 /** 去掉所有空白再比：`☞              匿名  -` 这类带一堆空格的名要能认出来 */
 export function isAnonymousName(name: string | null | undefined): boolean {
   const text = String(name ?? '')

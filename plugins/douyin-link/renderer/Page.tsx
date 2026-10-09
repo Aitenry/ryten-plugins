@@ -13,6 +13,7 @@ import type {
   RoomRuntime,
   UserProfile
 } from '../shared/types'
+import { isAnonymousId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { ComparePanel } from './components/ComparePanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
@@ -861,12 +862,14 @@ function UserProfileModal(props: {
   const [revealing, setRevealing] = useState(false)
 
   /**
-   * 能不能「查看真实资料」：只要这个 id 是数字串就放出来——**不再猜谁「算匿名」**。
-   * 以前靠昵称是不是占位串（「神秘人」/「匿名」）来判，结果像 `dou7684317` 这种平台生成的
-   * 马甲名、或某些匿名用户漏判，按钮就被藏了。用户 2026-10-09：「我需要匿名用户也可以查询其信息」——
-   * 那就一律给按钮：点不点、查不查由用户自己决定，查不到（`notFound`）界面照实说。
+   * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
+   * 唯一的例外是抖音的匿名**占位 id `111111`**：帧里的 id/抖音号/secUid 全是它，真实账号标识被抹掉，
+   * 拿它查一定 `notFound`（2026-10-09 批量抓帧实测），所以不给按钮、改成一句如实说明。
    */
-  const revealable = !loading && /^\d{4,}$/.test(props.userId)
+  const revealable =
+    !loading && /^\d{4,}$/.test(props.userId) && !isAnonymousId(props.userId)
+  /** 这条档案就是那个共用占位 id：真实身份在数据里不可还原 */
+  const anonymousOnly = !loading && isAnonymousId(props.userId)
 
   useEffect(() => {
     let alive = true
@@ -1019,6 +1022,13 @@ function UserProfileModal(props: {
                 ) : null}
               </>
             )}
+          </div>
+        ) : anonymousOnly ? (
+          /* 抖音的匿名占位 id（111111）：帧里的 id/抖音号/secUid 全被抹平，没有可查的账号标识——
+             与其给一个点了必然失败的按钮，不如把话说明白（本插件的纪律：宁可没有，不给错的）。 */
+          <div className="flex items-start gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
+            <RiUserSearchLine size={14} style={{ color: palette.warn, flexShrink: 0, marginTop: 1 }} />
+            <span className="min-w-0 flex-1 text-xs opacity-70">{t('douyin-link.users.revealAnonymousOnly')}</span>
           </div>
         ) : null}
 

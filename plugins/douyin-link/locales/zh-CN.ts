@@ -269,6 +269,7 @@ export const DouyinLinkZhCN = {
       historyRefresh: '重新查一次',
       /* 真实资料还原（用户档案弹窗里，对所有有 id 的人都出现） */
       revealSecret: '按用户 id 查一下这个人在抖音上的真实资料',
+      revealAnonymousOnly: '抖音对这个匿名用户只发了占位 id（111111），真实账号标识被抹掉了，数据里查不到这个人',
       revealButton: '查看真实资料',
       revealLoading: '正在查询…',
       revealTitle: '抖音真实资料',
