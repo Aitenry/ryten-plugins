@@ -1,4 +1,4 @@
-﻿import type { DouyinLinkZhCN } from './zh-CN'
+import type { DouyinLinkZhCN } from './zh-CN'
 
 /**
  * 抖音直播分析器 的英文词条（**逐键对齐中文**：少一个键，切到英文就会显示原始键名）。
@@ -97,8 +97,6 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       windowAll: 'All',
       rangeSpan: 'span {{duration}}',
       rangeWholeDay: 'Whole day',
-      revealAnonymous: 'Unmask anonymous users',
-      revealDone: 'Restored {{revealed}} anonymous names, {{remaining}} still unknown',
       rangeEmpty: 'No data yet (start monitoring)',
       dayRecords: 'Daily records ({{count}} days)',
       dayRecordsEmpty: 'Nothing recorded for this room yet',
@@ -258,7 +256,23 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       historyChat: 'Chat only',
       historyAny: 'All kinds',
       historyEmpty: 'No stored messages from this user yet (monitor for a while, or switch the scope to "All rooms")',
-      historyRefresh: 'Query again'
+      historyRefresh: 'Query again',
+      /* Mystery-man reveal (only shows up for anonymous users in the profile dialog) */
+      revealSecret: 'This user is anonymous (mystery man); Douyin is hiding their real identity',
+      revealButton: 'Reveal mystery man',
+      revealLoading: 'Looking up…',
+      revealTitle: 'Real identity',
+      revealFollower: 'Followers',
+      revealFollowing: 'Following',
+      revealWorks: 'Videos',
+      revealLikes: 'Likes',
+      revealRegion: 'Region',
+      revealVerified: 'Verified',
+      revealFailed: "Couldn't find this user's profile",
+      revealErrorBadInput: 'Invalid user id, cannot look it up',
+      revealErrorNetwork: 'Lookup failed (network blocked or no response)',
+      revealErrorNotFound: 'Douyin has no profile for this account (may be deactivated)',
+      revealErrorBadResponse: 'Unrecognized response from Douyin'
     },
     failure: {
       title: 'Failure',
@@ -311,6 +325,17 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       retentionHint:
         '0 (default) keeps everything forever and never cleans up. Set N days to delete the message stream and minute buckets older than N days; user stats are kept.',
       cleanupNow: 'Clean up now',
+      importExportLabel: 'Data backup (import / export)',
+      importExportHint:
+        'Export packs every room\u2019s records into one ZIP \u2014 each JSON inside is one room\u2019s live data for one day (message stream, minute buckets, that day\u2019s sessions). Import reads a ZIP back and merges with **de-duplication**: re-importing the same archive adds nothing new.',
+      exportButton: 'Export data',
+      importButton: 'Import data',
+      exportDone: 'Exported {{rooms}} rooms and {{days}} days of records ({{messages}} messages)',
+      importDone:
+        'Import finished: {{rooms}} new rooms, {{messages}} messages added ({{skipped}} duplicates skipped, {{users}} user records)',
+      importBadFormat: 'That archive is not a backup exported by this plugin',
+      actionCancelled: 'Cancelled',
+      actionFailed: 'Failed: {{detail}}',
       storageHint:
         'Database: {{rooms}} rooms · {{messages}} messages · {{users}} user records · {{minutes}} minute buckets · {{sessions}} monitor sessions. Settings live under userData/plugin-state; the tables belong to this plugin.'
     }

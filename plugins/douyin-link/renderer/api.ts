@@ -6,12 +6,15 @@ import type {
   DanmakuKind,
   DayRecordRow,
   DbStats,
+  ExportResult,
   FailureInfo,
   GiftBreakdownRow,
+  ImportResult,
   LiveSettings,
   MessagePage,
   MessageQuery,
   MonitorSession,
+  MysteryReveal,
   PresenceRow,
   PresenceSnapshot,
   RoomCompareRow,
@@ -19,6 +22,7 @@ import type {
   RoomSummary,
   RoomTick,
   StoredMessage,
+  SummaryPush,
   UserBatch,
   UserProfile,
   UserRankRow
@@ -225,6 +229,37 @@ export const api = {
   recentClear: async (webRid: string): Promise<boolean> => (await invoke(`${PREFIX}recent-clear`, webRid)) === true,
   usersClear: async (webRid = ''): Promise<boolean> => (await invoke(`${PREFIX}users-clear`, webRid)) === true,
 
+  /* ------------------------------------------------------- 导入 / 导出 */
+  /**
+   * 导出全部记录为 ZIP（每个 JSON = 某房间某一天的直播数据）。
+   * 主进程弹系统保存框；取消或失败都回一个 `ok: false` 的结果，界面按 message 提示。
+   */
+  exportArchive: async (): Promise<ExportResult> => {
+    const raw = await invoke(`${PREFIX}export-archive`)
+    const record = isRecord(raw) ? raw : {}
+    return {
+      ok: record.ok === true,
+      path: asText(record.path),
+      rooms: asCount(record.rooms),
+      days: asCount(record.days),
+      messages: asCount(record.messages),
+      message: typeof record.message === 'string' ? record.message : undefined
+    }
+  },
+  /** 导入一个 ZIP（去重合并），主进程弹系统打开框；导入后房间清单会自动刷新 */
+  importArchive: async (): Promise<ImportResult> => {
+    const raw = await invoke(`${PREFIX}import-archive`)
+    const record = isRecord(raw) ? raw : {}
+    return {
+      ok: record.ok === true,
+      rooms: asCount(record.rooms),
+      messages: asCount(record.messages),
+      skipped: asCount(record.skipped),
+      users: asCount(record.users),
+      message: typeof record.message === 'string' ? record.message : undefined
+    }
+  },
+
   /* ------------------------------------------------------- 分析查询 */
   messagesQuery: async (query: MessageQuery): Promise<MessagePage> =>
     normalizeMessagePage(await invoke(`${PREFIX}messages-query`, query)),
@@ -265,13 +300,12 @@ export const api = {
   dayRecords: async (webRid: string, limit = 90): Promise<DayRecordRow[]> =>
     asList<DayRecordRow>(await invoke(`${PREFIX}day-records`, webRid, limit)),
   /**
-   * 脱马甲：把匿名/空名的行还原成这个 id 的真名（用户 2026-10-08：
-   * 「可以脱神秘人的衣服，可以知道这个人是谁」）。返回还原了几条、还剩几条认不出。
+   * 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）。
+   * 主进程没回复（桥没挂上）时回 `null`，界面按失败渲染。
    */
-  revealAnonymous: async (webRid = ''): Promise<{ revealed: number; remaining: number }> => {
-    const raw = await invoke(`${PREFIX}reveal-anonymous`, webRid)
-    if (!isRecord(raw)) return { revealed: 0, remaining: 0 }
-    return { revealed: asCount(raw.revealed), remaining: asCount(raw.remaining) }
+  revealMystery: async (userId: string): Promise<MysteryReveal | null> => {
+    const raw = await invoke(`${PREFIX}reveal-mystery`, userId)
+    return isRecord(raw) ? (raw as unknown as MysteryReveal) : null
   },
   roomsCompare: async (minutes = 60): Promise<RoomCompareRow[]> =>
     asList<RoomCompareRow>(await invoke(`${PREFIX}rooms-compare`, minutes)),
@@ -337,6 +371,13 @@ export const api = {
     asText(await invoke(`${PREFIX}user-avatar`, webRid, userId)),
   sessionsList: async (webRid = '', limit = 20): Promise<MonitorSession[]> =>
     asList<MonitorSession>(await invoke(`${PREFIX}sessions-list`, webRid, limit)),
+  /**
+   * 停止某个房间概览的实时推送（切房间 / 卸载时调）。
+   * 登记是 `roomSummary` 顺带做的（见主进程 ipc），这里只负责撤销——发出去就不管回话。
+   */
+  summaryUnwatch: (webRid: string): void => {
+    if (webRid) void invoke(`${PREFIX}summary-unwatch`, webRid)
+  },
   dbStats: async (): Promise<DbStats> => normalizeDbStats(await invoke(`${PREFIX}db-stats`)),
   /** 立刻按保留期清一次旧数据（设置页的「立即清理」），返回删掉的条数 */
   cleanup: async (): Promise<number> => asCount(await invoke(`${PREFIX}cleanup`)),
@@ -365,6 +406,17 @@ export const api = {
     window.api.plugin.on(`${PREFIX}ticks`, (payload) => {
       const tick = payload as RoomTick
       if (tick && typeof tick.webRid === 'string' && tick.counters) callback(tick)
+    }),
+  /**
+   * 概览实时推送（主进程落库后按界面请求的窗口重算）。
+   *
+   * 回调里拿到的 `summary` 还是主进程的原始形状，界面用 `normalizeRoomSummary` 收口
+   * （与 `roomSummary` 同一条归一化路径），缺字段也不会白屏。
+   */
+  onSummary: (callback: (push: SummaryPush) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}summary`, (payload) => {
+      const push = payload as SummaryPush
+      if (push && typeof push.webRid === 'string' && push.summary) callback(push)
     }),
   onUsers: (callback: (batch: UserBatch) => void): (() => void) =>
     window.api.plugin.on(`${PREFIX}users`, (payload) => {

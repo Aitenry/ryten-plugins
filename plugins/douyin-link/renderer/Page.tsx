@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Modal, Tag } from 'antd'
-import { RiDeleteBin6Line, RiTeamLine } from '@remixicon/react'
+import { RiDeleteBin6Line, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
@@ -8,9 +8,12 @@ import type {
   DayRecordRow,
   FailureInfo,
   LiveSettings,
+  MysteryProfile,
+  MysteryReveal,
   RoomRuntime,
   UserProfile
 } from '../shared/types'
+import { isAnonymousName } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { ComparePanel } from './components/ComparePanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
@@ -118,9 +121,6 @@ export default function Page(): React.JSX.Element {
   )
   /** 「添加直播间」失败时的提示（代码在主进程，文案在这里翻） */
   const [addFailure, setAddFailure] = useState<FailureInfo | null>(null)
-  /** 脱马甲的结果（左栏一行灰字，8 秒后自己消失） */
-  const [revealHint, setRevealHint] = useState('')
-  const revealTimerRef = useRef<number | null>(null)
 
   const settingsRef = useRef<LiveSettings | null>(null)
   /** 当前页签（事件回调里要用到，但不想因为切页签重订阅事件通道） */
@@ -474,36 +474,6 @@ export default function Page(): React.JSX.Element {
     void api.roomMonitor(webRid, on)
   }, [])
 
-  /**
-   * 脱马甲：把匿名/空名的行还原成这个 id 的真名（用户 2026-10-08：
-   * 「可以脱神秘人的衣服，可以知道这个人是谁」）。跑完在左栏给一句结果（还原几条、还剩几条认不出），
-   * 并把房间/用户/概览都刷一遍——名字变了，榜单与列表都该跟着变。
-   *
-   * 反馈用**页面里的一行灰字**而不是 antd 的静态 `message`：宿主里那套静态函数不一定挂得上
-   * （实测点了菜单什么都没弹），自己渲染一行最稳，也符合「一行居中灰字」的克制口径。
-   */
-  const revealAnonymous = useCallback(
-    async (webRid: string): Promise<void> => {
-      try {
-        const result = await api.revealAnonymous(webRid)
-        setRevealHint(
-          t('douyin-link.page.revealDone', {
-            revealed: formatNumber(result.revealed),
-            remaining: formatNumber(result.remaining)
-          })
-        )
-        if (revealTimerRef.current) window.clearTimeout(revealTimerRef.current)
-        revealTimerRef.current = window.setTimeout(() => setRevealHint(''), 8000)
-        await reload()
-        if (webRid) await loadRoomData(webRid)
-        setUsersReloadKey((previous) => previous + 1)
-      } catch (error) {
-        setRevealHint(String(error))
-      }
-    },
-    [reload, loadRoomData, t]
-  )
-
   const monitorAll = useCallback((on: boolean): void => {
     setBusy(true)
     void api.roomMonitorAll(on).finally(() => setBusy(false))
@@ -713,14 +683,10 @@ export default function Page(): React.JSX.Element {
             onToggleMonitor={toggleMonitor}
             onMonitorAll={monitorAll}
             onRefresh={refreshRoom}
-            onRevealAnonymous={() => void revealAnonymous(activeRoom)}
             onRemove={removeRoom}
             onClearMessages={clearRoomMessages}
           />
           {addFailure ? <FailureLine failure={addFailure} /> : null}
-          {revealHint ? (
-            <span className="shrink-0 px-1 text-[10px] opacity-60">{revealHint}</span>
-          ) : null}
           {activeRoom ? (
             <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
           ) : null}
@@ -871,10 +837,22 @@ function UserProfileModal(props: {
   const palette = usePluginPalette()
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(false)
+  /** 「查看神秘人信息」的结果（null = 还没查过；点了按钮才查） */
+  const [reveal, setReveal] = useState<MysteryReveal | null>(null)
+  const [revealing, setRevealing] = useState(false)
+
+  /**
+   * 能不能「查看神秘人信息」：这个 id 是数字串，且我们**没有一个真名**可用——
+   * 要么档案里的昵称是占位串（匿名），要么干脆没有档案（纯匿名的送礼人往往只留了一个 id）。
+   * 有真名的人不显示这个按钮（没必要，也不该把普通人的资料也去查一遍）。
+   */
+  const revealable =
+    !loading && /^\d{4,}$/.test(props.userId) && (!profile?.nickname || isAnonymousName(profile?.nickname))
 
   useEffect(() => {
     let alive = true
     setLoading(true)
+    setReveal(null)
     void api
       .userGet(props.webRid, props.userId)
       .then((next) => {
@@ -888,6 +866,15 @@ function UserProfileModal(props: {
       alive = false
     }
   }, [props.webRid, props.userId])
+
+  const doReveal = useCallback((): void => {
+    setRevealing(true)
+    void api
+      .revealMystery(props.userId)
+      .then((result) => setReveal(result ?? { ok: false, code: 'network' }))
+      .catch(() => setReveal({ ok: false, code: 'network' }))
+      .finally(() => setRevealing(false))
+  }, [props.userId])
 
   return (
     <Modal
@@ -991,6 +978,31 @@ function UserProfileModal(props: {
           </>
         )}
 
+        {/* 神秘人还原：**不挂在档案分支里** —— 纯匿名的送礼人往往连档案都没有，只剩一个 id，
+            这种时候也要能查看（用户 2026-10-09：「如果是神秘人，增加一个按钮可以查看其信息」） */}
+        {revealable ? (
+          <div className="flex flex-col gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
+            {reveal && reveal.ok ? (
+              <RevealedIdentity profile={reveal.profile} palette={palette} t={t} />
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <RiUserSearchLine size={14} style={{ color: palette.warn, flexShrink: 0 }} />
+                  <span className="min-w-0 flex-1 text-xs opacity-80">{t('douyin-link.users.revealSecret')}</span>
+                  <Button size="small" type="primary" loading={revealing} onClick={doReveal}>
+                    {revealing ? t('douyin-link.users.revealLoading') : t('douyin-link.users.revealButton')}
+                  </Button>
+                </div>
+                {reveal && !reveal.ok ? (
+                  <span className="text-xs" style={{ color: palette.down }}>
+                    {revealErrorText(t, reveal.code)}
+                  </span>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : null}
+
         {/* 这个人说过什么：**不挂在档案分支里** —— 用户记录被清掉后档案查不到，但消息流水还在 */}
         <UserHistory webRid={props.webRid} userId={props.userId} rooms={props.rooms} />
       </div>
@@ -1031,6 +1043,76 @@ function StatBlock(props: {
       {props.hint ? <span className="truncate text-[10px] opacity-50">{props.hint}</span> : null}
     </div>
   )
+}
+
+/**
+ * 「神秘人真实信息」卡片：抖音那边**按用户 id 查回来**的账号资料（见 `main/douyin/mystery.ts`）。
+ *
+ * 与上面那一段（我们自己观察到的档案）刻意分开：这里的昵称、粉丝数、地区都是账号本人的，
+ * 跟直播间里的匿名马甲无关——这正是「脱马甲」要看的东西。头像由主进程下载成 data URL。
+ */
+function RevealedIdentity(props: {
+  profile: MysteryProfile
+  palette: PluginPalette
+  t: Translate
+}): React.JSX.Element {
+  const { profile, palette, t } = props
+  const letter = (profile.nickname || '?').trim().slice(0, 1).toUpperCase()
+  return (
+    <div className="flex flex-col gap-2">
+      <span className="text-[10px] opacity-50">{t('douyin-link.users.revealTitle')}</span>
+      <div className="flex items-center gap-2">
+        {profile.avatar ? (
+          <img
+            src={profile.avatar}
+            alt=""
+            width={36}
+            height={36}
+            className="shrink-0 rounded-full"
+            style={{ objectFit: 'cover' }}
+          />
+        ) : (
+          <span
+            className="flex shrink-0 items-center justify-center rounded-full text-[12px]"
+            style={{ width: 36, height: 36, color: palette.surface, backgroundColor: palette.accent }}
+          >
+            {letter}
+          </span>
+        )}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          <span className="min-w-0 truncate text-sm font-semibold">{profile.nickname}</span>
+          {profile.verified ? (
+            <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+              {t('douyin-link.users.revealVerified')} {profile.verified}
+            </Tag>
+          ) : null}
+        </div>
+      </div>
+      <FactLine
+        items={[
+          `${t('douyin-link.users.displayId')} ${profile.displayId || '-'}`,
+          `${t('douyin-link.users.gender')} ${genderText(t, profile.gender)}`,
+          profile.region ? `${t('douyin-link.users.revealRegion')} ${profile.region}` : ''
+        ].filter(Boolean)}
+      />
+      <FactLine
+        items={[
+          `${t('douyin-link.users.revealFollower')} ${formatNumber(profile.follower)}`,
+          `${t('douyin-link.users.revealFollowing')} ${formatNumber(profile.following)}`,
+          `${t('douyin-link.users.revealWorks')} ${formatNumber(profile.awemeCount)}`,
+          `${t('douyin-link.users.revealLikes')} ${formatNumber(profile.totalFavorited)}`
+        ]}
+      />
+      {profile.signature ? <span className="text-xs opacity-70">{profile.signature}</span> : null}
+    </div>
+  )
+}
+
+/** 神秘人还原的失败码 → 文案（翻不到就退回通用失败句） */
+function revealErrorText(t: Translate, code: 'badInput' | 'network' | 'notFound' | 'badResponse'): string {
+  const key = `douyin-link.users.revealError${code[0].toUpperCase()}${code.slice(1)}`
+  const text = t(key)
+  return text.startsWith('douyin-link.') ? t('douyin-link.users.revealFailed') : text
 }
 
 /** 失败原因：**代码在主进程、文案在渲染层**，所以在这里翻（翻不到就退回裸代码 + 明细） */

@@ -20,6 +20,7 @@ import {
   type MessageQuery,
   type MonitorPhase,
   type MonitorSession,
+  type MysteryReveal,
   type PresenceRow,
   type PresenceSnapshot,
   type QualityKey,
@@ -27,6 +28,7 @@ import {
   type RoomRuntime,
   type RoomSummary,
   type RoomTick,
+  type SummaryPush,
   type UserInfo,
   type UserProfile,
   type UserRankRow,
@@ -40,6 +42,7 @@ import { DanmakuCollector } from '../douyin/danmaku'
 import { RoomSocketCapture } from '../douyin/ws-capture'
 import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
 import type { RoomResolveResult } from '../douyin/room'
+import { revealMysteryProfile } from '../douyin/mystery'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
 import { since, withTimeout } from '../util/deadline'
@@ -79,6 +82,14 @@ export const USERS_EVENT = 'plugin:douyin-link:users'
  * 所以单开一条只带数字的通道，页面原地合并即可（不重拉快照）。
  */
 export const TICKS_EVENT = 'plugin:douyin-link:ticks'
+/**
+ * 主进程 → 渲染层：概览快照（KPI / 分钟趋势 / 类型分布 / 榜单 + 会话摘要）。
+ *
+ * 概览里的每一项都是数据库聚合，界面自己轮询只能「每 10 秒看一眼」。这里在**落库之后**
+ * （数据此刻才是真的）按界面请求过的窗口重算一份推过去，页面直接替换 → 概览就是活的。
+ * 没有新数据落库就不推——空闲房间几乎零开销。
+ */
+export const SUMMARY_EVENT = 'plugin:douyin-link:summary'
 
 /** 一个房间在内存里最多留多少条最近弹幕 */
 const RECENT_CAP = 400
@@ -87,6 +98,13 @@ const EMPTY_GIFT_LOG_LIMIT = 20
 /** flush 间隔与「房间列表」推送节流 */
 const FLUSH_INTERVAL_MS = 2000
 const ROOMS_PUSH_THROTTLE_MS = 1000
+/**
+ * 落库后多久把概览推出去。落库本身是 2 秒一批，所以这里只需很短的延迟把同一批
+ * 攒起来的脏标记合并掉——真正的节流来自「有数据才标脏」，不是这个值。
+ */
+const SUMMARY_PUSH_MS = 300
+/** 窗口右端早于「现在」这么多就算历史区间：不会再落进新数据，不必实时重算 */
+const SUMMARY_LIVE_GRACE_MS = 60 * 1000
 const USERS_PUSH_THROTTLE_MS = 1500
 /** 库里累计量的缓存时长（房间列表每秒推一次，不必每次都去 count(*)） */
 const STORE_CACHE_MS = 5000
@@ -239,6 +257,16 @@ export class AnalyzerHub {
   private pushTimer: ReturnType<typeof setTimeout> | null = null
   private usersPushAt = 0
   private pendingUsers: UserBatch[] = []
+  /**
+   * 界面正在看的概览窗口（`watchSummary` 登记，房间 + 分钟窗口 / 明确区间）。
+   * 只有登记过的房间才会被实时推送——没人看的房间不必花聚合查询。
+   */
+  private summaryWatch = new Map<string, { minutes: number; range?: { from: number; to: number } }>()
+  /** 有数据落库、概览需要重算的房间（推完清空） */
+  private summaryDirty = new Set<string>()
+  private summaryTimer: ReturnType<typeof setTimeout> | null = null
+  /** 概览推送是否在算（避免同一时刻叠几次聚合查询） */
+  private summaryPushing = false
   private storeCache = { at: 0, data: new Map<string, store.RoomStore>() }
   private dbCache = { at: 0, data: null as DbStats | null }
   private started = false
@@ -281,11 +309,6 @@ export class AnalyzerHub {
     )
     this.startTimers()
     void this.cleanup()
-    /**
-     * 装载时**自愈一遍匿名昵称**（脱马甲）：历史行里那些占位名，只要这个人后来在房间里
-     * 露过面（说话/进场/上房榜），现在就能换成真名。放在启动后跑一次，不阻塞 init。
-     */
-    void this.revealAnonymous().catch((error) => logger.warn('[douyin-link] 脱马甲失败:', describe(error)))
     /**
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
@@ -332,6 +355,10 @@ export class AnalyzerHub {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     if (this.pushTimer) clearTimeout(this.pushTimer)
     this.pushTimer = null
+    if (this.summaryTimer) clearTimeout(this.summaryTimer)
+    this.summaryTimer = null
+    this.summaryWatch.clear()
+    this.summaryDirty.clear()
     this.pendingMessages.clear()
     this.pendingTicks.clear()
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
@@ -539,6 +566,37 @@ export class AnalyzerHub {
     this.dbCache.at = 0
     this.emitRooms(true)
     return true
+  }
+
+  /**
+   * 导入数据之后：把库里的房间清单重新读进内存——新增的建运行态、已有的更新静态信息，
+   * 并作废「库里累计量 / 库统计」缓存，最后推一次房间列表。
+   *
+   * 不自动连接：导入进来的房间 `monitor` 一律是 false（见 `importRooms`），
+   * 用户要接着监控得自己打开开关——导入的是「记录」，不是「现在就去连它」。
+   */
+  async reloadRooms(): Promise<void> {
+    const rooms = await store.listRooms()
+    for (const room of rooms) {
+      const state = this.states.get(room.webRid)
+      if (!state) {
+        this.states.set(room.webRid, this.createState(room))
+        continue
+      }
+      state.roomId = room.roomId || state.roomId
+      state.title = room.title || state.title
+      state.anchor = room.anchor || state.anchor
+      state.cover = room.cover || state.cover
+      state.onlineText = room.onlineText || state.onlineText
+      if (room.status !== 'unknown') state.status = room.status
+      state.note = room.note
+      state.monitor = room.monitor
+      state.addedAt = room.addedAt || state.addedAt
+      state.lastSeenAt = room.lastSeenAt || state.lastSeenAt
+    }
+    this.storeCache.at = 0
+    this.dbCache.at = 0
+    this.emitRooms(true)
   }
 
   /** 勾上/取消监控（queued 与并发上限都在 reconcile 里处理） */
@@ -992,8 +1050,9 @@ export class AnalyzerHub {
     /**
      * 礼物/点歌那一类里，帧里只有发送者的 **id**（点歌单号串的第一段），没有昵称；
      * **匿名送礼**时帧里给的名字则是占位串（空串或「☞ 匿名 -」）。两种情况都用我们自己的数据补：
-     * 先本场见过的人，再查库（见 `resolveGiftSenders`）——这就是用户要的「脱马甲」的入口
-     * （用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）。
+     * 先本场见过的人，再查库（见 `resolveGiftSenders`）——补到了就直接显示真名，
+     * 补不到就照实显示匿名/裸 id，用户可以在档案弹窗里点「查看神秘人信息」按 id 去抖音查
+     * （见 `main/douyin/mystery.ts`）。
      */
     const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && isAnonymousName(item.user))
     if (unnamed.length === 0) {
@@ -1220,6 +1279,8 @@ export class AnalyzerHub {
         await store.bumpMinutes(minutes)
         await store.upsertUserDeltas(users)
         this.addFlushedDeltas(state, messages)
+        // 此刻数据才真正在库里：概览要看到的就是这一份，标脏让实时推送重算
+        this.markSummaryDirty(state.webRid)
       } catch (error) {
         logger.warn(`[douyin-link] ${state.webRid} 落库失败（这批增量会丢）:`, describe(error))
       }
@@ -1376,6 +1437,75 @@ export class AnalyzerHub {
     this.pendingMessages.clear()
     for (const tick of this.pendingTicks.values()) this.broadcast(TICKS_EVENT, tick)
     this.pendingTicks.clear()
+  }
+
+  /* --------------------------------------------------------- 概览实时推送 */
+
+  /**
+   * 登记「界面正在看的概览窗口」（`range` 不给 = 最近 `minutes` 分钟）。
+   *
+   * 界面每次调 `room-summary` 都会顺带登记（见 ipc.ts），所以窗口跟着界面走：
+   * 切时间进度条 / 换预设窗口都只是再登记一次。只有登记过的房间才会被实时推送。
+   */
+  watchSummary(webRid: string, minutes: number, range?: { from: number; to: number }): void {
+    if (!webRid) return
+    this.summaryWatch.set(webRid, { minutes, range })
+  }
+
+  /** 界面不再看这个房间的概览（切房间 / 卸载）：停掉它的实时推送 */
+  unwatchSummary(webRid: string): void {
+    if (!webRid) return
+    this.summaryWatch.delete(webRid)
+    this.summaryDirty.delete(webRid)
+  }
+
+  /** 有数据落库 → 概览该重算（没人在看这个房间就不记） */
+  private markSummaryDirty(webRid: string): void {
+    if (!this.summaryWatch.has(webRid)) return
+    this.summaryDirty.add(webRid)
+    this.scheduleSummaryPush()
+  }
+
+  /** 安排一次概览推送（已经安排过就不重复安排；正在算就等它结束后自查） */
+  private scheduleSummaryPush(): void {
+    if (this.summaryTimer || this.summaryPushing) return
+    this.summaryTimer = setTimeout(() => {
+      this.summaryTimer = null
+      void this.pushSummaries()
+    }, SUMMARY_PUSH_MS)
+  }
+
+  /**
+   * 把脏房间的概览按各自登记的窗口重算并推给界面。
+   *
+   * **串行 + 只算一个时刻**：`summary()` 是一组聚合查询（还跑在宿主的 PGlite 上），
+   * 并发叠几份只会跟宿主的流式输出抢资源；同一时刻只算一轮，算完还有欠账再安排下一轮。
+   */
+  private async pushSummaries(): Promise<void> {
+    if (this.summaryPushing || this.summaryDirty.size === 0) return
+    this.summaryPushing = true
+    const batch = [...this.summaryDirty]
+    this.summaryDirty.clear()
+    const now = Date.now()
+    try {
+      for (const webRid of batch) {
+        const watch = this.summaryWatch.get(webRid)
+        if (!watch) continue
+        // 历史区间（右端早于现在）不会再落进新数据，重算也是同一份，跳过
+        if (watch.range && watch.range.to < now - SUMMARY_LIVE_GRACE_MS) continue
+        try {
+          const summary = await this.summary(webRid, watch.minutes, watch.range)
+          const sessions = await this.sessions(webRid, 5)
+          this.broadcast(SUMMARY_EVENT, { webRid, summary, sessions } satisfies SummaryPush)
+        } catch (error) {
+          logger.warn(`[douyin-link] ${webRid} 概览推送失败:`, describe(error))
+        }
+        await yieldToLoop()
+      }
+    } finally {
+      this.summaryPushing = false
+      if (this.summaryDirty.size > 0) this.scheduleSummaryPush()
+    }
   }
 
   /* --------------------------------------------------------- 分析查询 */
@@ -1702,25 +1832,14 @@ export class AnalyzerHub {
   }
 
   /**
-   * **脱马甲**（用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）：
-   * 把库里「匿名 / 空名」的行换回这个 id 在我们自己数据里的真名（见 `store.revealAnonymousNames`）。
+   * **查看神秘人信息**：拿用户 id 去抖音的 web 端资料接口，把匿名马甲下的人还原出来
+   * （真名、头像、粉丝数等，见 `../douyin/mystery`）。
    *
-   * 两种触发：插件装载时跑一遍（历史行自愈），以及房间行的「⋯」菜单里手动跑（立刻见效）。
-   * 名字变了就把列表缓存作废、重推房间，界面上的榜与列表跟着刷新。
+   * 这是**按需**的：用户档案弹窗里发现是匿名的人才会点这个按钮，所以不做缓存、不写库——
+   * 抖音那边的资料随时可能变，每次点都拿最新的一份。
    */
-  async revealAnonymous(webRid = ''): Promise<{ revealed: number; remaining: number }> {
-    const started = Date.now()
-    const result = await store.revealAnonymousNames(webRid)
-    if (result.revealed > 0) {
-      this.storeCache.at = 0
-      this.dbCache.at = 0
-      this.emitRooms(true)
-    }
-    logger.info(
-      `[douyin-link] 脱马甲${webRid ? `（${webRid}）` : ''}：还原 ${result.revealed} 条匿名昵称，` +
-        `还剩 ${result.remaining} 条认不出（${since(started)}）`
-    )
-    return result
+  async revealMystery(userId: string): Promise<MysteryReveal> {
+    return revealMysteryProfile(userId)
   }
 
   async clearUsers(webRid = ''): Promise<void> {

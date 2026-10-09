@@ -26,7 +26,6 @@ import {
 } from './schema'
 import { schemaReady } from './ddl'
 import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
-import { anonymousSqlPredicate } from '../../shared/anonymous'
 
 /**
  * 抖音直播分析器 的数据访问层。
@@ -905,70 +904,6 @@ export async function userGiftBreakdown(
 }
 
 /**
- * **脱马甲**：把「匿名」占位的昵称换回这个 id 在我们自己数据里的真名。
- *
- * 用户 2026-10-08 的要求：「可以脱神秘人的衣服，可以知道这个人是谁」。
- * 抖音在匿名送礼/点歌时只给一个占位名（空串或 `☞ 匿名 -`），但**用户 id 一直在**；
- * 这个人只要在本房间说过话、进过场、上过房榜，库里就有真名——同一 id 一对就还原了。
- *
- * 名字来源优先级：
- * 1. `douyin_link_users`（本房间的用户档案，`recorder` 每次见到非空昵称都会更新它）；
- * 2. 消息流水里**同一个 id 最近一条非匿名**的名字（档案被清过也还能救回来）。
- *
- * 两条硬约束：
- * - **只动匿名/空的行**（`shared/anonymous.ts` 的谓词），真名半个字都不改；
- * - 查不到真名的行**保持原样**（宁可还显示「匿名」，也不猜）。
- *
- * 收礼人（`to_user_id` / `to_user_name`）同理再跑一遍——匿名收礼也一样能还原。
- */
-export async function revealAnonymousNames(webRid = ''): Promise<{ revealed: number; remaining: number }> {
-  await schemaReady
-  const scope = webRid ? ` AND m.web_rid = '${webRid.replace(/'/g, "''")}'` : ''
-  const senderAnon = anonymousSqlPredicate('m.user_name')
-  const recipientAnon = anonymousSqlPredicate('m.to_user_name')
-  /** 「这一列的真名」：先查用户档案，再查流水里同一 id 最近的非匿名名字 */
-  const realName = (idColumn: string, nameColumn: string): string => `COALESCE(
-      (SELECT u.nickname FROM douyin_link_users u
-        WHERE u.web_rid = m.web_rid AND u.user_id = m.${idColumn} AND NOT ${anonymousSqlPredicate('u.nickname')}
-        LIMIT 1),
-      (SELECT n.${nameColumn} FROM douyin_link_messages n
-        WHERE n.web_rid = m.web_rid AND n.${idColumn} = m.${idColumn} AND n.id <> m.id
-          AND NOT ${anonymousSqlPredicate(`n.${nameColumn}`)}
-        ORDER BY n.at_ms DESC LIMIT 1)
-    )`
-  return withOrm('douyin-link.revealAnonymous', async (db) => {
-    const sender = await db.execute(
-      sql.raw(`WITH real AS (
-        SELECT m.id, ${realName('user_id', 'user_name')} AS name
-        FROM douyin_link_messages m
-        WHERE m.user_id <> '' AND ${senderAnon}${scope}
-      )
-      UPDATE douyin_link_messages AS t SET user_name = real.name
-      FROM real WHERE t.id = real.id AND real.name IS NOT NULL
-      RETURNING t.id`)
-    )
-    const recipient = await db.execute(
-      sql.raw(`WITH real AS (
-        SELECT m.id, ${realName('to_user_id', 'to_user_name')} AS name
-        FROM douyin_link_messages m
-        WHERE m.to_user_id <> '' AND ${recipientAnon}${scope}
-      )
-      UPDATE douyin_link_messages AS t SET to_user_name = real.name
-      FROM real WHERE t.id = real.id AND real.name IS NOT NULL
-      RETURNING t.id`)
-    )
-    const left = await db.execute(
-      sql.raw(`SELECT count(*)::int AS remaining FROM douyin_link_messages m
-        WHERE (${senderAnon} AND m.user_id <> '') OR (${recipientAnon} AND m.to_user_id <> '')${
-          webRid ? ` AND m.web_rid = '${webRid.replace(/'/g, "''")}'` : ''
-        }`)
-    )
-    const remaining = Number((left.rows?.[0] as { remaining?: number } | undefined)?.remaining ?? 0)
-    return { revealed: sender.rows.length + recipient.rows.length, remaining }
-  })
-}
-
-/**
  * 礼物榜的**按人**聚合（收礼物榜 / 送礼物榜共用）。
  *
  * `by = 'recipient'` 按收礼人（`to_user_id`）分组、`by = 'sender'` 按送礼人（`user_id`）分组。
@@ -1164,6 +1099,465 @@ export async function purgeTables(tables: string[]): Promise<void> {
       await db.execute(sql.raw(`DELETE FROM ${table}`))
     }
     logger.info(`[douyin-link] 已清空 ${tables.length} 张表的全部行`)
+  })
+}
+
+/* --------------------------------------------------------- 导入 / 导出 */
+
+/**
+ * 导入导出的**纯数据行**（与列一一对应，去掉自增 `id`）。
+ *
+ * 导出的 JSON 里用这些形状；导入时按同一套字段回填。时间一律 ms epoch。
+ */
+export interface MessageExportRow {
+  webRid: string
+  sessionId: number
+  kind: string
+  userId: string
+  userName: string
+  content: string
+  count: number
+  diamonds: number
+  toUserId: string
+  toUserName: string
+  orderKey: string
+  atMs: number
+}
+
+export interface UserExportRow {
+  webRid: string
+  userId: string
+  displayId: string
+  nickname: string
+  gender: number
+  signature: string
+  city: string
+  avatar: string
+  following: number
+  follower: number
+  honorLevel: number
+  fansClubLevel: number
+  badges: string
+  secUid: string
+  chat: number
+  enter: number
+  likes: number
+  follows: number
+  gift: number
+  diamonds: number
+  firstSeen: number
+  lastSeen: number
+}
+
+export interface MinuteExportRow {
+  webRid: string
+  minute: number
+  chat: number
+  member: number
+  likes: number
+  social: number
+  gift: number
+  diamonds: number
+  messages: number
+  users: number
+}
+
+export interface SessionExportRow {
+  webRid: string
+  startedAt: number
+  endedAt: number
+  messages: number
+  endReason: string
+}
+
+/** 一段本地自然日（`day` 是 `YYYY-MM-DD`，`from`/`to` 是 ms epoch 的闭区间） */
+export interface DayRange {
+  day: string
+  from: number
+  to: number
+}
+
+/** 本地时区偏移（ms）：分天口径与 `dayRecords` 保持一致（PGlite 默认 UTC，必须自己平移） */
+function localOffsetMs(): number {
+  return -new Date().getTimezoneOffset() * 60000
+}
+
+/** 导出：一个房间有数据的**本地自然日**列表（消息与会话都算，按天倒序） */
+export async function exportDayRanges(webRid: string): Promise<DayRange[]> {
+  if (!webRid) return []
+  await schemaReady
+  const offset = Math.trunc(localOffsetMs())
+  return withOrm('douyin-link.exportDayRanges', async (db) => {
+    const literal = sql.raw(String(offset))
+    const messageBuckets = sql`floor((${douyinLinkMessages.atMs} + ${literal}) / 86400000)`
+    const sessionBuckets = sql`floor((${douyinLinkSessions.startedAt} + ${literal}) / 86400000)`
+    const messageRows = await db
+      .selectDistinct({ bucket: sql<number>`(${messageBuckets})::int` })
+      .from(douyinLinkMessages)
+      .where(eq(douyinLinkMessages.webRid, webRid))
+    const sessionRows = await db
+      .selectDistinct({ bucket: sql<number>`(${sessionBuckets})::int` })
+      .from(douyinLinkSessions)
+      .where(eq(douyinLinkSessions.webRid, webRid))
+    const buckets = new Set<number>([...messageRows, ...sessionRows].map((row) => row.bucket))
+    return [...buckets]
+      .sort((a, b) => b - a)
+      .map((bucket) => ({
+        day: new Date(bucket * 86400000).toISOString().slice(0, 10),
+        // 本地日 00:00 的 epoch = bucket*86400000 - offset
+        from: bucket * 86400000 - offset,
+        to: bucket * 86400000 - offset + 86400000 - 1
+      }))
+  })
+}
+
+/** 导出：一个房间在某一时段内的消息流水（按时间正序，去掉自增 id） */
+export async function exportMessageRows(webRid: string, fromMs: number, toMs: number): Promise<MessageExportRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  return withOrm('douyin-link.exportMessageRows', async (db) => {
+    const rows = await db
+      .select({
+        webRid: douyinLinkMessages.webRid,
+        sessionId: douyinLinkMessages.sessionId,
+        kind: douyinLinkMessages.kind,
+        userId: douyinLinkMessages.userId,
+        userName: douyinLinkMessages.userName,
+        content: douyinLinkMessages.content,
+        count: douyinLinkMessages.count,
+        diamonds: douyinLinkMessages.diamonds,
+        toUserId: douyinLinkMessages.toUserId,
+        toUserName: douyinLinkMessages.toUserName,
+        orderKey: douyinLinkMessages.orderKey,
+        atMs: douyinLinkMessages.atMs
+      })
+      .from(douyinLinkMessages)
+      .where(and(eq(douyinLinkMessages.webRid, webRid), gte(douyinLinkMessages.atMs, fromMs), lte(douyinLinkMessages.atMs, toMs)))
+      .orderBy(asc(douyinLinkMessages.atMs), asc(douyinLinkMessages.id))
+    return rows
+  })
+}
+
+/** 导出：一个房间的分钟桶（时段内） */
+export async function exportMinuteRows(webRid: string, fromMs: number, toMs: number): Promise<MinuteExportRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  const fromMinute = Math.floor(fromMs / 60000)
+  const toMinute = Math.floor(toMs / 60000)
+  return withOrm('douyin-link.exportMinuteRows', async (db) => {
+    const rows = await db
+      .select()
+      .from(douyinLinkMinutes)
+      .where(and(eq(douyinLinkMinutes.webRid, webRid), gte(douyinLinkMinutes.minute, fromMinute), lte(douyinLinkMinutes.minute, toMinute)))
+      .orderBy(asc(douyinLinkMinutes.minute))
+    return rows.map((row) => ({
+      webRid: row.webRid,
+      minute: row.minute,
+      chat: row.chat,
+      member: row.member,
+      likes: row.likes,
+      social: row.social,
+      gift: row.gift,
+      diamonds: row.diamonds,
+      messages: row.messages,
+      users: row.users
+    }))
+  })
+}
+
+/** 导出：一个房间的监控会话（按开始时间落在时段内） */
+export async function exportSessionRows(webRid: string, fromMs: number, toMs: number): Promise<SessionExportRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  return withOrm('douyin-link.exportSessionRows', async (db) => {
+    const rows = await db
+      .select()
+      .from(douyinLinkSessions)
+      .where(and(eq(douyinLinkSessions.webRid, webRid), gte(douyinLinkSessions.startedAt, fromMs), lte(douyinLinkSessions.startedAt, toMs)))
+      .orderBy(asc(douyinLinkSessions.startedAt))
+    return rows.map((row) => ({
+      webRid: row.webRid,
+      startedAt: row.startedAt,
+      endedAt: row.endedAt,
+      messages: row.messages,
+      endReason: row.endReason
+    }))
+  })
+}
+
+/** 导出：某个房间的全部用户档案 */
+export async function exportUserRows(webRid: string): Promise<UserExportRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  return withOrm('douyin-link.exportUserRows', async (db) => {
+    const rows = await db.select().from(douyinLinkUsers).where(eq(douyinLinkUsers.webRid, webRid))
+    return rows.map((row) => ({
+      webRid: row.webRid,
+      userId: row.userId,
+      displayId: row.displayId,
+      nickname: row.nickname,
+      gender: row.gender,
+      signature: row.signature,
+      city: row.city,
+      avatar: row.avatar,
+      following: row.following,
+      follower: row.follower,
+      honorLevel: row.honorLevel,
+      fansClubLevel: row.fansClubLevel,
+      badges: row.badges,
+      secUid: row.secUid,
+      chat: row.chat,
+      enter: row.enter,
+      likes: row.likes,
+      follows: row.follows,
+      gift: row.gift,
+      diamonds: row.diamonds,
+      firstSeen: row.firstSeen,
+      lastSeen: row.lastSeen
+    }))
+  })
+}
+
+/** 一条消息的**去重指纹**：同一房间、同一时刻、同一发送者与内容的行视为同一条 */
+function messageKey(row: MessageExportRow): string {
+  return [
+    row.webRid,
+    row.atMs,
+    row.kind,
+    row.userId,
+    row.content,
+    row.count,
+    row.diamonds,
+    row.toUserId,
+    row.orderKey
+  ].join('\u0001')
+}
+
+/**
+ * 导入房间行：**只补缺、不覆盖**（`ON CONFLICT DO NOTHING`）。
+ *
+ * 关键：不能盖掉用户已有的 `note`（备注）与 `monitor`（监控开关）——
+ * 导入一份别人的备份不该把本机正在监控的房间停下来；而**新增**的房间一律
+ * `monitor = false`（导入的是「记录」，不是「现在就去连它」）。返回真正新增的个数。
+ */
+export async function importRooms(rows: RoomRow[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await schemaReady
+  return withOrm('douyin-link.importRooms', async (db) => {
+    const inserted = await db
+      .insert(douyinLinkRooms)
+      .values(
+        rows.map((row) => ({
+          webRid: row.webRid,
+          roomId: row.roomId,
+          title: row.title,
+          anchor: row.anchor,
+          cover: row.cover,
+          onlineText: row.onlineText,
+          status: row.status,
+          note: row.note,
+          monitor: false,
+          addedAt: row.addedAt,
+          lastActiveAt: row.lastActiveAt,
+          lastSeenAt: row.lastSeenAt
+        }))
+      )
+      .onConflictDoNothing({ target: douyinLinkRooms.webRid })
+      .returning({ webRid: douyinLinkRooms.webRid })
+    return inserted.length
+  })
+}
+
+/**
+ * 导入用户档案：**取大、不累加**（`GREATEST` + 非空覆盖）。
+ *
+ * 与实时落库的 `upsertUserDeltas`（统计**累加**）刻意分开：导入是「复原一份快照」，
+ * 累加会让同一个人的发言数在重复导入时翻倍——那就违背了「数据不能重复」。
+ */
+export async function importUsers(rows: UserExportRow[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await schemaReady
+  return withOrm('douyin-link.importUsers', async (db) => {
+    let affected = 0
+    for (let index = 0; index < rows.length; index += MSG_CHUNK) {
+      const chunk = rows.slice(index, index + MSG_CHUNK)
+      const result = await db
+        .insert(douyinLinkUsers)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [douyinLinkUsers.webRid, douyinLinkUsers.userId],
+          set: {
+            displayId: keepNonEmpty('display_id'),
+            nickname: keepNonEmpty('nickname'),
+            signature: keepNonEmpty('signature'),
+            city: keepNonEmpty('city'),
+            avatar: keepNonEmpty('avatar'),
+            secUid: keepNonEmpty('sec_uid'),
+            badges: sql`CASE WHEN excluded.badges <> '[]' THEN excluded.badges ELSE douyin_link_users.badges END`,
+            gender: greatest('gender'),
+            following: greatest('following'),
+            follower: greatest('follower'),
+            honorLevel: greatest('honor_level'),
+            fansClubLevel: greatest('fans_club_level'),
+            chat: greatest('chat'),
+            enter: greatest('enter'),
+            likes: greatest('likes'),
+            follows: greatest('follows'),
+            gift: greatest('gift'),
+            diamonds: greatest('diamonds'),
+            firstSeen: sql`LEAST(douyin_link_users.first_seen, EXCLUDED.first_seen)`,
+            lastSeen: sql`GREATEST(douyin_link_users.last_seen, EXCLUDED.last_seen)`
+          }
+        })
+        .returning({ userId: douyinLinkUsers.userId })
+      affected += result.length
+    }
+    return affected
+  })
+}
+
+/**
+ * 导入消息流水：**按指纹去重**。
+ *
+ * 先按房间 + 时段把库里已有的行的指纹读进来（限定在导入批次的 [minAt, maxAt] 内，
+ * 不做全表扫描），再逐条比对：库里已有、或本次批次内已经收过的，一律跳过。
+ * 这样重复导入同一份压缩包是**幂等**的——不会多出任何一条。
+ */
+export async function importMessages(rows: MessageExportRow[]): Promise<{ added: number; skipped: number }> {
+  if (rows.length === 0) return { added: 0, skipped: 0 }
+  await schemaReady
+  return withOrm('douyin-link.importMessages', async (db) => {
+    // 同一房间的行放一起，才能用一次时段查询把已有指纹读全
+    const byRoom = new Map<string, MessageExportRow[]>()
+    for (const row of rows) {
+      const list = byRoom.get(row.webRid)
+      if (list) list.push(row)
+      else byRoom.set(row.webRid, [row])
+    }
+
+    const seen = new Set<string>()
+    for (const [webRid, list] of byRoom) {
+      let min = Infinity
+      let max = -Infinity
+      for (const row of list) {
+        if (row.atMs < min) min = row.atMs
+        if (row.atMs > max) max = row.atMs
+      }
+      const existing = await db
+        .select({
+          webRid: douyinLinkMessages.webRid,
+          atMs: douyinLinkMessages.atMs,
+          kind: douyinLinkMessages.kind,
+          userId: douyinLinkMessages.userId,
+          content: douyinLinkMessages.content,
+          count: douyinLinkMessages.count,
+          diamonds: douyinLinkMessages.diamonds,
+          toUserId: douyinLinkMessages.toUserId,
+          orderKey: douyinLinkMessages.orderKey
+        })
+        .from(douyinLinkMessages)
+        .where(
+          and(
+            eq(douyinLinkMessages.webRid, webRid),
+            gte(douyinLinkMessages.atMs, Number.isFinite(min) ? min : 0),
+            lte(douyinLinkMessages.atMs, Number.isFinite(max) ? max : 0)
+          )
+        )
+      for (const row of existing) seen.add(messageKey(row as MessageExportRow))
+    }
+
+    const fresh: MessageExportRow[] = []
+    let skipped = 0
+    for (const row of rows) {
+      const key = messageKey(row)
+      if (seen.has(key)) {
+        skipped += 1
+        continue
+      }
+      seen.add(key)
+      fresh.push(row)
+    }
+
+    for (let index = 0; index < fresh.length; index += MSG_CHUNK) {
+      await db.insert(douyinLinkMessages).values(
+        fresh.slice(index, index + MSG_CHUNK).map((row) => ({
+          webRid: row.webRid,
+          // 会话 id 不复用（导入后 sessions 会重新分配自增 id，留旧值只会指错）
+          sessionId: 0,
+          kind: row.kind as DanmakuKind,
+          userId: row.userId,
+          userName: row.userName,
+          content: row.content,
+          count: row.count,
+          diamonds: row.diamonds,
+          toUserId: row.toUserId,
+          toUserName: row.toUserName,
+          orderKey: row.orderKey,
+          atMs: row.atMs
+        }))
+      )
+    }
+    return { added: fresh.length, skipped }
+  })
+}
+
+/** 导入分钟桶：**取大、不累加**（同一分钟重复导入保持原值） */
+export async function importMinutes(rows: MinuteExportRow[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await schemaReady
+  return withOrm('douyin-link.importMinutes', async (db) => {
+    let affected = 0
+    for (let index = 0; index < rows.length; index += MSG_CHUNK) {
+      const chunk = rows.slice(index, index + MSG_CHUNK)
+      const values = sql.join(
+        chunk.map(
+          (row) =>
+            sql`(${row.webRid}, ${row.minute}, ${row.chat}, ${row.member}, ${row.likes}, ${row.social}, ${row.gift}, ${row.diamonds}, ${row.messages}, ${row.users})`
+        ),
+        sql`, `
+      )
+      await db.execute(sql`
+        INSERT INTO douyin_link_minutes (web_rid, minute, chat, member, likes, social, gift, diamonds, messages, users)
+        VALUES ${values}
+        ON CONFLICT (web_rid, minute) DO UPDATE SET
+          chat = GREATEST(douyin_link_minutes.chat, EXCLUDED.chat),
+          member = GREATEST(douyin_link_minutes.member, EXCLUDED.member),
+          likes = GREATEST(douyin_link_minutes.likes, EXCLUDED.likes),
+          social = GREATEST(douyin_link_minutes.social, EXCLUDED.social),
+          gift = GREATEST(douyin_link_minutes.gift, EXCLUDED.gift),
+          diamonds = GREATEST(douyin_link_minutes.diamonds, EXCLUDED.diamonds),
+          messages = GREATEST(douyin_link_minutes.messages, EXCLUDED.messages),
+          users = GREATEST(douyin_link_minutes.users, EXCLUDED.users)
+      `)
+      affected += chunk.length
+    }
+    return affected
+  })
+}
+
+/** 导入监控会话：**只补缺**（同一房间、同一开始时刻的会话视为同一次） */
+export async function importSessions(rows: SessionExportRow[]): Promise<number> {
+  if (rows.length === 0) return 0
+  await schemaReady
+  return withOrm('douyin-link.importSessions', async (db) => {
+    let added = 0
+    for (const row of rows) {
+      const found = await db
+        .select({ id: douyinLinkSessions.id })
+        .from(douyinLinkSessions)
+        .where(and(eq(douyinLinkSessions.webRid, row.webRid), eq(douyinLinkSessions.startedAt, row.startedAt)))
+        .limit(1)
+      if (found.length > 0) continue
+      await db.insert(douyinLinkSessions).values({
+        webRid: row.webRid,
+        startedAt: row.startedAt,
+        endedAt: row.endedAt,
+        messages: row.messages,
+        endReason: row.endReason
+      })
+      added += 1
+    }
+    return added
   })
 }
 

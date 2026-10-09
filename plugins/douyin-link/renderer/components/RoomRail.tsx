@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Dropdown, Input, Switch } from 'antd'
-import { RiAddLine, RiDeleteBin6Line, RiMoreLine, RiRefreshLine, RiUserSearchLine } from '@remixicon/react'
+import { RiAddLine, RiDeleteBin6Line, RiMoreLine, RiRefreshLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
 import { FitList, HOVER_BG, Panel, usePluginPalette } from './ui'
@@ -52,8 +52,6 @@ export function RoomRail(props: {
   onToggleMonitor: (webRid: string, on: boolean) => void
   onMonitorAll: (on: boolean) => void
   onRefresh: (webRid: string) => void
-  /** 脱马甲：还原这个房间里的匿名昵称 */
-  onRevealAnonymous: (webRid: string) => void
   onRemove: (webRid: string, purge: boolean) => void
   onClearMessages: (webRid: string) => void
 }): React.JSX.Element {
@@ -126,7 +124,6 @@ export function RoomRail(props: {
                 onSelect={() => props.onSelect(room.webRid)}
                 onToggleMonitor={(on) => props.onToggleMonitor(room.webRid, on)}
                 onRefresh={() => props.onRefresh(room.webRid)}
-                onRevealAnonymous={() => props.onRevealAnonymous(room.webRid)}
                 onRemove={(purge) => props.onRemove(room.webRid, purge)}
                 onClearMessages={() => props.onClearMessages(room.webRid)}
               />
@@ -146,8 +143,6 @@ function RoomRow(props: {
   onSelect: () => void
   onToggleMonitor: (on: boolean) => void
   onRefresh: () => void
-  /** 脱马甲：还原这个房间里的匿名昵称 */
-  onRevealAnonymous: () => void
   onRemove: (purge: boolean) => void
   onClearMessages: () => void
 }): React.JSX.Element {
@@ -189,11 +184,6 @@ function RoomRow(props: {
           items: [
             { key: 'refresh', icon: <RiRefreshLine size={13} />, label: t('douyin-link.page.refresh') },
             {
-              key: 'reveal',
-              icon: <RiUserSearchLine size={13} />,
-              label: t('douyin-link.page.revealAnonymous')
-            },
-            {
               key: 'clear',
               icon: <RiDeleteBin6Line size={13} />,
               label: t('douyin-link.page.clearRoomMessages')
@@ -205,7 +195,6 @@ function RoomRow(props: {
           onClick: ({ key, domEvent }) => {
             domEvent.stopPropagation()
             if (key === 'refresh') props.onRefresh()
-            else if (key === 'reveal') props.onRevealAnonymous()
             else if (key === 'clear') props.onClearMessages()
             else if (key === 'remove') props.onRemove(false)
             else if (key === 'remove-all') props.onRemove(true)

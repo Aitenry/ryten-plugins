@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button, Slider, theme } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
-import api from '../api'
+import api, { normalizeRoomSummary } from '../api'
 import { ChartBox, EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -14,8 +14,14 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
  */
 export const WINDOWS = [15, 60, 360, 1440, 0] as const
 
-/** 概览多久自动刷一次（监控中是活的，KPI 也要跟着动） */
-const RELOAD_MS = 10000
+/**
+ * 概览的**兜底**轮询间隔。
+ *
+ * 实时更新靠主进程的 `summary` 推送（落库后按界面请求的窗口推一份，见 main/monitor/hub.ts），
+ * 所以这里只留一个低频兜底：万一推送通道没挂上（宿主刚升级插件、主进程还是旧模块），
+ * 界面最多慢这么多，不会一直停在打开那一刻。
+ */
+const RELOAD_MS = 30000
 
 export function windowLabel(t: Translate, minutes: number): string {
   if (minutes <= 0) return t('douyin-link.page.windowAll')
@@ -54,6 +60,29 @@ export function OverviewPanel(props: {
   const webRid = props.room?.webRid ?? ''
   const rangeFrom = props.range?.from ?? 0
   const rangeTo = props.range?.to ?? 0
+  /** 归一化要用到当前窗口（推送来得比 props 更新晚一拍，用 ref 兜住） */
+  const minutesRef = useRef(props.minutes)
+  minutesRef.current = props.minutes
+
+  /**
+   * 实时更新：订阅主进程的概览推送。
+   *
+   * 主进程在**落库之后**（每 2 秒一批）按界面请求过的窗口重算一份推过来，这里直接替换——
+   * KPI / 分钟趋势 / 类型分布 / 榜单 / 会话摘要全都跟着动，不再等 10 秒一次的轮询。
+   * 订阅只跟房间走：换房间时先撤销旧房间的推送，别让它继续为没人看的房间算。
+   */
+  useEffect(() => {
+    if (!webRid) return
+    const off = api.onSummary((push) => {
+      if (push.webRid !== webRid) return
+      setSummary(normalizeRoomSummary(push.summary, push.webRid, minutesRef.current))
+      setSessions(Array.isArray(push.sessions) ? push.sessions : [])
+    })
+    return () => {
+      off()
+      api.summaryUnwatch(webRid)
+    }
+  }, [webRid])
 
   useEffect(() => {
     if (!webRid) {

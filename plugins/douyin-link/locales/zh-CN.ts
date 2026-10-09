@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 抖音直播分析器 的中文词条。
  *
  * 顶层键 = 插件 id，里面的结构随你——宿主界面只按 labelKey 取用
@@ -102,8 +102,6 @@ export const DouyinLinkZhCN = {
       windowAll: '全部',
       rangeSpan: '时长 {{duration}}',
       rangeWholeDay: '这一天全部',
-      revealAnonymous: '脱马甲（还原匿名昵称）',
-      revealDone: '已还原 {{revealed}} 条匿名昵称，还剩 {{remaining}} 条认不出',
       rangeEmpty: '还没有数据（先开始监控）',
       dayRecords: '每日记录（{{count}} 天）',
       dayRecordsEmpty: '还没有记录过这个房间',
@@ -268,7 +266,23 @@ export const DouyinLinkZhCN = {
       historyChat: '只看弹幕',
       historyAny: '全部互动',
       historyEmpty: '库里还没有这个人的消息（先监控一会儿，或把范围切到「全部房间」）',
-      historyRefresh: '重新查一次'
+      historyRefresh: '重新查一次',
+      /* 神秘人还原（用户档案弹窗里，匿名的人才会出现） */
+      revealSecret: '这个人开启了匿名（神秘人），真实身份被抖音藏起来了',
+      revealButton: '查看神秘人信息',
+      revealLoading: '正在查询…',
+      revealTitle: '神秘人真实信息',
+      revealFollower: '粉丝',
+      revealFollowing: '关注',
+      revealWorks: '作品',
+      revealLikes: '获赞',
+      revealRegion: '地区',
+      revealVerified: '认证',
+      revealFailed: '这个人的资料没查到',
+      revealErrorBadInput: '这个用户 id 不对，查不了',
+      revealErrorNetwork: '查询失败（网络被挡或接口没响应）',
+      revealErrorNotFound: '抖音那边没有这个账号的资料（可能已注销）',
+      revealErrorBadResponse: '抖音返回的内容看不懂'
     },
     failure: {
       title: '失败原因',
@@ -322,6 +336,17 @@ export const DouyinLinkZhCN = {
       retentionHint:
         '默认 0 = 永久保存（不自动清理任何内容）。填 N 天才清：超过 N 天的消息流水与分钟聚合会被删掉，用户统计不删。',
       cleanupNow: '立即清理',
+      importExportLabel: '数据备份（导入 / 导出）',
+      importExportHint:
+        '导出：把全部直播间的记录打包成一个 ZIP——里面每个 JSON 就是某个房间某一天的直播数据（消息流水、分钟聚合、当天会话）。导入：读回一个 ZIP 并**去重**合并，重复导入同一份包不会多出任何一条。',
+      exportButton: '导出数据',
+      importButton: '导入数据',
+      exportDone: '已导出 {{rooms}} 个直播间、{{days}} 天的记录（{{messages}} 条消息）',
+      importDone:
+        '导入完成：新增 {{rooms}} 个直播间、{{messages}} 条消息（跳过重复 {{skipped}} 条、用户档案 {{users}} 条）',
+      importBadFormat: '这个压缩包不是本插件的导出格式',
+      actionCancelled: '已取消',
+      actionFailed: '操作失败：{{detail}}',
       storageHint:
         '数据库：{{rooms}} 个直播间 · {{messages}} 条消息 · {{users}} 条用户记录 · {{minutes}} 个分钟桶 · {{sessions}} 次监控会话。设置存在 userData 的 plugin-state 目录下，数据表归本插件自己。'
     }

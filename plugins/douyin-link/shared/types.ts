@@ -115,6 +115,41 @@ export interface UserProfile extends UserInfo {
   stats: UserStats
 }
 
+/**
+ * 神秘人的**真实资料**（我们库里藏着一个 id 都查不到的那种）。
+ *
+ * 与 `UserProfile` 不同：这份不是「我们观察到的」，而是拿用户 id 去抖音的 web 端
+ * 用户资料接口**当场问回来的**——昵称、头像、粉丝数都是账号本人的，跟直播间里的匿名马甲无关。
+ * 头像由主进程下载成 data URL（渲染层 CSP 不许外链图片）。
+ */
+export interface MysteryProfile {
+  userId: string
+  nickname: string
+  /** 抖音号（接口的 `unique_id`；拿不到时是空串） */
+  displayId: string
+  secUid: string
+  signature: string
+  /** 1 = 男，2 = 女，其它 = 未知（与 `UserInfo.gender` 同一口径） */
+  gender: number
+  /** IP 归属地 / 城市（接口不一定给） */
+  region: string
+  follower: number
+  following: number
+  /** 作品数 */
+  awemeCount: number
+  /** 获赞总数 */
+  totalFavorited: number
+  /** 认证文案（个人认证 / 企业认证；没有就是空串） */
+  verified: string
+  /** 头像 data URL（主进程下载；失败为空串，界面用首字兜底） */
+  avatar: string
+}
+
+/** 「查看神秘人信息」的结果：成功给资料，失败给一个可翻译的失败码 */
+export type MysteryReveal =
+  | { ok: true; profile: MysteryProfile }
+  | { ok: false; code: 'badInput' | 'network' | 'notFound' | 'badResponse'; detail?: string }
+
 /** 一个房间的互动计数（内存运行态与库里统计都用它） */
 export interface LiveInteractions {
   chat: number
@@ -449,6 +484,19 @@ export interface RoomSummary {
 }
 
 /**
+ * 主进程推送的概览快照（概览页签的实时更新）。
+ *
+ * 概览里的每一项都来自数据库聚合（KPI、分钟趋势、类型分布、用户榜、两张礼物榜），
+ * 界面自己轮询只能「每 10 秒看一眼」。主进程**在落库之后**（此刻数据才是真的）按界面
+ * 请求过的窗口重算一份推过来，界面直接替换——这样关掉页面数据不丢、开着页面就是活的。
+ */
+export interface SummaryPush {
+  webRid: string
+  summary: RoomSummary
+  sessions: MonitorSession[]
+}
+
+/**
  * 礼物榜（收礼 / 送礼）的一行：**一个人**在窗口内的礼物合计。
  *
  * 与 `GiftBreakdownRow`（按礼物名聚合）互补：那个回答「送了什么」，这个回答「谁收/谁送、值多少」，
@@ -630,6 +678,38 @@ export type AudioMessage =
 /** 音质档位的中文/英文展示名由渲染层词条给，这里只给键 */
 export function isQualityKey(value: unknown): value is QualityKey {
   return typeof value === 'string' && (QUALITY_KEYS as string[]).includes(value)
+}
+
+/**
+ * 导出压缩包的结果（设置页「导出数据」）。
+ *
+ * 包内结构：`manifest.json` + `rooms.json` + `users/<webRid>.json` +
+ * `records/<webRid>/<YYYY-MM-DD>.json`（每个 JSON = 某房间某一天的直播数据）。
+ */
+export interface ExportResult {
+  ok: boolean
+  /** 落盘路径（取消 / 失败时是空串） */
+  path: string
+  rooms: number
+  /** 打进去的「房间 × 天」文件数 */
+  days: number
+  messages: number
+  /** 失败 / 取消的原因（可翻译的键或原文） */
+  message?: string
+}
+
+/** 导入压缩包的结果（重复导入同一份包时 `added` 为 0、`skipped` 为全部） */
+export interface ImportResult {
+  ok: boolean
+  /** 新增的房间数（已存在的房间不算） */
+  rooms: number
+  /** 新写入的消息条数 */
+  messages: number
+  /** 因库里已有（或包内重复）而跳过的消息条数 */
+  skipped: number
+  /** 导入的用户档案行数 */
+  users: number
+  message?: string
 }
 
 /** 从任意用户输入里抠出网页房间号（支持整条链接、带参数链接、纯数字） */

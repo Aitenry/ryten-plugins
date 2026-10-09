@@ -28,6 +28,10 @@ export default function Settings(): React.JSX.Element {
   const [settings, setSettings] = useState<LiveSettings | null>(null)
   const [stats, setStats] = useState<DbStats | null>(null)
   const [cleaning, setCleaning] = useState(false)
+  /** 导入/导出的进行中状态（空串 = 空闲） */
+  const [busy, setBusy] = useState<'export' | 'import' | ''>('')
+  /** 导入/导出结果提示（一句话；成功与失败共用一行） */
+  const [notice, setNotice] = useState('')
 
   const load = useCallback(async (): Promise<void> => {
     const [snapshot, db] = await Promise.all([api.snapshot(), api.dbStats()])
@@ -42,6 +46,60 @@ export default function Settings(): React.JSX.Element {
 
   const save = async (patch: Partial<LiveSettings>): Promise<void> => {
     setSettings(await api.setSettings(patch))
+  }
+
+  /** 取消（用户按了取消）与失败用的是同一个提示位，靠 message 键区分 */
+  const runExport = (): void => {
+    setBusy('export')
+    setNotice('')
+    void api
+      .exportArchive()
+      .then((result) => {
+        if (result.ok) {
+          setNotice(
+            t('douyin-link.settingsPage.exportDone', {
+              rooms: result.rooms,
+              days: result.days,
+              messages: result.messages
+            })
+          )
+        } else {
+          setNotice(
+            result.message === 'cancelled'
+              ? t('douyin-link.settingsPage.actionCancelled')
+              : t('douyin-link.settingsPage.actionFailed', { detail: result.message ?? '' })
+          )
+        }
+      })
+      .finally(() => setBusy(''))
+  }
+
+  const runImport = (): void => {
+    setBusy('import')
+    setNotice('')
+    void api
+      .importArchive()
+      .then((result) => {
+        if (result.ok) {
+          setNotice(
+            t('douyin-link.settingsPage.importDone', {
+              rooms: result.rooms,
+              messages: result.messages,
+              skipped: result.skipped,
+              users: result.users
+            })
+          )
+          return load()
+        }
+        setNotice(
+          result.message === 'cancelled'
+            ? t('douyin-link.settingsPage.actionCancelled')
+            : result.message === 'badFormat'
+              ? t('douyin-link.settingsPage.importBadFormat')
+              : t('douyin-link.settingsPage.actionFailed', { detail: result.message ?? '' })
+        )
+      })
+      .finally(() => setBusy(''))
   }
 
   return (
@@ -146,6 +204,23 @@ export default function Settings(): React.JSX.Element {
             </Button>
           </div>
         </Row>
+
+        <Row label={t('douyin-link.settingsPage.importExportLabel')} hint={t('douyin-link.settingsPage.importExportHint')}>
+          <div className="flex items-center gap-2">
+            <Button size="small" loading={busy === 'export'} disabled={busy !== ''} onClick={runExport}>
+              {t('douyin-link.settingsPage.exportButton')}
+            </Button>
+            <Button size="small" loading={busy === 'import'} disabled={busy !== ''} onClick={runImport}>
+              {t('douyin-link.settingsPage.importButton')}
+            </Button>
+          </div>
+        </Row>
+
+        {notice ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {notice}
+          </Typography.Text>
+        ) : null}
 
         {stats ? (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>

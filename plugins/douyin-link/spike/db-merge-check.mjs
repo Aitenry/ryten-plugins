@@ -86,7 +86,6 @@ import { insertMessages } from './mapper'
 import { giftRankByPerson, queryMessages } from './mapper'
 import { deleteMessagesBefore, deleteMinutesBefore } from './mapper'
 import { dayRecords } from './mapper'
-import { revealAnonymousNames } from './mapper'
 import { douyinLinkMessages, douyinLinkUsers } from './schema'
 
 const row = (over) => ({
@@ -192,10 +191,8 @@ await withOrm('check.user', async (db) =>
 const sendersNamed = await giftRankByPerson('108011161837', 'sender', 9000, 1e15)
 
 /*
- * 脱马甲（用户 2026-10-08：「可以脱神秘人的衣服，可以知道这个人是谁」）：
- * - S5：礼物行名字是空的，但**用户档案里有真名** → 还原成档案里的名字；
- * - S6：礼物行的名字是抖音给的占位串「☞ 匿名 -」，同一 id 后来发过一条弹幕 → 用弹幕里的真名还原；
- * - S7：只有一条匿名礼物、别处从没露过面 → **保持原样**（宁可还显示匿名，也不猜）。
+ * 一批「匿名 / 空名」的礼物行（曾是脱马甲的样本；脱马甲现在改成拿 id 去抖音查资料，
+ * 不再依赖本地数据反推——这里只是普通数据，用来顺带验证榜单与流水的合并口径）。
  */
 await insertMessages([
   row({ userId: 'S5', userName: '', content: '跑车', diamonds: 1200, toUserId: 'R1', toUserName: '收礼甲', atMs: 20000 }),
@@ -206,10 +203,6 @@ await insertMessages([
 await withOrm('check.user', async (db) =>
   db.insert(douyinLinkUsers).values({ webRid: '108011161837', userId: 'S5', nickname: '用户表里的戊' })
 )
-const reveal = await revealAnonymousNames('108011161837')
-const revealedS5 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S5' })
-const revealedS6 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S6' })
-const revealedS7 = await queryMessages({ webRid: '108011161837', kind: 'gift', userId: 'S7' })
 
 /*
  * 永久保存的兜底（2026-10-08「我需要永久存储」）：
@@ -250,14 +243,7 @@ export default JSON.stringify({
     contents: pageOlder.rows.map((r) => r.text)
   },
   days: days.map((d) => ({ day: d.day, messages: d.messages, gifts: d.gifts, diamonds: d.diamonds, users: d.users })),
-  sendersNamed: sendersNamed.map((s) => ({ userId: s.userId, name: s.name })),
-  reveal: {
-    revealed: reveal.revealed,
-    remaining: reveal.remaining,
-    s5: revealedS5.rows[0]?.user ?? null,
-    s6: revealedS6.rows[0]?.user ?? null,
-    s7: revealedS7.rows[0]?.user ?? null
-  }
+  sendersNamed: sendersNamed.map((s) => ({ userId: s.userId, name: s.name }))
 })
 `
 
@@ -355,12 +341,6 @@ check('每日记录：更早的数据各自成一天（按天倒序）', result.
 check('送礼榜：消息里带昵称的用消息里的', result.sendersNamed.find((s) => s.userId === 'S1')?.name, '送礼甲')
 check('送礼榜：消息里没昵称的退回用户表昵称', result.sendersNamed.find((s) => s.userId === 'S4')?.name, '用户表里的丁')
 
-/* 脱马甲 */
-check('脱马甲：空名 → 用户档案里的真名', result.reveal.s5, '用户表里的戊')
-check('脱马甲：占位名「☞ 匿名 -」→ 同一 id 弹幕里的真名', result.reveal.s6, '真名己')
-check('脱马甲：从未露过面的 id 保持原样（不猜）', result.reveal.s7, '')
-check('脱马甲：确实还原了不止一条', result.reveal.revealed >= 2, true)
-check('脱马甲：还剩认不出的（S7 那条）', result.reveal.remaining >= 1, true)
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 
 rmSync(workDir, { recursive: true, force: true })

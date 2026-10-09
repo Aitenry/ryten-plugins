@@ -7,10 +7,12 @@ import {
   AUDIO_EVENT,
   MESSAGES_EVENT,
   ROOMS_EVENT,
+  SUMMARY_EVENT,
   TICKS_EVENT,
   USERS_EVENT,
   analyzerHub
 } from './monitor/hub'
+import { exportArchive, importArchive } from './archive'
 import type { MainPluginContext } from '@host/main/plugins/context'
 
 /**
@@ -114,20 +116,34 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:recent-clear': (webRid?: string) => hub.clearRecent(String(webRid ?? '')),
     'plugin:douyin-link:users-clear': (webRid?: string) => hub.clearUsers(String(webRid ?? '')).then(() => true),
 
+    // 数据导入 / 导出（ZIP：每个 JSON 是某房间某一天的直播数据）
+    'plugin:douyin-link:export-archive': () => exportArchive(),
+    'plugin:douyin-link:import-archive': async () => {
+      const result = await importArchive()
+      // 导入后把新房间读进内存、作废累计量缓存（界面立刻能看到导入进来的房间）
+      if (result.ok) await hub.reloadRooms()
+      return result
+    },
+
     // 分析查询（全部走数据库）
     'plugin:douyin-link:messages-query': (query?: unknown) =>
       hub.queryMessages((query ?? {}) as Parameters<typeof hub.queryMessages>[0]),
-    'plugin:douyin-link:room-summary': (webRid?: string, minutes?: number, from?: number, to?: number) =>
-      hub.summary(
-        String(webRid ?? ''),
-        typeof minutes === 'number' ? minutes : 60,
-        // 时间进度条 / 「看某一天」给的是一段明确区间：两边都是有限数、且 to > from 才认
+    'plugin:douyin-link:room-summary': (webRid?: string, minutes?: number, from?: number, to?: number) => {
+      const id = String(webRid ?? '')
+      const window = typeof minutes === 'number' ? minutes : 60
+      // 时间进度条 / 「看某一天」给的是一段明确区间：两边都是有限数、且 to > from 才认
+      const range =
         typeof from === 'number' && typeof to === 'number' && Number.isFinite(from) && Number.isFinite(to) && to > from
           ? { from, to }
           : undefined
-      ),
-    // 脱马甲：把匿名/空名的行还原成这个 id 的真名（不传 webRid = 所有房间）
-    'plugin:douyin-link:reveal-anonymous': (webRid?: string) => hub.revealAnonymous(String(webRid ?? '')),
+      // 界面来查概览 = 界面正在看这个窗口：顺带登记，落库后按同一窗口把概览实时推回去
+      hub.watchSummary(id, window, range)
+      return hub.summary(id, window, range)
+    },
+    /** 界面不再看这个房间的概览（切房间/卸载）：停掉它的实时推送 */
+    'plugin:douyin-link:summary-unwatch': (webRid?: string) => hub.unwatchSummary(String(webRid ?? '')),
+    // 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）
+    'plugin:douyin-link:reveal-mystery': (userId?: string) => hub.revealMystery(String(userId ?? '')),
     // 每一天的直播记录（左侧房间旁边的列表）
     'plugin:douyin-link:day-records': (webRid?: string, limit?: number) =>
       hub.dayRecords(String(webRid ?? ''), typeof limit === 'number' ? limit : 90),
@@ -217,4 +233,4 @@ export function initAnalyzer(ctx: MainPluginContext): void {
 }
 
 /** 事件通道名（install 里 registerEvent 用） */
-export const EVENTS = [ROOMS_EVENT, MESSAGES_EVENT, USERS_EVENT, TICKS_EVENT, AUDIO_EVENT]
+export const EVENTS = [ROOMS_EVENT, MESSAGES_EVENT, USERS_EVENT, TICKS_EVENT, AUDIO_EVENT, SUMMARY_EVENT]
