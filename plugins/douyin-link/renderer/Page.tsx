@@ -101,6 +101,16 @@ export default function Page(): React.JSX.Element {
    * 两个入口都往这里写：概览的时间进度条、左侧「每日记录」点某一天。
    */
   const [range, setRange] = useState<{ from: number; to: number } | null>(null)
+  /**
+   * 「现在」的粗粒度时钟（每 5 秒一跳）。
+   *
+   * 为什么必须有它：「今天」的时间范围右端得**跟着时间走**。`dayBounds.last` 原来只在挂载时
+   * 用一次 `Date.now()` 算出来，而它的依赖只有 `activeDay`（今天根本不变），于是右端被**冻在
+   * 打开界面的那一刻**：概览永远只统计到那一秒，之后落库的礼物进不了窗口；主进程还会因为
+   * 「窗口右端已是历史」而干脆不再推送概览。用户看到的就是「礼物不是实时的，得关掉应用重新
+   * 进来才看见最新的」。用这个心跳让右端持续推进即可（历史的那一天仍是整天，不受影响）。
+   */
+  const [clock, setClock] = useState(() => Date.now())
   /** 当前房间「每一天的直播记录」（左侧列表）与它选中的那一天 */
   const [days, setDays] = useState<DayRecordRow[]>([])
   const [daySel, setDaySel] = useState('')
@@ -168,10 +178,11 @@ export default function Page(): React.JSX.Element {
     const start = new Date(`${activeDay}T00:00:00`).getTime()
     if (!Number.isFinite(start)) return null
     const end = start + 86400000 - 1
-    const now = Date.now()
+    // 「现在」用 clock（每 5 秒一跳）而不是当场取 Date.now()：今天的右端要持续推进，
+    // 否则这个 memo 只算一次、之后永远停在打开那一刻（见 clock 的注释）。
     // 今天还没有数据时也给一条进度条（用户可以先看空态，数据一到就动起来）
-    return { first: start, last: Math.min(end, now) }
-  }, [activeDay])
+    return { first: start, last: Math.min(end, clock) }
+  }, [activeDay, clock])
 
   /**
    * 生效的时间范围：用户拖出来的那一段**夹在这一天之内**；没拖过就是「这一天的全部数据」
@@ -233,6 +244,15 @@ export default function Page(): React.JSX.Element {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  /**
+   * 「现在」时钟：每 5 秒把 `clock` 推一格，让「今天」的时间范围右端跟着时间走
+   * （见 clock 的注释——没有它，概览会冻在打开那一刻，新的礼物永远进不来）。
+   */
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 5000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   /**
    * 当前房间的「每日记录」：切房间时拉一次，监控中每 60 秒补一次（今天那一行的计数是活的）。
