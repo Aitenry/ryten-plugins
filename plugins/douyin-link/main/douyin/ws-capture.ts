@@ -1,6 +1,9 @@
-import { BrowserWindow } from 'electron'
 import logger from 'electron-log'
 import * as zlib from 'node:zlib'
+import type { BrowserPage } from './browser-host'
+import { BROWSER_UA, browserHost } from './browser-host'
+import { findBrowser } from './browser-find'
+import { RawWebSocket, WsHandshakeError } from './raw-ws'
 import type { DanmakuItem, UserInfo } from '../../shared/types'
 import { getBytes, readMessage } from './protobuf'
 import { decodeProtoResponse } from './proto-messages'
@@ -8,95 +11,77 @@ import { giftCatalog } from '../gift/catalog'
 import type { DanmakuHooks, DanmakuTarget } from './danmaku'
 
 /**
- * 实时通道采集器：**借直播间页面自己的 websocket** 拿逐条消息。
+ * 实时通道采集器：**主进程自己连抖音推送 ws**，签名由本机真实浏览器产生。
  *
- * 为什么必须借页面（而不是主进程直连 ws）：
- * 抖音的推送网关 `wss://…/webcast/im/push/v2/` 有**设备指纹闸**——用合成的 ttwid 直连，
- * 无论签名对不对，握手都会被回 `Handshake-Msg: DEVICE_BLOCKED`（实测 2026-10，
- * 见 `spike/sign-spike.mjs`）。只有真正浏览器上下文里那份 `tt_webid` 设备身份能过闸。
- * 所以这里创建一个**隐藏窗口**（不显示、静音、拦掉视频流）加载直播间页，让页面自己把
- * ws 连上，再用 CDP 截取 `Network.webSocketFrameReceived` 的二进制帧。
+ * 为什么不再开 Electron 隐藏窗口 / 不再纯 Node 算签名（2026-10 实测，`spike/gate-spike.mjs`）：
+ * 抖音推送网关有**设备指纹闸**——用页面自己那条已签名的 ws URL 从纯 Node（tls 裸连）连接
+ * **能返回 101 并收到全量帧**；但离线用 webmssdk 重算 signature 一律被 `DEVICE_BLOCKED` 拒，
+ * 因为签名还依赖网页安全 SDK（secsdk/isaac）的运行时设备指纹，纯 Node 复刻不可行。
  *
- * 上报范围：**整批**（弹幕/进场/点赞/关注/人数/麦位都在），因为 ws 帧里就是完整的
- * `WebcastResponse`。它连上时中枢会**暂停 HTTP 轮询**（`./danmaku`）——二者二选一，避免同一条消息
- * 被两个来源各记一次；ws 断了中枢再把 HTTP 轮询接回来。
+ * 所以这里：**借本机已安装的 Chromium（Chrome/Edge/Brave/Chromium）**——无头 spawn 一个独立
+ * 临时 profile 的浏览器进程，加载直播间页，用 CDP 抓页面那条推送 ws 的**完整 URL 与握手头**，
+ * 再由**主进程自己**用 `RawWebSocket` 连上去、解码 `PushFrame`、整批上报。
  *
- * 两条通道**收到的消息并不完全一样**（2026-10 实测，`spike/live-probe.mjs` 走 HTTP、
- * `spike/ws-spike.mjs` 走页面 ws）：语音房的点歌（`WebcastLinkmicOrderSingMessage`）两边都推
- * （msgId 能对上）；而真正的 `WebcastGiftMessage` 在 HTTP 420s + ws 79 帧/100s 的样本里
- * **一条都没出现过**（房间里却肉眼能看到「X 送了…」，那是点歌）。所以礼物这一类**不能只押在 ws 上**，
- * 两个解码器都得留（见 `./proto-messages.ts`）。
+ * 契约与旧实现一致（`DanmakuHooks` / `start` / `stop` / `setTarget` / `connected`）：
+ * 中枢据相位决定「用 ws 还是回落到 HTTP 轮询」（`danmaku.ts`），二者二选一，避免同一条消息记两次。
  *
- * 帧结构与复用：ws 帧是 `PushFrame`（`payload` 在字段 8，常态 gzip），
- * 解压后就是**同一份 `WebcastResponse`**——直接交给 `decodeProtoResponse`，与 HTTP 走同一套解码。
- *
- * 降级契约：本类实现与 `DanmakuCollector` 相同的对外接口（start/stop/setTarget/connected +
- * onItems/onMic/onStatus）。中枢据它的相位决定「用 ws 还是回落到 HTTP 轮询」；
- * 连续失败即本会话放弃，窗口在 `stop()` 里彻底销毁。
+ * 降级：找不到浏览器 → `noBrowser`（本会话放弃，HTTP 轮询接管）；浏览器起不来/页面没建 ws →
+ * 退避重试。连续失败到上限即本会话放弃，弹幕与数据库不受影响。
  */
 
-/**
- * 推送 ws 的 URL 特征（用来从页面所有 ws 里挑出弹幕推送那一条）。
- * 抖音现在有两套：老的 `…/webcast/im/push/v2/`，以及新的 bytelink `…/bytelink/wss/v1/`
- * （页面默认 props 里就是 bytelink 那套），两条都认。
- */
+/** 推送 ws 的 URL 特征（老 `…/webcast/im/push/v2/` 与新 bytelink `…/bytelink/wss/` 两条都认） */
 const PUSH_URL_MARKS = ['/webcast/im/push/', '/bytelink/wss/']
-
-function isPushUrl(url: string): boolean {
-  return PUSH_URL_MARKS.some((mark) => url.includes(mark))
-}
 /** 等「页面把 ws 建起来」的死线 */
-const START_TIMEOUT_MS = 20000
+const START_TIMEOUT_MS = 25000
 /** 建立成功后又长时间没有帧，视为掉线（页面可能被风控） */
 const IDLE_TIMEOUT_MS = 120000
 /** 失败退避阶梯 */
 const RETRY_BACKOFF_MS = [4000, 8000, 16000, 30000, 60000]
 /** 连续失败多少次就本会话放弃 */
 const MAX_FAILURES = 5
-/**
- * 隐藏窗口的定期刷新间隔。
- *
- * 为什么必须刷新：窗口里跑的是**整张抖音直播 SPA**（React + webmssdk + 埋点 + 播放器逻辑），
- * 跑久了 JS 堆/定时器只涨不消；实测「一开始不卡、后面越来越卡」就是它在后台跟音频解码/调度抢 CPU。
- * 定期把页面重启一次（ws 会自动重连），就能把累积状态清掉——代价是刷新那一两秒的消息由 HTTP 轮询顶着。
- */
-const PAGE_RELOAD_MS = 10 * 60 * 1000
-/** 隐藏窗口的尺寸（小一点，只为了跑 JS；不显示） */
-const WINDOW_WIDTH = 480
-const WINDOW_HEIGHT = 320
-/** 推送消息普查的间隔（「这条通道到底推了哪些消息」——实时页空白时靠它定位） */
+/** 定时换一份新签名（页面 reload 触发重连），清掉累积状态 */
+const SIGNATURE_REFRESH_MS = 10 * 60 * 1000
+/** 推送消息普查的间隔（实时页空白时靠它定位服务端推了哪些消息） */
 const METHOD_SUMMARY_MS = 2 * 60 * 1000
 
-interface CdpMessage {
-  requestId?: string
-  url?: string
-  response?: { opcode?: number; payloadData?: string }
+/** 抓到的「页面那条已签名推送 ws」：URL（含 signature）与抓到的时刻 */
+interface SignedSocket {
+  url: string
+  at: number
+}
+
+export interface RoomSocketOptions {
+  /** 显式指定的浏览器可执行文件路径（设置为空则自动发现） */
+  browserPath?: string
 }
 
 export class RoomSocketCapture {
   private readonly hooks: DanmakuHooks
   private target: DanmakuTarget
-  private win: BrowserWindow | null = null
+  private readonly browserPath: string
+  private page: BrowserPage | null = null
+  private ws: RawWebSocket | null = null
   private stopped = true
   private connectedOnce = false
   private failures = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private idleTimer: ReturnType<typeof setTimeout> | null = null
   private startTimer: ReturnType<typeof setTimeout> | null = null
-  private reloadTimer: ReturnType<typeof setTimeout> | null = null
-  /** CDP 只给 requestId，URL 要自己用 webSocketCreated 记下来 */
-  private readonly sockets = new Map<string, string>()
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null
+  private signed: SignedSocket | null = null
+  /** 正在等一条新的已签名 URL（reload 之后）——收到就发起连接 */
+  private awaitingSignature = false
+  private pageSession = ''
   private messages = 0
-  /** 本会话在该通道推送帧里见过的 method 计数（诊断：这条通道到底推了哪些消息） */
   private methods: Record<string, number> = {}
   private lastSummaryAt = 0
 
-  constructor(target: DanmakuTarget, hooks: DanmakuHooks) {
+  constructor(target: DanmakuTarget, hooks: DanmakuHooks, options: RoomSocketOptions = {}) {
     this.target = target
     this.hooks = hooks
+    this.browserPath = String(options.browserPath ?? '').trim()
   }
 
-  /** 是否已经真的收到过 ws 帧（界面「已连接」语义） */
   get connected(): boolean {
     return this.connectedOnce
   }
@@ -113,198 +98,142 @@ export class RoomSocketCapture {
     this.messages = 0
     this.methods = {}
     this.lastSummaryAt = Date.now()
+    this.signed = null
     this.hooks.onStatus({ phase: 'connecting', failure: null })
-    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：打开隐藏窗口借页面 ws`)
-    this.openWindow()
+    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：借本机浏览器产生签名，主进程直连 ws`)
+    void this.openSession()
   }
 
   stop(): void {
     if (this.stopped) return
     this.stopped = true
     this.connectedOnce = false
+    this.awaitingSignature = false
     this.clearTimers()
-    this.sockets.clear()
-    const win = this.win
-    this.win = null
-    if (win && !win.isDestroyed()) {
-      try {
-        if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
-      } catch {
-        /* ignore */
-      }
-      win.destroy()
-    }
+    this.closeWs()
+    const page = this.page
+    this.page = null
+    this.signed = null
+    if (page) void page.close()
   }
 
   /* --------------------------------------------------------------- 内部 */
 
-  private openWindow(): void {
+  /** 起会话：找浏览器 → 开标签页 → 订阅事件 → 导航（等页面自己把推送 ws 建起来） */
+  private async openSession(): Promise<void> {
     if (this.stopped) return
-    let win: BrowserWindow
-    try {
-      win = new BrowserWindow({
-        show: false,
-        width: WINDOW_WIDTH,
-        height: WINDOW_HEIGHT,
-        skipTaskbar: true,
-        webPreferences: {
-          // 独立会话：既不污染宿主会话，也把「拦资源」限制在自己身上
-          partition: 'douyin-link-realtime',
-          // **不要** backgroundThrottling:false：隐藏窗口开着不节流会让整个抖音直播页
-          // 在后台满速跑（JS/定时器/渲染），实测会把同进程的音频调度挤到卡顿。
-          // 推送 ws 是事件驱动的（帧到达就会回调），节流不影响收帧，但能省一大截 CPU。
-          backgroundThrottling: true,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true
-        }
-      })
-    } catch (error) {
-      this.fail('windowFailed', describe(error))
+    const found = findBrowser(this.browserPath)
+    if (!found) {
+      // 没有可驱动的 Chromium：本会话放弃（HTTP 轮询接管）
+      this.hooks.onStatus({ phase: 'error', failure: { code: 'noBrowser' } })
+      logger.warn(`[douyin-link] ${this.target.webRid} 实时通道：未找到 Chrome/Edge/Chromium，改用 HTTP 轮询`)
+      this.stop()
       return
     }
-    this.win = win
-    win.setMenuBarVisibility(false)
-    win.webContents.setAudioMuted(true)
-    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    /**
-     * 只留「跑 JS + 连 ws」必需的东西：视频、图片、字体一律拦掉。
-     * 隐藏窗口不该为了收实时消息去拉整条直播流 / 画页面（既省流量，也不跟音频抢 CPU）。
-     * 注意：Electron 的同一个 session 每种事件**只保留最后一个监听器**，所以这里只能注册一次。
-     */
     try {
-      const blockedTypes = new Set(['image', 'font', 'media', 'ping', 'cspReport'])
-      win.webContents.session.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
-        if (blockedTypes.has(details.resourceType)) return callback({ cancel: true })
-        if (/\.(flv|m3u8|ts)(\?|$)/.test(details.url)) return callback({ cancel: true })
-        callback({})
-      })
-    } catch {
-      /* 拦不住也不致命 */
+      await browserHost.ensure(found.path)
+    } catch (error) {
+      this.fail('browserLaunchFailed', describe(error))
+      return
     }
-
-    win.webContents.on('render-process-gone', () => this.onDie('rendererGone'))
-    /**
-     * `did-fail-load` **只认主框架**。
-     *
-     * 坑（2026-10 实测）：抖音直播间页里有子框架（广告/统计 iframe）会被页面自己的 CSP 拦掉，
-     * 于是浏览器抛 `-30 ERR_BLOCKED_BY_CSP`。旧版这里不看 `isMainFrame`、一律当致命错误，
-     * 结果 ws 明明已经连上并收帧了，几秒后却被自己把窗口销毁 → 一条消息都留不住。
-     */
-    win.webContents.on('did-fail-load', (_event, code, desc, _url, isMainFrame) => {
-      if (!isMainFrame) return
-      if (code === -3) return // ERR_ABORTED：我们主动停/换地址时的正常中断
-      this.onDie(`loadFailed ${code} ${desc}`)
-    })
-
-    this.attachDebugger(win)
-
-    const url = `https://live.douyin.com/${this.target.webRid}`
-    win.loadURL(url).catch((error) => this.onDie(`loadUrl ${describe(error)}`))
-
-    this.startTimer = setTimeout(() => {
-      if (!this.connectedOnce) this.onDie('noSocketInTime')
-    }, START_TIMEOUT_MS)
-    this.armReloadTimer()
-  }
-
-  /** 定期刷新隐藏窗口（见 PAGE_RELOAD_MS）：把页面的累积状态清掉，别让它越跑越拖音频 */
-  private armReloadTimer(): void {
-    if (this.reloadTimer) clearTimeout(this.reloadTimer)
-    this.reloadTimer = setTimeout(() => this.reloadPage(), PAGE_RELOAD_MS)
+    if (this.stopped) return
+    try {
+      const page = await browserHost.openPage()
+      if (this.stopped) {
+        void page.close()
+        return
+      }
+      this.page = page
+      this.pageSession = page.sessionId
+      // 事件是浏览器级的（所有会话都推）：只认本标签页的
+      page.on('Network.webSocketCreated', (params, sessionId) => {
+        if (sessionId === this.pageSession) this.onSocketCreated(params)
+      })
+      await page.send('Network.enable')
+      await page.send('Page.enable')
+      await page.send('Page.navigate', { url: `https://live.douyin.com/${this.target.webRid}` })
+      this.awaitingSignature = true
+      this.armStartTimer()
+    } catch (error) {
+      this.fail('browserLaunchFailed', describe(error))
+    }
   }
 
   /**
-   * 定期重启隐藏窗口（见 PAGE_RELOAD_MS）：把页面的累积状态清掉，别让它越跑越拖音频。
+   * 页面建了一条 ws：若是推送 ws，就抓下它的完整 URL（含 signature），改由主进程直连。
    *
-   * **为什么是「重建窗口」而不是 `webContents.reload()`**（2026-10-08 按用户机器的日志改）：
-   * 那份日志里每次定时刷新都是同一个形状——
-   * `21:12:14 定期刷新` → `21:12:17 页面已连上推送 ws` → **整整 2 分钟一帧都没有** →
-   * `21:15:43 实时通道失败（realtimeChannelLost idle）` → 销毁窗口重开 → `21:15:49` 立刻正常收帧。
-   * 也就是说：**刷新过的那个页面（隐藏窗口 + backgroundThrottling）连上了 ws 却不来帧**，
-   * 而新建的窗口一切正常——那 2 分钟是纯丢消息（每 10 分钟丢一次，一次约 2 分钟）。
-   * 所以这里改走「销毁 + 重开」这条**已被掉线恢复验证过**的路：
-   * 代价与 reload 一样（一次页面加载），但不会再有「连上却不推」的死窗口。
+   * 用 `Network.webSocketCreated` 而不是 `…WillSendHandshakeRequest`：实测后者在当前 Chrome 里
+   * `request.url` 是空的，而前者给的就是**带着 signature 的完整 URL**（spike 已证可直连）。
    */
-  private reloadPage(): void {
-    this.reloadTimer = null
-    const win = this.win
-    if (this.stopped || !win || win.isDestroyed()) return
-    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：定期重启隐藏窗口（重建窗口，而不是 reload）`)
-    this.teardownWindow()
-    this.openWindow()
-  }
-
-  /** 收掉当前隐藏窗口（CDP 摘掉 + 销毁），socket 映射与定时器一并清干净 */
-  private teardownWindow(): void {
-    const win = this.win
-    this.win = null
-    this.connectedOnce = false
-    this.clearTimers()
-    this.sockets.clear()
-    if (!win || win.isDestroyed()) return
-    try {
-      if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach()
-    } catch {
-      /* ignore */
-    }
-    win.destroy()
-  }
-
-  private attachDebugger(win: BrowserWindow): void {
-    try {
-      const dbg = win.webContents.debugger
-      if (!dbg.isAttached()) dbg.attach('1.3')
-      dbg.on('message', (_event, method, params) => this.onCdp(method, params as CdpMessage))
-      void dbg.sendCommand('Network.enable').catch(() => {})
-      void dbg.sendCommand('Page.enable').catch(() => {})
-    } catch (error) {
-      // CDP 挂不上：这条通道没法用，直接判失败（不影响 HTTP 弹幕）
-      this.fail('cdpFailed', describe(error))
-    }
-  }
-
-  private onCdp(method: string, params: CdpMessage): void {
+  private onSocketCreated(params: Record<string, unknown>): void {
     if (this.stopped) return
-    if (method === 'Network.webSocketCreated') {
-      if (params.requestId && params.url) this.sockets.set(params.requestId, params.url)
-      if (params.url && isPushUrl(params.url)) {
-        logger.info(`[douyin-link] ${this.target.webRid} 实时通道：页面已连上推送 ws`)
+    const url = String(params.url ?? '')
+    if (!isPushUrl(url)) return
+    this.signed = { url, at: Date.now() }
+    if (this.startTimer) {
+      clearTimeout(this.startTimer)
+      this.startTimer = null
+    }
+    logger.info(`[douyin-link] ${this.target.webRid} 实时通道：页面已建推送 ws，改由主进程直连`)
+    void this.connectMainWs()
+  }
+
+  /** 主进程自己连那条已签名的推送 ws（握手头自建：Origin + UA + Cookie） */
+  private async connectMainWs(): Promise<void> {
+    if (this.stopped || !this.signed) return
+    if (this.ws) return // 已在连/已连上
+    this.awaitingSignature = false
+    const url = this.signed.url
+    const headers: Record<string, string> = {
+      Origin: 'https://live.douyin.com',
+      // 签名与 UA 绑定：必须用**浏览器同款** UA（见 browser-host 的 BROWSER_UA）
+      'User-Agent': BROWSER_UA,
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+    }
+    try {
+      const res = (await this.page?.send('Network.getCookies', {
+        urls: [`https://live.douyin.com/${this.target.webRid}`]
+      })) as { cookies?: Array<{ name: string; value: string }> } | undefined
+      const cookie = (res?.cookies ?? []).map((c) => `${c.name}=${c.value}`).join('; ')
+      if (cookie) headers.Cookie = cookie
+    } catch {
+      /* 拿不到 Cookie 也试：抖音推送 ws 主要靠 URL 里的 signature */
+    }
+    if (this.stopped) return
+    const ws = new RawWebSocket(url, { headers })
+    this.ws = ws
+    ws.onopen = () => logger.info(`[douyin-link] ${this.target.webRid} 实时通道：主进程 ws 握手 101`)
+    ws.onmessage = (data, isBinary) => {
+      if (isBinary) this.onBinaryFrame(data)
+    }
+    ws.onerror = (error) => {
+      if (error instanceof WsHandshakeError) {
+        // 签名过期/被拒：reload 换一份新的，再重连
+        logger.warn(`[douyin-link] ${this.target.webRid} 实时通道：握手被拒（${error.handshakeMsg || error.status}）`)
+        this.onLost('handshakeRejected')
+      } else {
+        logger.warn(`[douyin-link] ${this.target.webRid} 实时通道：ws 错误 ${error.message}`)
       }
-      return
     }
-    if (method === 'Network.webSocketFrameReceived') {
-      const requestId = params.requestId ?? ''
-      const url = this.sockets.get(requestId) ?? ''
-      /**
-       * URL **未知**时照样往下试（只排除「明确不是推送 ws」的那些连接）。
-       * 为什么：映射可能缺（`webSocketCreated` 偶尔漏掉、或页面刷新那一刻建连），
-       * 而按 URL 一律丢帧的代价是整条通道静默作废；`onBinaryFrame` 解不出 `PushFrame` 时本来就会
-       * 自己返回，所以这里多试一次是安全的。
-       */
-      if (url && !isPushUrl(url)) return
-      const frame = params.response
-      if (!frame || frame.opcode !== 2 || !frame.payloadData) return
-      this.onBinaryFrame(frame.payloadData)
-      return
-    }
-    if (method === 'Network.webSocketClosed') {
-      if (params.requestId) this.sockets.delete(params.requestId)
+    ws.onclose = (reason) => {
+      if (this.ws !== ws) return
+      this.ws = null
+      if (this.stopped) return
+      // 已经收到过帧且没有 error 分支处理过：当作掉线重连
+      this.onLost(`closed ${reason}`)
     }
   }
 
   /** 一帧二进制 PushFrame：解出内层 WebcastResponse，整批上报（弹幕/进场/…/麦位） */
-  private onBinaryFrame(payloadData: string): void {
-    let payload: Buffer | undefined
+  private onBinaryFrame(payloadData: Buffer): void {
+    let frame: ReturnType<typeof readMessage>
     try {
-      const frame = readMessage(Buffer.from(payloadData, 'base64'))
-      payload = getBytes(frame, 8)
+      frame = readMessage(payloadData)
     } catch {
       return
     }
-    if (!payload || payload.length === 0) return
-
-    let body = payload
+    let body = getBytes(frame, 8)
+    if (!body || body.length === 0) return
     if (body.length > 2 && body[0] === 0x1f && body[1] === 0x8b) {
       try {
         body = zlib.gunzipSync(body)
@@ -317,31 +246,25 @@ export class RoomSocketCapture {
     let users: UserInfo[] = []
     let roomEnded = false
     let micUserIds: string[] | null = null
-    let methodsSeen: Record<string, number> = {}
     try {
       const batch = decodeProtoResponse(body, giftCatalog).batch
       items = batch.items
       users = batch.users
       roomEnded = batch.roomEnded
       micUserIds = batch.micUserIds
-      methodsSeen = batch.methods
+      this.noteMethods(batch.methods)
     } catch (error) {
       logger.warn(`[douyin-link] ${this.target.webRid} 实时帧解码失败:`, describe(error))
       return
     }
 
-    // 诊断：这条通道推了哪些 method（实时页空白时，先看服务端到底推没推）
-    this.noteMethods(methodsSeen)
-
     if (!this.connectedOnce) {
       this.connectedOnce = true
       this.failures = 0
-      if (this.startTimer) {
-        clearTimeout(this.startTimer)
-        this.startTimer = null
-      }
+      this.clearStartTimer()
       logger.info(`[douyin-link] ${this.target.webRid} 实时通道：已连上（开始截取推送帧）`)
       this.hooks.onStatus({ phase: 'live', failure: null })
+      this.armRefreshTimer()
     }
     this.armIdleTimer()
 
@@ -352,13 +275,59 @@ export class RoomSocketCapture {
     }
   }
 
-  /**
-   * 推送 method 普查：这条通道推送帧里见过哪些消息、各多少条。
-   *
-   * 为什么必须有：本类以前只上报「解出来的行」，**从没说过服务端推了哪些 method**——
-   * 于是「实时页空白」根本无从判断是「没推」还是「没解出来」。这里每 2 分钟写一条汇总，
-   * 日志里就能一眼看出服务端到底推了哪些消息。
-   */
+  /** 掉线/被拒：换一份新签名（reload 页面触发页面重连）再重试 */
+  private onLost(reason: string): void {
+    if (this.stopped) return
+    this.closeWs()
+    this.connectedOnce = false
+    this.armIdleTimerReset()
+    this.hooks.onStatus({ phase: 'retrying', failure: { code: 'realtimeChannelLost', detail: reason.slice(0, 80) } })
+    this.scheduleRetry()
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped) return
+    this.failures += 1
+    if (this.failures > MAX_FAILURES) {
+      logger.warn(`[douyin-link] ${this.target.webRid} 实时通道连续失败 ${this.failures - 1} 次，本会话放弃（弹幕不受影响）`)
+      this.hooks.onStatus({ phase: 'error', failure: { code: 'realtimeChannelLost' } })
+      this.stop()
+      return
+    }
+    const backoff = RETRY_BACKOFF_MS[Math.min(this.failures - 1, RETRY_BACKOFF_MS.length - 1)]
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      if (this.stopped) return
+      void this.refreshSignature()
+    }, backoff)
+  }
+
+  /** reload 页面 → 页面重新建推送 ws → 抓到新的已签名 URL（`onHandshake` 会接着连） */
+  private async refreshSignature(): Promise<void> {
+    if (this.stopped) return
+    if (!this.page) {
+      void this.openSession()
+      return
+    }
+    try {
+      this.signed = null
+      this.awaitingSignature = true
+      this.armStartTimer()
+      await this.page.send('Page.reload', { ignoreCache: false })
+    } catch (error) {
+      this.fail('browserLaunchFailed', describe(error))
+    }
+  }
+
+  /** 起不来就退避重试；找不到浏览器是永久失败（由 openSession 直接停） */
+  private fail(code: string, detail: string): void {
+    if (this.stopped) return
+    logger.warn(`[douyin-link] ${this.target.webRid} 实时通道失败（${code} ${detail.slice(0, 120)}）`)
+    this.hooks.onStatus({ phase: 'retrying', failure: { code, detail: detail.slice(0, 160) } })
+    this.scheduleRetry()
+  }
+
   private noteMethods(methods: Record<string, number>): void {
     for (const [method, count] of Object.entries(methods)) {
       this.methods[method] = (this.methods[method] ?? 0) + count
@@ -373,50 +342,58 @@ export class RoomSocketCapture {
     this.methods = {}
   }
 
-  /** 连上后如果长时间没有帧，视为掉线（页面可能被风控/切走） */
+  private closeWs(): void {
+    const ws = this.ws
+    this.ws = null
+    if (ws) ws.close()
+  }
+
+  private armStartTimer(): void {
+    this.clearStartTimer()
+    this.startTimer = setTimeout(() => {
+      this.startTimer = null
+      if (this.stopped || this.ws || this.connectedOnce) return
+      this.fail('noSignedUrl', '页面未建立推送 ws')
+    }, START_TIMEOUT_MS)
+  }
+
+  private clearStartTimer(): void {
+    if (this.startTimer) clearTimeout(this.startTimer)
+    this.startTimer = null
+  }
+
   private armIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer)
-    this.idleTimer = setTimeout(() => this.onDie('idle'), IDLE_TIMEOUT_MS)
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null
+      if (!this.stopped) this.onLost('idle')
+    }, IDLE_TIMEOUT_MS)
   }
 
-  private onDie(reason: string): void {
-    if (this.stopped) return
-    // 关掉旧窗口，走重试（与定时重启共用同一套收尾）
-    this.teardownWindow()
-    this.fail('realtimeChannelLost', reason)
+  private armIdleTimerReset(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = null
   }
 
-  private fail(code: string, detail: string): void {
-    if (this.stopped) return
-    this.failures += 1
-    const failure = { code, detail: detail.slice(0, 160) }
-    if (this.failures >= MAX_FAILURES) {
-      logger.warn(
-        `[douyin-link] ${this.target.webRid} 实时通道连续失败 ${this.failures} 次，本会话放弃` +
-          `（弹幕不受影响）：${code} ${detail}`
-      )
-      this.stop()
-      return
-    }
-    const backoff = RETRY_BACKOFF_MS[Math.min(this.failures - 1, RETRY_BACKOFF_MS.length - 1)]
-    logger.warn(
-      `[douyin-link] ${this.target.webRid} 实时通道失败（${code} ${detail}），${Math.round(backoff / 1000)}s 后重试`
-    )
-    this.hooks.onStatus({ phase: 'retrying', failure })
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null
-      if (this.stopped) return
-      this.openWindow()
-    }, backoff)
+  private armRefreshTimer(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer)
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null
+      if (!this.stopped) void this.refreshSignature()
+    }, SIGNATURE_REFRESH_MS)
   }
 
   private clearTimers(): void {
-    for (const key of ['retryTimer', 'idleTimer', 'startTimer', 'reloadTimer'] as const) {
+    for (const key of ['retryTimer', 'idleTimer', 'startTimer', 'refreshTimer'] as const) {
       const timer = this[key]
       if (timer) clearTimeout(timer)
       this[key] = null
     }
   }
+}
+
+function isPushUrl(url: string): boolean {
+  return PUSH_URL_MARKS.some((mark) => url.includes(mark))
 }
 
 function describe(error: unknown): string {

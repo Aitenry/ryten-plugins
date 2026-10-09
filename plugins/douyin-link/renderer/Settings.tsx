@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, InputNumber, Select, Switch, Typography } from 'antd'
+import { Button, Input, InputNumber, Select, Switch, Typography } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import {
   DANMAKU_KINDS,
@@ -32,6 +32,8 @@ export default function Settings(): React.JSX.Element {
   const [busy, setBusy] = useState<'export' | 'import' | ''>('')
   /** 导入/导出结果提示（一句话；成功与失败共用一行） */
   const [notice, setNotice] = useState('')
+  /** 浏览器路径输入框的本地草稿（失焦/回车才存，别每敲一个字就写盘） */
+  const [browserPathDraft, setBrowserPathDraft] = useState('')
 
   const load = useCallback(async (): Promise<void> => {
     const [snapshot, db] = await Promise.all([api.snapshot(), api.dbStats()])
@@ -43,6 +45,11 @@ export default function Settings(): React.JSX.Element {
   useEffect(() => {
     void load()
   }, [load])
+
+  /** 设置从主进程回来后，把草稿对齐（外部改动/首次加载） */
+  useEffect(() => {
+    setBrowserPathDraft(settings?.browserPath ?? '')
+  }, [settings?.browserPath])
 
   const save = async (patch: Partial<LiveSettings>): Promise<void> => {
     setSettings(await api.setSettings(patch))
@@ -174,6 +181,23 @@ export default function Settings(): React.JSX.Element {
             size="small"
             checked={settings?.realtimeStream ?? true}
             onChange={(value) => void save({ realtimeStream: value })}
+          />
+        </Row>
+
+        <Row label={t('douyin-link.settingsPage.browserPathLabel')} hint={t('douyin-link.settingsPage.browserPathHint')}>
+          <Input
+            size="small"
+            style={{ width: 320 }}
+            allowClear
+            placeholder={t('douyin-link.settingsPage.browserPathPlaceholder')}
+            value={browserPathDraft}
+            onChange={(event) => setBrowserPathDraft(event.target.value)}
+            onBlur={() => {
+              if (browserPathDraft !== (settings?.browserPath ?? '')) void save({ browserPath: browserPathDraft })
+            }}
+            onPressEnter={() => {
+              if (browserPathDraft !== (settings?.browserPath ?? '')) void save({ browserPath: browserPathDraft })
+            }}
           />
         </Row>
 

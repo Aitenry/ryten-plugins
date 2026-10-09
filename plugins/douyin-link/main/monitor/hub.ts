@@ -40,6 +40,7 @@ import type { MessageRow } from '../db/mapper'
 import { AudioPump } from '../audio/pump'
 import { DanmakuCollector } from '../douyin/danmaku'
 import { RoomSocketCapture } from '../douyin/ws-capture'
+import { browserHost } from '../douyin/browser-host'
 import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
 import type { RoomResolveResult } from '../douyin/room'
 import { revealMysteryProfile } from '../douyin/mystery'
@@ -144,8 +145,13 @@ export const DEFAULT_SETTINGS: LiveSettings = {
   volume: 0.8,
   maxItems: 200,
   kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],
-  // 实时通道默认开：借隐藏窗口页面的 ws 收逐条消息（比轮询实时）；失败自动回落到轮询
+  // 实时通道默认开：借本机浏览器（Chrome/Edge）产生已签名 ws URL，主进程自己直连（比轮询实时）；失败自动回落到轮询
   realtimeStream: true,
+  /**
+   * 实时通道用的浏览器可执行文件路径。空 = 自动发现（Chrome/Edge/Brave/Chromium 的常见安装路径）。
+   * 装在不常规位置或想指定某个浏览器时在这里填绝对路径。
+   */
+  browserPath: '',
   autoScroll: true,
   // 同时监控 3 个房间（轮询很轻，但每个房间每秒一个请求，还是别贪）
   monitorConcurrency: 3,
@@ -369,6 +375,8 @@ export class AnalyzerHub {
     this.cleanupTimer = null
     this.started = false
     avatarCache.dispose()
+    // 收掉 spawn 的本机浏览器进程（临时 profile 一并删）
+    void browserHost.dispose()
     logger.info('[douyin-link] 分析中枢已停止（弹幕轮询与音频泵都收掉了）')
   }
 
@@ -390,6 +398,8 @@ export class AnalyzerHub {
     for (const timer of this.reliveTimers.values()) clearTimeout(timer)
     this.reliveTimers.clear()
     this.stopAudio()
+    // 应用退出前把 spawn 的浏览器也收掉（否则会留一个孤儿 Chromium 进程）
+    void browserHost.dispose()
     logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
     this.emitRooms(true)
   }
@@ -411,6 +421,7 @@ export class AnalyzerHub {
     }
     if (Array.isArray(patch.kinds)) next.kinds = patch.kinds
     if (typeof patch.realtimeStream === 'boolean') next.realtimeStream = patch.realtimeStream
+    if (typeof patch.browserPath === 'string') next.browserPath = patch.browserPath.trim().slice(0, 260)
     if (typeof patch.autoScroll === 'boolean') next.autoScroll = patch.autoScroll
     if (typeof patch.monitorConcurrency === 'number' && Number.isFinite(patch.monitorConcurrency)) {
       next.monitorConcurrency = Math.min(8, Math.max(1, Math.round(patch.monitorConcurrency)))
@@ -968,8 +979,9 @@ export class AnalyzerHub {
   }
 
   /**
-   * 实时通道：借隐藏窗口加载直播间页，用 CDP 截页面自己 ws 的推送帧，整批上报
-   * （弹幕/进场/点赞/关注/人数/麦位）。它连上时暂停 HTTP 轮询、掉线时把轮询接回来。
+   * 实时通道：spawn 本机 Chromium 加载直播间页，用 CDP 抓页面那条**已签名**的推送 ws URL，
+   * 再由**主进程自己**连这条 ws 收逐条消息（弹幕/进场/点赞/关注/人数/麦位），整批上报。
+   * 它连上时暂停 HTTP 轮询、掉线时把轮询接回来。找不到浏览器则本会话放弃、HTTP 轮询顶班。
    */
   private startRoomSocket(state: RoomState): void {
     if (!this.settings.realtimeStream || state.roomSocket) return
@@ -979,7 +991,8 @@ export class AnalyzerHub {
         onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
         onMic: (userIds) => this.handleMic(state, userIds),
         onStatus: (status) => this.onRealtimeStatus(state, status.phase, status.failure)
-      }
+      },
+      { browserPath: this.settings.browserPath }
     )
     state.roomSocket = socket
     socket.start()
@@ -1982,7 +1995,12 @@ export const FAILURE_CODES = [
   'badStream',
   'noAudio',
   'decodeFailed',
-  'unsupported'
+  'unsupported',
+  // 实时通道（借本机浏览器签名 + 主进程直连）新增
+  'noBrowser',
+  'browserLaunchFailed',
+  'noSignedUrl',
+  'realtimeChannelLost'
 ]
 
 /** 让出事件循环一拍（PGlite 与宿主同进程，不让步就会把别人的流式输出挤停） */

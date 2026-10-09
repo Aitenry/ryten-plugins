@@ -304,11 +304,16 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       noAudio: 'Connected to the audio URL but no audio data arrived (no audio track, or pulling is blocked)',
       decodeFailed: 'Audio decoding failed: {{detail}}',
       unsupported: 'This environment does not support WebCodecs audio decoding',
+      noBrowser:
+        'No usable Chrome / Edge / Brave / Chromium found: the realtime channel needs a local browser to produce the signature. Falling back to HTTP polling (records are unaffected); you can also set the browser path in settings',
+      browserLaunchFailed: 'Failed to launch the local browser: {{detail}} (retrying; HTTP polling covers meanwhile)',
+      noSignedUrl: 'The browser page did not open the push websocket (maybe offline or blocked); retrying',
+      realtimeChannelLost: 'The push websocket dropped; re-handshaking (HTTP polling covers meanwhile)',
       bridgeUnavailable: 'The main process did not answer (the plugin may still be loading, or is disabled)'
     },
     settingsPage: {
       intro:
-        'All networking and data live in the main process: danmaku is polled straight from the room push API (no signature needed), and audio is pulled by the main process (the host CSP forbids renderer requests to external hosts) — **only the focused room plays audio**, the others just listen. Per-message events are captured by default via a "realtime channel" from a hidden window\u2019s room page websocket (can be turned off; degrades automatically on failure). Rooms, messages, user stats and per-minute aggregates are stored in the database, so nothing is lost when the app closes.',
+        'All networking and data live in the main process: danmaku is polled straight from the room push API (no signature needed), and audio is pulled by the main process (the host CSP forbids renderer requests to external hosts) — **only the focused room plays audio**, the others just listen. Per-message events are captured by default via the "realtime channel": the main process headlessly launches a **local browser** (Chrome/Edge/Brave/Chromium) to produce a signed push-websocket URL, then connects to it itself (no app window is opened; falls back to HTTP polling when no browser is found or on failure). Rooms, messages, user stats and per-minute aggregates are stored in the database, so nothing is lost when the app closes.',
       qualityLabel: 'Pull quality',
       qualityHint: 'Audio only; lower is lighter (the audio track is identical across qualities)',
       concurrencyLabel: 'Rooms monitored at once',
@@ -320,9 +325,12 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       maxItemsLabel: 'Messages kept in memory',
       kindsLabel: 'Danmaku kinds to show',
       autoScrollLabel: 'Auto-scroll to the newest message',
-      realtimeLabel: 'Realtime channel (experimental)',
+      realtimeLabel: 'Realtime channel',
       realtimeHint:
-        'Captures per-message events from the room page\u2019s websocket (chat / joins / likes / **gifts** \u2014 more realtime than polling). While it is live the HTTP poll is paused and the ws is used; if the ws drops it falls back automatically. Needs a hidden window; degrades automatically on failure.',
+        'The main process headlessly launches a local browser (Chrome/Edge/Brave/Chromium) to generate a signed push websocket, then connects to it itself for per-message events (chat / joins / likes / **gifts** — more realtime than polling). While it is live the HTTP poll is paused and the ws is used; if the ws drops it falls back automatically, and it also degrades when no browser is found.',
+      browserPathLabel: 'Browser executable path',
+      browserPathHint: 'Leave empty to auto-detect common install locations; or set an absolute path to a Chromium-based browser.',
+      browserPathPlaceholder: 'Auto-detect when empty, e.g. C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
       retentionLabel: 'Message retention',
       retentionHint:
         '0 (default) keeps everything forever and never cleans up. Set N days to delete the message stream and minute buckets older than N days; user stats are kept.',

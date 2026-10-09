@@ -313,11 +313,16 @@ export const DouyinLinkZhCN = {
       noAudio: '连上了音频地址，但一直没有音频数据（这路流可能没有音轨，或拉流被挡住了）',
       decodeFailed: '音频解码失败：{{detail}}',
       unsupported: '当前运行环境不支持 WebCodecs 音频解码',
+      noBrowser:
+        '没找到可用的 Chrome / Edge / Brave / Chromium 浏览器：实时通道需要借本机浏览器生成签名。改用 HTTP 轮询采集（不影响记录），也可在设置里指定浏览器路径',
+      browserLaunchFailed: '启动本机浏览器失败：{{detail}}（正在重试；期间由 HTTP 轮询顶班）',
+      noSignedUrl: '浏览器页面没有建立推送 websocket（可能没开播或被风控），正在重试',
+      realtimeChannelLost: '推送 websocket 掉线，正在重新握手（期间由 HTTP 轮询顶班）',
       bridgeUnavailable: '主进程没有响应（插件可能还在装载，或已被停用）'
     },
     settingsPage: {
       intro:
-        '所有网络与数据都在主进程：弹幕由主进程直接轮询直播间的推送接口（免签名），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——**同一时间只有分析中的那个直播间出声**，其它房间只监听弹幕。逐条消息默认由「实时通道」借一个隐藏窗口的直播间页面 websocket 采集（可关闭，失败自动降级）。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
+        '所有网络与数据都在主进程：弹幕由主进程直接轮询直播间的推送接口（免签名），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——**同一时间只有分析中的那个直播间出声**，其它房间只监听弹幕。逐条消息默认由「实时通道」采集：主进程会无头启动一个**本机浏览器**（Chrome/Edge/Brave/Chromium）产生已签名的推送 websocket URL，再由主进程自己直连收消息（不打开任何应用窗口；找不到浏览器或失败时自动回落到 HTTP 轮询）。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
       qualityLabel: '拉流档位',
       qualityHint: '只放声音，档位越低越省流量（实测各档音频轨一致）',
       concurrencyLabel: '同时监控的房间数',
@@ -329,9 +334,12 @@ export const DouyinLinkZhCN = {
       maxItemsLabel: '内存里保留的弹幕条数',
       kindsLabel: '显示的弹幕类型',
       autoScrollLabel: '弹幕列表自动跟随最新',
-      realtimeLabel: '实时通道（实验性）',
+      realtimeLabel: '实时通道',
       realtimeHint:
-        '借直播间页面的 websocket 收逐条消息（弹幕/进场/点赞/**礼物**，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落。需要一个隐藏窗口，失败自动降级。',
+        '主进程无头启动本机浏览器（Chrome/Edge/Brave/Chromium）生成已签名的推送 websocket，再由主进程自己直连收逐条消息（弹幕/进场/点赞/**礼物**，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落；找不到浏览器也会自动降级。',
+      browserPathLabel: '浏览器可执行文件路径',
+      browserPathHint: '留空 = 自动查找常见安装位置；也可填绝对路径指定某个 Chromium 系浏览器。',
+      browserPathPlaceholder: '留空自动查找，例如 C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
 
       retentionLabel: '消息保留',
       retentionHint:
