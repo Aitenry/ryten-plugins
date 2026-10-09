@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "tag": "v0.1.24",
+  "tag": "v0.1.25",
   "plugins": [
     {
       "id": "douyin-link",
@@ -24,8 +24,8 @@
         "order": 60
       },
       "asset": "douyin-link-0.12.0.zip",
-      "size": 82150,
-      "sha256": "739bde27abb69248304b807549b6aa1aa2beb3c73e7ec682e6016cffaf880c11"
+      "size": 81998,
+      "sha256": "2a36f4d5b3c2a61385f8e6a1943fb0bfdd0353a8487b55d7e9f5767913c7b6ba"
     },
     {
       "id": "music-player",
