@@ -50,6 +50,7 @@ export function install(ctx: MainPluginContext): void {
   ctx.contribute(HARNESS_TOOL_CONTRIBUTION, createToolContribution())
 
   // 退出前把轮询与音频泵收掉（托盘「退出」/系统关机时别让请求卡在退出清理期间）
+  // 返回值是 Promise：宿主会 await 它，等本机浏览器子进程真正收干净再退出（见 hub.suspend）。
   ctx.contribute(APP_BEFORE_QUIT, {
     label: '抖音直播分析器：停掉弹幕轮询与音频泵',
     run: () => analyzerHub.suspend('appQuit')

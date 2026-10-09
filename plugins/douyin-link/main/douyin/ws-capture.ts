@@ -75,6 +75,11 @@ export class RoomSocketCapture {
   private messages = 0
   private methods: Record<string, number> = {}
   private lastSummaryAt = 0
+  /**
+   * 帧解码的串行链（见 `onBinaryFrame`）：一帧一帧按到达顺序异步解，
+   * 把 gunzip 与 protobuf 解码从「同步跑完」改成「让出事件循环」。
+   */
+  private decodeChain: Promise<void> = Promise.resolve()
 
   constructor(target: DanmakuTarget, hooks: DanmakuHooks, options: RoomSocketOptions = {}) {
     this.target = target
@@ -151,6 +156,33 @@ export class RoomSocketCapture {
       })
       await page.send('Network.enable')
       await page.send('Page.enable')
+      /**
+       * **拦掉媒体流**（视频/音频）——这条通道只需要页面产生那条**已签名的弹幕 ws**，
+       * 不需要任何画面数据。旧的隐藏窗口版就是用 `onBeforeRequest` 拦 `media` 与 flv/m3u8/ts 的；
+       * 换成「spawn 本机浏览器」后这段丢了，无头页面就会**真的把直播画面拉下来解码**，
+       * 长时间占满 CPU，把宿主的窗口与助手流式输出一起拖慢（用户反馈「会影响应用」）。
+       * `Network.setBlockedURLs` 是 CDP 里最省事的等价物：匹配到的请求由浏览器直接拦掉，
+       * 不需要我们再逐条应答（不像 `Fetch` 域那样漏应答就会把请求挂住）。
+       */
+      await page.send('Network.setBlockedURLs', {
+        // 只按「扩展名结尾 + 可选查询串」匹配——CDP 的 URL 模式只有 `*` 通配，
+        // 写成 `*.ts*` 会误伤任何含 "ts" 的地址（assets / settings / analytics…），
+        // 所以每条都要能被 `?` 或结尾卡住。
+        urls: [
+          '*.flv',
+          '*.flv?*',
+          '*.m3u8',
+          '*.m3u8?*',
+          '*.m4s',
+          '*.m4s?*',
+          '*.mp4',
+          '*.mp4?*',
+          '*.aac',
+          '*.aac?*',
+          '*.ts',
+          '*.ts?*'
+        ]
+      })
       await page.send('Page.navigate', { url: `https://live.douyin.com/${this.target.webRid}` })
       this.awaitingSignature = true
       this.armStartTimer()
@@ -224,8 +256,22 @@ export class RoomSocketCapture {
     }
   }
 
-  /** 一帧二进制 PushFrame：解出内层 WebcastResponse，整批上报（弹幕/进场/…/麦位） */
+  /**
+   * 一帧二进制 PushFrame：解出内层 WebcastResponse，整批上报（弹幕/进场/…/麦位）。
+   *
+   * **串行 + 异步**：帧解码走 `decodeChain` 排队、`gunzip` 用异步版本——宿主自己的助手流式
+   * 输出与窗口操作都跑在同一个主进程里，一条大帧若同步跑完（`gunzipSync` + protobuf）
+   * 就会把这些一起卡住。串起来排队的另一个好处是**顺序不变**（异步 gunzip 也不会让帧互相超车）。
+   */
   private onBinaryFrame(payloadData: Buffer): void {
+    this.decodeChain = this.decodeChain
+      .then(() => this.decodeFrame(payloadData))
+      .catch((error) => logger.warn(`[douyin-link] ${this.target.webRid} 实时帧解码失败:`, describe(error)))
+  }
+
+  private async decodeFrame(payloadData: Buffer): Promise<void> {
+    // 已停止（或被换掉）：排队期间会话已经关了，这一帧不必再解
+    if (this.stopped) return
     let frame: ReturnType<typeof readMessage>
     try {
       frame = readMessage(payloadData)
@@ -236,7 +282,7 @@ export class RoomSocketCapture {
     if (!body || body.length === 0) return
     if (body.length > 2 && body[0] === 0x1f && body[1] === 0x8b) {
       try {
-        body = zlib.gunzipSync(body)
+        body = await gunzip(body)
       } catch {
         return
       }
@@ -394,6 +440,13 @@ export class RoomSocketCapture {
 
 function isPushUrl(url: string): boolean {
   return PUSH_URL_MARKS.some((mark) => url.includes(mark))
+}
+
+/** 异步 gunzip（不用 `gunzipSync`：同步解压会卡住主进程的其他工作，见 onBinaryFrame） */
+function gunzip(input: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    zlib.gunzip(input, (error, output) => (error ? reject(error) : resolve(output)))
+  })
 }
 
 function describe(error: unknown): string {

@@ -385,23 +385,33 @@ export class AnalyzerHub {
    * （宿主还有可能在同一个进程里重建界面，收得太狠会半死）。
    *
    * 0.6.0 起这条路上没有窗口要关了（弹幕是主进程在轮询），收的是轮询、音频泵与重试定时器。
+   *
+   * **异步并返回 Promise**（2026-10-09）：宿主在 before-quit 里会 `await` 这个返回值再退出。
+   * 之前是同步返回、`browserHost.dispose()` 又是 `void`，于是「退出」在浏览器子进程还没收掉时
+   * 就走了——一边留下孤儿 Chromium，一边让窗口的关闭/显示（也走主进程）跟着一起卡住。
+   * 现在把浏览器收尾 `await` 掉，宿主会等到真正收干净再退。
    */
-  suspend(reason: string): void {
-    let collected = 0
-    for (const state of this.states.values()) {
-      if (state.collector || state.sessionId) collected += 1
-      this.stopRelive(state)
-      this.stopState(state, reason)
+  async suspend(reason: string): Promise<void> {
+    try {
+      let collected = 0
+      for (const state of this.states.values()) {
+        if (state.collector || state.sessionId) collected += 1
+        this.stopRelive(state)
+        this.stopState(state, reason)
+      }
+      for (const timer of this.retryTimers.values()) clearTimeout(timer)
+      this.retryTimers.clear()
+      for (const timer of this.reliveTimers.values()) clearTimeout(timer)
+      this.reliveTimers.clear()
+      this.stopAudio()
+      // 应用退出前把 spawn 的浏览器也收掉（否则会留一个孤儿 Chromium 进程）
+      await browserHost.dispose()
+      logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
+      this.emitRooms(true)
+    } catch (error) {
+      // 退出钩子绝不能抛：宿主逐个 await 这些钩子，抛出去会把退出流程打断（关不掉窗口）
+      logger.warn('[douyin-link] 收摊时出错（已忽略，继续退出）:', describe(error))
     }
-    for (const timer of this.retryTimers.values()) clearTimeout(timer)
-    this.retryTimers.clear()
-    for (const timer of this.reliveTimers.values()) clearTimeout(timer)
-    this.reliveTimers.clear()
-    this.stopAudio()
-    // 应用退出前把 spawn 的浏览器也收掉（否则会留一个孤儿 Chromium 进程）
-    void browserHost.dispose()
-    logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
-    this.emitRooms(true)
   }
 
   getSettings(): LiveSettings {

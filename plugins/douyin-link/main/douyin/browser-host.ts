@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import * as net from 'node:net'
 import * as os from 'node:os'
@@ -105,7 +105,7 @@ class BrowserHost {
         /* ignore */
       }
     }
-    if (proc && proc.pid && proc.exitCode === null) killTree(proc.pid)
+    if (proc && proc.pid && proc.exitCode === null) await killTree(proc.pid)
     if (profile) {
       try {
         rmSync(profile, { recursive: true, force: true, maxRetries: 3 })
@@ -192,24 +192,49 @@ async function waitForDevtools(port: number, timeoutMs: number): Promise<string>
   return ''
 }
 
-/** 杀进程树：Windows 用 taskkill /T /F；其它先 SIGTERM，2 秒后 SIGKILL */
-function killTree(pid: number): void {
-  try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
-      return
+/**
+ * 杀进程树：Windows 用 `taskkill /T /F`；其它先 SIGTERM，2 秒后 SIGKILL。
+ *
+ * **异步**（`spawn` + 等退出，绝不 `spawnSync`）：这个方法会在应用退出前被调用，
+ * 而 `spawnSync` 会把主进程整个卡住——窗口的关闭/显示也走主进程，被卡住的表现就是
+ * 「点一次关不掉、要再点一次」。任务树最多等 5 秒，超时也放行（存活到最后的子进程由系统回收）。
+ */
+async function killTree(pid: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      resolve()
     }
-    process.kill(pid, 'SIGTERM')
-    setTimeout(() => {
+    try {
+      if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore'
+        })
+        killer.on('exit', finish)
+        killer.on('error', finish)
+        setTimeout(finish, 5000).unref?.()
+        return
+      }
       try {
-        process.kill(pid, 'SIGKILL')
+        process.kill(pid, 'SIGTERM')
       } catch {
         /* 已经没了 */
       }
-    }, 2000).unref?.()
-  } catch {
-    /* 进程可能已退出 */
-  }
+      setTimeout(() => {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          /* 已经没了 */
+        }
+        finish()
+      }, 2000).unref?.()
+    } catch {
+      finish()
+    }
+  })
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
