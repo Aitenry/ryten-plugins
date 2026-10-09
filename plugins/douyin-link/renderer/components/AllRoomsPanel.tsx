@@ -171,10 +171,13 @@ function Kpi(props: {
   return (
     <div className="flex min-w-0 flex-col rounded-md px-2 py-1.5" style={{ backgroundColor: props.palette.soft }}>
       <span className="truncate text-[10px] opacity-60">{props.label}</span>
-      <span className="truncate text-sm font-semibold" style={{ color: props.accent }}>
-        {formatNumber(props.value)}
+      {/* 数字与单位**同一行**（单位靠右）：分开两行会把「礼物价值 15,070 抖币」读成两条 */}
+      <span className="flex min-w-0 items-baseline justify-between gap-1">
+        <span className="truncate text-sm font-semibold" style={{ color: props.accent }}>
+          {formatNumber(props.value)}
+        </span>
+        {props.hint ? <span className="shrink-0 text-[10px] opacity-50">{props.hint}</span> : null}
       </span>
-      {props.hint ? <span className="truncate text-[10px] opacity-50">{props.hint}</span> : null}
     </div>
   )
 }

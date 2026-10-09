@@ -15,7 +15,6 @@ import type {
 } from '../shared/types'
 import { isAnonymousId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
-import { ComparePanel } from './components/ComparePanel'
 import { AllRoomsPanel } from './components/AllRoomsPanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
 import { OverviewPanel } from './components/OverviewPanel'
@@ -40,12 +39,12 @@ import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp, WINDOWS, windowLabel } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
-type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'compare' | 'all'
-/** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合 + 检索 / 对比） */
+type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'all'
+/** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合 + 检索） */
 type ViewMode = 'room' | 'dashboard'
 /** 各模式下合法的页签（切模式时用它把停在别处的 tab 收回来） */
 const ROOM_TABS: TabKey[] = ['overview', 'live', 'presence', 'users']
-const DASHBOARD_TABS: TabKey[] = ['all', 'search', 'compare']
+const DASHBOARD_TABS: TabKey[] = ['all', 'search']
 const DEFAULT_ROOM_TAB: TabKey = 'overview'
 const DEFAULT_DASHBOARD_TAB: TabKey = 'all'
 
@@ -721,15 +720,6 @@ export default function Page(): React.JSX.Element {
       children: (
         <Pane>
           <SearchPanel rooms={rooms} activeRoom="" />
-        </Pane>
-      )
-    },
-    {
-      key: 'compare',
-      label: t('douyin-link.page.tabCompare'),
-      children: (
-        <Pane>
-          <ComparePanel minutes={minutes} onMinutes={setMinutes} activeRoom={activeRoom} onSelect={openRoom} />
         </Pane>
       )
     }
