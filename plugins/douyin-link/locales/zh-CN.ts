@@ -127,7 +127,7 @@ export const DouyinLinkZhCN = {
       dayLive: '直播中',
       dayMessages: '{{count}} 条',
       dayGifts: '礼物 {{count}}',
-      daySessions: '开播 {{count}} 次',
+      daySessions: '监控 {{count}} 次',
       noData: '这个窗口内没有数据（先开始监控，或换个窗口）',
       loadEarlier: '加载更早的消息',
       noEarlier: '库里再往前没有更早的了',

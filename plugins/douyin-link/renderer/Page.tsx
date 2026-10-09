@@ -739,29 +739,36 @@ export default function Page(): React.JSX.Element {
        这里不再重复一行。PageShell 的 header 省略即可（顶栏高度随之收掉）。 */
     <PageShell>
       <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
-        <div className="col-span-3 flex min-h-0 flex-col gap-3">
-          <RoomRail
-            rooms={rooms}
-            activeRoom={activeRoom}
-            busy={busy}
-            mode={mode}
-            onMode={changeMode}
-            onAdd={(input) => void addRoom(input)}
-            onSelect={selectRoom}
-            onToggleMonitor={toggleMonitor}
-            onMonitorAll={monitorAll}
-            onRefresh={refreshRoom}
-            onRemove={removeRoom}
-            onClearMessages={clearRoomMessages}
-          />
-          {addFailure ? <FailureLine failure={addFailure} /> : null}
-          {/* 「每日记录」是某个房间的当天记录：只在直播间模式、且选中了房间时出现 */}
-          {mode === 'room' && activeRoom ? (
-            <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
-          ) : null}
-        </div>
+        {/* 数据大屏不显示房间侧边栏（大屏就是要把空间让给聚合内容）；模式切换跟着挪到右侧头部 */}
+        {mode === 'room' ? (
+          <div className="col-span-3 flex min-h-0 flex-col gap-3">
+            <RoomRail
+              rooms={rooms}
+              activeRoom={activeRoom}
+              busy={busy}
+              mode={mode}
+              onMode={changeMode}
+              onAdd={(input) => void addRoom(input)}
+              onSelect={selectRoom}
+              onToggleMonitor={toggleMonitor}
+              onMonitorAll={monitorAll}
+              onRefresh={refreshRoom}
+              onRemove={removeRoom}
+              onClearMessages={clearRoomMessages}
+            />
+            {addFailure ? <FailureLine failure={addFailure} /> : null}
+            {/* 「每日记录」是某个房间的当天记录：选中了房间才出现 */}
+            {activeRoom ? (
+              <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
+            ) : null}
+          </div>
+        ) : null}
 
-        <div className="col-span-9 flex min-h-0 flex-col gap-3">
+        <div
+          className={
+            mode === 'room' ? 'col-span-9 flex min-h-0 flex-col gap-3' : 'col-span-12 flex min-h-0 flex-col gap-3'
+          }
+        >
           {mode === 'room' ? (
             <Panel
               className="shrink-0"
@@ -789,17 +796,28 @@ export default function Page(): React.JSX.Element {
               />
             </Panel>
           ) : (
-            /* 数据大屏头部：标题 + 全局窗口（跟随页面的 minutes）+ 胶囊页签条 */
+            /* 数据大屏头部：模式切换（此处没有侧边栏，切换按钮必须留在这里）+ 全局窗口 + 胶囊页签条 */
             <Panel
               className="shrink-0"
               title={t('douyin-link.page.dashboardTitle')}
               extra={
-                <Segmented
-                  size="small"
-                  value={minutes}
-                  onChange={(value) => setMinutes(Number(value))}
-                  options={WINDOWS.map((window) => ({ value: window, label: windowLabel(t, window) }))}
-                />
+                <div className="flex items-center gap-2">
+                  <Segmented
+                    size="small"
+                    value={mode}
+                    onChange={(value) => changeMode(value as ViewMode)}
+                    options={[
+                      { value: 'room', label: t('douyin-link.page.modeRoom') },
+                      { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
+                    ]}
+                  />
+                  <Segmented
+                    size="small"
+                    value={minutes}
+                    onChange={(value) => setMinutes(Number(value))}
+                    options={WINDOWS.map((window) => ({ value: window, label: windowLabel(t, window) }))}
+                  />
+                </div>
               }
             >
               <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">

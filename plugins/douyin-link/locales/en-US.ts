@@ -122,7 +122,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       dayLive: 'live',
       dayMessages: '{{count}} messages',
       dayGifts: '{{count}} gifts',
-      daySessions: '{{count}} sessions',
+      daySessions: '{{count}} monitor runs',
       noData: 'No data in this window (start monitoring, or pick another window)',
       loadEarlier: 'Load earlier messages',
       noEarlier: 'Nothing earlier in the database',
