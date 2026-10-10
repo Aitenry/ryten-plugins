@@ -90,9 +90,8 @@ export const FALLBACK_SETTINGS: LiveSettings = {
   volume: 0.8,
   maxItems: 200,
   kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],
-  realtimeStream: true,
-  browserPath: '',
   autoScroll: true,
+  douyinCookie: '',
   monitorConcurrency: 3,
   resumeOnStart: true,
   retentionDays: 7
@@ -112,9 +111,8 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
     volume: Math.min(1, Math.max(0, volume)),
     maxItems: asCount(value.maxItems) || fallback.maxItems,
     kinds: kinds.length > 0 ? kinds : fallback.kinds,
-    realtimeStream: bool(value.realtimeStream, fallback.realtimeStream),
-    browserPath: asText(value.browserPath).slice(0, 260),
     autoScroll: bool(value.autoScroll, fallback.autoScroll),
+    douyinCookie: asText(value.douyinCookie).slice(0, 4096),
     monitorConcurrency: asCount(value.monitorConcurrency) || fallback.monitorConcurrency,
     resumeOnStart: bool(value.resumeOnStart, fallback.resumeOnStart),
     retentionDays: typeof value.retentionDays === 'number' && Number.isFinite(value.retentionDays) ? value.retentionDays : fallback.retentionDays

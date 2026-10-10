@@ -13,14 +13,14 @@ import { getMeta, setMeta } from '../db/mapper'
  *
  * 目录来源：`webcast/gift/list/`（**免签名**，实测 HTTP 200 / 1282 件，其中带 `diamond_count` 的
  * 就是价格）。三条纪律沿用上一版：
- * - 目录**权威**：只按 id 查表，查不到就不显示名字/价格（宁可没有，不给错数）；
+ * - 目录**可信**（标准价）：只按 id 查表，查不到就不显示名字/价格（宁可没有，不给错数）；
  * - 目录**落库缓存**（`douyin_link_meta` 里的两行 JSON，3 天有效）：重启与离线时沿用上次那份，
  *   不必每次开应用都拉 3.5MB；
  * - 拉取失败**不抛**：整条监听照常跑，只是这一轮没有名字可显示。
  *
- * 顺带一个自检（`noteFramePrice`）：帧里自带的抖币价与目录对不上时写一条 warn——
- * 那种时候说明我们对该字段的读法错了（第一次核对是在 2026-10-08：(3200, 99) 与目录里
- * 「爱的纸鹤 = 99」一致），日志里能第一时间发现。
+ * **只用它做「帧没给价时」的兜底**：目录价是**标准价**，而升级礼物、神秘商店/活动价与之不同，
+ * 所以真礼物（`WebcastGiftMessage`）的单价一律以帧自带的 `GiftStruct.diamondCount` 为准
+ * （见 `douyin/proto-messages.ts` 的 `decodeProtoGift`）。
  */
 
 const CATALOG_URL =
@@ -45,14 +45,11 @@ export interface GiftInfo {
  */
 export interface GiftResolver {
   resolve(id: number): { name: string; diamonds: number } | undefined
-  /**
-   * 按**礼物名**反查（可选）：真礼物帧的结构我们还没吃透时，只要帧里出现了某个礼物名
+  /** 按**礼物名**反查（可选）：真礼物帧的结构我们还没吃透时，只要帧里出现了某个礼物名
    * （目录里有 1000 多个名字），就能确认是这件礼物、并拿到它的价。
    * 同名多件且价格不一致时返回 undefined——宁可没有，不给错价。
    */
   resolveByName?(name: string): { name: string; diamonds: number } | undefined
-  /** 运行时自检（可选）：帧里自带的抖币价与目录对不上时记一笔 */
-  noteFramePrice?(id: number, framePrice: number): void
 }
 
 /** 缓存有效期（3 天；礼物价格偶尔会调，但不必天天拉） */
@@ -70,8 +67,6 @@ class GiftCatalog implements GiftResolver {
   private fetchedAt = 0
   private loading: Promise<void> | null = null
   private ready: Promise<void> | null = null
-  /** 已经警告过「帧里的价与目录不符」的礼物 id（同一条只吵一次） */
-  private readonly warned = new Set<number>()
 
   /** 装载期调用：把库里的旧目录读进内存（没有网络也能用上次的价） */
   init(): Promise<void> {
@@ -136,24 +131,6 @@ class GiftCatalog implements GiftResolver {
     return this.loading
   }
 
-  /**
-   * 帧里自带的抖币价 → 与目录对不上就警告一次。
-   *
-   * 这是**运行时自检**：点歌帧的「5 = 礼物 id、6 = 抖币价」这个读法只做过一次交叉核对
-   * （2026-10-08），真出现不符就是读错了，日志里立刻能看见。
-   */
-  noteFramePrice(id: number, framePrice: number): void {
-    if (id <= 0 || framePrice <= 0) return
-    const hit = this.gifts.get(id)
-    if (!hit || hit.diamonds <= 0 || this.warned.has(id)) return
-    if (hit.diamonds === framePrice) return
-    this.warned.add(id)
-    logger.warn(
-      `[douyin-link] 礼物 ${id}：帧里的价格 ${framePrice} 与官方目录的 ${hit.diamonds}（${hit.name}）不一致——` +
-        '点歌帧「5 = 礼物 id、6 = 抖币价」这个读法需要重新核对'
-    )
-  }
-
   /** 建「名字 → 候选礼物」索引（目录换了之后重建一次） */
   private reindex(): void {
     this.byName.clear()
@@ -201,7 +178,6 @@ class GiftCatalog implements GiftResolver {
       this.gifts = next
       this.reindex()
       this.fetchedAt = Date.now()
-      this.warned.clear()
       logger.info(`[douyin-link] 礼物目录已更新：${next.size} 件（带价格 ${countPriced(next)} 件）`)
       await this.persist()
     } catch (error) {

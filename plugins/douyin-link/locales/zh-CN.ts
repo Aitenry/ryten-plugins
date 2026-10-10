@@ -311,15 +311,8 @@ export const DouyinLinkZhCN = {
       roomNotFound: '页面里没有房间号，直播间可能已下播或链接不对',
       enterFailed: '直播间接口返回异常：{{detail}}',
       resolveFailed: '解析直播间失败：{{detail}}',
-      connectFailed: '启动弹幕通道失败：{{detail}}',
+      connectFailed: '启动实时通道失败：{{detail}}',
       timeout: '请求超时（网络太慢或被风控挡了）',
-      httpError: '接口返回异常状态码：{{detail}}',
-      throttled:
-        '被抖音限流了（{{detail}}）：这个接口 1 秒一次连着跑会触发风控，正在自动放慢并退避重试（不影响已收到的数据，恢复后继续）',
-      badResponse: '接口返回的内容看不懂：{{detail}}',
-      sessionExpired: '进房凭证（Cookie）失效了，正在重新进房',
-      rejected: '接口拒绝了这次请求：{{detail}}',
-      pollFailed: '拉取弹幕失败：{{detail}}',
       notConnected: '还没选直播间',
       audioUnsupported: '当前运行环境不支持 WebCodecs 音频解码',
       noAudioStream: '这个直播间没有可拉的音频流（可能已下播，或只提供 HLS）',
@@ -330,20 +323,19 @@ export const DouyinLinkZhCN = {
       noAudio: '连上了音频地址，但一直没有音频数据（这路流可能没有音轨，或拉流被挡住了）',
       decodeFailed: '音频解码失败：{{detail}}',
       unsupported: '当前运行环境不支持 WebCodecs 音频解码',
-      noBrowser:
-        '没找到可用的 Chrome / Edge / Brave / Chromium 浏览器：实时通道需要借本机浏览器生成签名。改用 HTTP 轮询采集（不影响记录），也可在设置里指定浏览器路径',
-      browserLaunchFailed: '启动本机浏览器失败：{{detail}}（正在重试；期间由 HTTP 轮询顶班）',
-      noSignedUrl: '浏览器页面没有建立推送 websocket（可能没开播或被风控），正在重试',
-      realtimeChannelLost: '推送 websocket 掉线，正在重新握手（期间由 HTTP 轮询顶班）',
+      signFailed: '实时通道：离线签名初始化失败（{{detail}}），正在重试',
+      noRoomId: '实时通道：还没拿到房间内部 id，正在重试',
+      pushRejected: '推送 websocket 握手被拒（可能签名过期或被风控），正在换新签名重试',
+      realtimeChannelLost: '推送 websocket 掉线，正在重新握手（自动重连）',
       bridgeUnavailable: '主进程没有响应（插件可能还在装载，或已被停用）'
     },
     settingsPage: {
       intro:
-        '所有网络与数据都在主进程：弹幕由主进程直接轮询直播间的推送接口（免签名），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——**同一时间只有分析中的那个直播间出声**，其它房间只监听弹幕。逐条消息默认由「实时通道」采集：主进程会无头启动一个**本机浏览器**（Chrome/Edge/Brave/Chromium）产生已签名的推送 websocket URL，再由主进程自己直连收消息（不打开任何应用窗口；找不到浏览器或失败时自动回落到 HTTP 轮询）。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
+        '所有网络与数据都在主进程：弹幕由**主进程纯 Node 直连**抖音推送 websocket（自带离线签名 + 心跳 + ACK，**不需要任何浏览器、也不需要轮询**），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——**同一时间只有分析中的那个直播间出声**，其它房间只监听弹幕。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
       qualityLabel: '拉流档位',
       qualityHint: '只放声音，档位越低越省流量（实测各档音频轨一致）',
       concurrencyLabel: '同时监控的房间数',
-      concurrencyHint: '每个房间一路轮询（每秒一次请求，很轻），超出的房间会排队等空位',
+      concurrencyHint: '每个房间一路推送 websocket（很轻），超出的房间会排队等空位',
       audioOnConnectLabel: '开始监控就自动出声',
       audioOnConnectHint: '关闭后要手动点「播放」；声音永远只跟分析中的那个房间',
       resumeLabel: '启动时接着监控上次的房间',
@@ -351,12 +343,10 @@ export const DouyinLinkZhCN = {
       maxItemsLabel: '内存里保留的弹幕条数',
       kindsLabel: '显示的弹幕类型',
       autoScrollLabel: '弹幕列表自动跟随最新',
-      realtimeLabel: '实时通道',
-      realtimeHint:
-        '主进程无头启动本机浏览器（Chrome/Edge/Brave/Chromium）生成已签名的推送 websocket，再由主进程自己直连收逐条消息（弹幕/进场/点赞/**礼物**，比轮询实时）。打开时暂停 HTTP 轮询、改用 ws，ws 断了自动回落；找不到浏览器也会自动降级。',
-      browserPathLabel: '浏览器可执行文件路径',
-      browserPathHint: '留空 = 自动查找常见安装位置；也可填绝对路径指定某个 Chromium 系浏览器。',
-      browserPathPlaceholder: '留空自动查找，例如 C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      cookieLabel: '登录态 Cookie',
+      cookieHint:
+        '抖音**只向已登录会话推送礼物消息**：匿名会话能收到弹幕/进场/点赞，但**收不到礼物**（所以聊天室的礼物以前只能靠点歌那条专线）。**只要你在直播间里看得到礼物、插件里却没有**，就是这个原因——把**抖音网页版的 Cookie** 整行贴进来即可。留空 = 匿名。Cookie 只存在本机数据库、不随插件分发，请勿分享给他人。',
+      cookiePlaceholder: '例如：ttwid=…; passport_csrf_token=…; sessionid=…',
 
       retentionLabel: '消息保留',
       retentionHint:

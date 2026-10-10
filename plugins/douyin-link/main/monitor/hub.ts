@@ -40,10 +40,9 @@ import {
 import * as store from '../db/mapper'
 import type { MessageRow } from '../db/mapper'
 import { AudioPump } from '../audio/pump'
-import { DanmakuCollector } from '../douyin/danmaku'
-import { RoomSocketCapture } from '../douyin/ws-capture'
-import { browserHost } from '../douyin/browser-host'
+import { DirectPushCapture } from '../douyin/push-capture'
 import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
+import { mergeCookieHeaders } from '../douyin/cookie'
 import type { RoomResolveResult } from '../douyin/room'
 import { revealMysteryProfile } from '../douyin/mystery'
 import { avatarCache } from '../avatar'
@@ -54,15 +53,15 @@ import { isAnonymousName } from '../../shared/anonymous'
 /**
  * 分析中枢：**所有网络与数据都在这里**（渲染层只是视图）。
  *
- * 链路（0.6.0：弹幕改为主进程直连，不再有隐藏窗口）：
- *   采集器（`../douyin/danmaku` 轮询 `im/fetch`）→ recorder（本场计数 + 最近弹幕 + 在场/麦位）
+ * 链路（实时通道：主进程纯 Node 直连抖音推送 ws，无浏览器、无轮询兜底）：
+ *   采集通道（`../douyin/push-capture` 直连 `…/webcast/im/push/v2/` 收逐条消息）→ recorder（本场计数 + 最近弹幕 + 在场/麦位）
  *        → 事件推界面（节流）↘ 每 2 秒 flush：消息流水 / 分钟桶 / 用户统计 → 数据库
  *   直播间接口（`../douyin/room` 的 enter）→ 房间成员名单 + 是否语音聊天室 + 主播信息
  *        → 每 5 分钟轻刷一次（只打 enter，不重新抓页面）
  *
  * | 能力 | 落点 |
  * |------|------|
- * | 同时监控多个房间 | 每个房间一路轮询（1000ms 一次，多房间加抖动；无窗口、无内存大户） |
+ * | 同时监控多个房间 | 每个房间一路推送 ws 连接（无窗口、无内存大户） |
  * | 音频只跟「最新选中的房间」 | 全局最多一个 `AudioPump`，切房间时先停旧泵再起新泵 |
  * | 历史与分析数据 | 全部落数据库（`main/db/mapper.ts`），中枢只维护「本场」的内存数字 |
  * | 在线观众 / 麦上用户 | recorder 的在场清单 + 麦位表 + enter 的成员名单，`presence()` 合并 |
@@ -163,15 +162,10 @@ export const DEFAULT_SETTINGS: LiveSettings = {
   volume: 0.8,
   maxItems: 200,
   kinds: ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control', 'system'],
-  // 实时通道默认开：借本机浏览器（Chrome/Edge）产生已签名 ws URL，主进程自己直连（比轮询实时）；失败自动回落到轮询
-  realtimeStream: true,
-  /**
-   * 实时通道用的浏览器可执行文件路径。空 = 自动发现（Chrome/Edge/Brave/Chromium 的常见安装路径）。
-   * 装在不常规位置或想指定某个浏览器时在这里填绝对路径。
-   */
-  browserPath: '',
   autoScroll: true,
-  // 同时监控 3 个房间（轮询很轻，但每个房间每秒一个请求，还是别贪）
+  // 登录态 Cookie（留空 = 匿名）。抖音只向已登录会话推送礼物消息，填上后普通直播间也能收到礼物
+  douyinCookie: '',
+  // 同时监控 3 个房间（每个房间一路推送 ws 连接，很轻，但还是别贪）
   monitorConcurrency: 3,
   // 默认**开**：开关开着 = 就在监控（2026-10 用户实测反馈：开关显示开着、实际没在跑，
   // 还得点两次开关才动）。关掉它则「打开应用只恢复清单」，此时启动会把监控勾选一并清掉，
@@ -195,7 +189,7 @@ interface RoomState {
   /**
    * 内部房间 id（webcast 接口用的长 id）。
    *
-   * 除了弹幕轮询要用，它还决定「房间信息轻刷新」能不能做：库里的房间行带着它，
+   * 除了实时通道（直连推送 ws）要用，它还决定「房间信息轻刷新」能不能做：库里的房间行带着它，
    * 所以**没在监控的房间**也能每 5 分钟刷一次（在线人数/标题/成员名单/是否语音房）。
    * 缺了它，界面上的「在线观众」在没开监控时就只能是一片 0（用户实测反馈过）。
    */
@@ -228,17 +222,17 @@ interface RoomState {
   /** 当前音频泵在用的地址（重连会换签名；界面看到的仍是 streamUrl 的语义） */
   sourceUrl: string
   recorder: RoomRecorder
-  collector: DanmakuCollector | null
-  /** 实时通道（借隐藏窗口页面的 ws 收逐条消息）；与 collector 同生命周期 */
-  roomSocket: RoomSocketCapture | null
-  /** 实时通道是否在顶班：true 时 HTTP 轮询被暂停（二者二选一，避免同一条消息记两次） */
-  wsLive: boolean
+  /**
+   * 实时通道：主进程**纯 Node 直连**抖音推送 ws，收逐条消息（弹幕/进场/点赞/礼物/麦位）。
+   * **这是唯一的采集通道**（HTTP 轮询兜底已移除）；非空 = 这个房间正在跑，reconcile 据此判重入。
+   */
+  roomSocket: DirectPushCapture | null
   /**
    * 启动令牌（0 = 没有启动在进行中）。**防重入的关键**。
    *
-   * 为什么必须有：`startMonitor()` 要 `await` 解析直播间（约 1 秒）之后才把 `collector`
-   * 赋上，而 `reconcile()` 只看 `collector`——这 1 秒里任何一次 reconcile（切房间、点开关、
-   * 刷新、设置生效）都会给**同一个房间**再起一路采集器，两边把同一批弹幕各推
+   * 为什么必须有：`startMonitor()` 要 `await` 解析直播间（约 1 秒）之后才把 `roomSocket`
+   * 赋上，而 `reconcile()` 只看 `roomSocket`——这 1 秒里任何一次 reconcile（切房间、点开关、
+   * 刷新、设置生效）都会给**同一个房间**再起一路采集，两边把同一批弹幕各推
    * 一次，界面上每条弹幕就出现两遍。真机日志为证（同一房间、相隔 700ms）：
    * `03:56:35.611 开始监控 646268856760` / `03:56:36.303 开始监控 646268856760`。
    */
@@ -407,27 +401,24 @@ export class AnalyzerHub {
     this.cleanupTimer = null
     this.started = false
     avatarCache.dispose()
-    // 收掉 spawn 的本机浏览器进程（临时 profile 一并删）
-    void browserHost.dispose()
-    logger.info('[douyin-link] 分析中枢已停止（弹幕轮询与音频泵都收掉了）')
+    logger.info('[douyin-link] 分析中枢已停止（实时通道与音频泵都收掉了）')
   }
 
   /**
    * 收摊（应用退出前调用）：把**所有在跑的东西**停掉，但**保留**房间清单、设置与定时器
    * （宿主还有可能在同一个进程里重建界面，收得太狠会半死）。
    *
-   * 0.6.0 起这条路上没有窗口要关了（弹幕是主进程在轮询），收的是轮询、音频泵与重试定时器。
+   * 这条路上没有窗口要关（实时通道是主进程纯 Node 直连推送 ws），
+   * 收的是推送连接、音频泵与重试定时器。
    *
-   * **异步并返回 Promise**（2026-10-09）：宿主在 before-quit 里会 `await` 这个返回值再退出。
-   * 之前是同步返回、`browserHost.dispose()` 又是 `void`，于是「退出」在浏览器子进程还没收掉时
-   * 就走了——一边留下孤儿 Chromium，一边让窗口的关闭/显示（也走主进程）跟着一起卡住。
-   * 现在把浏览器收尾 `await` 掉，宿主会等到真正收干净再退。
+   * **异步并返回 Promise**（2026-10-09）：宿主在 before-quit 里会 `await` 这个返回值再退出，
+   * 收干净之后再退，免得留下半死的连接。
    */
   async suspend(reason: string): Promise<void> {
     try {
       let collected = 0
       for (const state of this.states.values()) {
-        if (state.collector || state.sessionId) collected += 1
+        if (state.roomSocket || state.sessionId) collected += 1
         this.stopRelive(state)
         this.stopState(state, reason)
       }
@@ -436,9 +427,7 @@ export class AnalyzerHub {
       for (const timer of this.reliveTimers.values()) clearTimeout(timer)
       this.reliveTimers.clear()
       this.stopAudio()
-      // 应用退出前把 spawn 的浏览器也收掉（否则会留一个孤儿 Chromium 进程）
-      await browserHost.dispose()
-      logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路弹幕轮询与音频泵，房间清单与设置保持不变`)
+      logger.info(`[douyin-link] 已收摊（${reason}）：停掉 ${collected} 路实时采集与音频泵，房间清单与设置保持不变`)
       this.emitRooms(true)
     } catch (error) {
       // 退出钩子绝不能抛：宿主逐个 await 这些钩子，抛出去会把退出流程打断（关不掉窗口）
@@ -462,9 +451,8 @@ export class AnalyzerHub {
       next.maxItems = Math.min(1000, Math.max(50, Math.round(patch.maxItems)))
     }
     if (Array.isArray(patch.kinds)) next.kinds = patch.kinds
-    if (typeof patch.realtimeStream === 'boolean') next.realtimeStream = patch.realtimeStream
-    if (typeof patch.browserPath === 'string') next.browserPath = patch.browserPath.trim().slice(0, 260)
     if (typeof patch.autoScroll === 'boolean') next.autoScroll = patch.autoScroll
+    if (typeof patch.douyinCookie === 'string') next.douyinCookie = patch.douyinCookie.trim().slice(0, 4096)
     if (typeof patch.monitorConcurrency === 'number' && Number.isFinite(patch.monitorConcurrency)) {
       next.monitorConcurrency = Math.min(8, Math.max(1, Math.round(patch.monitorConcurrency)))
     }
@@ -488,18 +476,18 @@ export class AnalyzerHub {
       }
     }
     if (previous.monitorConcurrency !== this.settings.monitorConcurrency) this.reconcile()
-    // 实时通道开关：对已经在监控的房间即时生效（关掉就销毁隐藏窗口、HTTP 轮询接管；打开就给在跑的房间补上）
-    if (previous.realtimeStream !== this.settings.realtimeStream) {
+    // 登录态 Cookie 变了：重建在跑的实时连接（新 Cookie 必须带进新的握手，否则礼物授权不生效）
+    if (previous.douyinCookie !== this.settings.douyinCookie) {
+      let restarted = 0
       for (const state of this.states.values()) {
-        if (this.settings.realtimeStream) {
-          if (state.collector) this.startRoomSocket(state)
-        } else {
-          this.stopRoomSocket(state)
-          // 关掉实时通道：把 HTTP 轮询接回来（之前可能正被 ws 顶班停着）
-          if (state.collector) state.collector.start()
-        }
+        if (!state.roomSocket) continue
+        this.stopRoomSocket(state)
+        this.startRoomSocket(state)
+        restarted += 1
       }
-      logger.info(`[douyin-link] 实时通道已${this.settings.realtimeStream ? '开启' : '关闭'}`)
+      logger.info(
+        `[douyin-link] 登录态 Cookie 已${this.settings.douyinCookie ? '更新' : '清空'}，重建 ${restarted} 路实时连接`
+      )
     }
   }
 
@@ -718,7 +706,7 @@ export class AnalyzerHub {
         error instanceof ResolveFailure
           ? { code: error.code, detail: error.detail || undefined }
           : { code: 'resolveFailed', detail: describe(error) }
-      if (!state.collector) state.phase = 'error'
+      if (!state.roomSocket) state.phase = 'error'
       this.emitRooms(true)
       return false
     }
@@ -742,7 +730,7 @@ export class AnalyzerHub {
         this.reliveTimers.delete(state.webRid)
         if (!state.monitor) return
         if (this.states.get(state.webRid) !== state) return
-        if (state.collector) return
+        if (state.roomSocket) return
         void this.refreshRoom(state.webRid)
       }, RELIVE_PROBE_MS)
     )
@@ -887,17 +875,17 @@ export class AnalyzerHub {
     const wanted = [...this.states.values()].filter((state) => state.monitor)
     wanted.sort((a, b) => b.lastActiveAt - a.lastActiveAt)
     const cap = this.settings.monitorConcurrency
-    const running = wanted.filter((state) => state.collector).length
+    const running = wanted.filter((state) => state.roomSocket).length
     let slots = Math.max(0, cap - running)
 
     for (const state of wanted) {
-      if (state.collector) {
-        // 正在跑的：相位由采集器回调驱动，只在它还没上报过状态时给个「连接中」
+      if (state.roomSocket) {
+        // 正在跑的：相位由实时通道回调驱动，只在它还没上报过状态时给个「连接中」
         if (state.phase === 'off' || state.phase === 'queued') state.phase = 'connecting'
         continue
       }
       // 正在启动中的也算「已经有人管了」：少这一条，解析那 1 秒里的第二次 reconcile
-      // 就会给同一个房间起第二个采集器 → 每条弹幕推两次（见 RoomState.startToken）
+      // 就会给同一个房间起第二个采集通道 → 每条弹幕推两次（见 RoomState.startToken）
       if (state.startToken) continue
       if (slots > 0) {
         slots -= 1
@@ -908,7 +896,7 @@ export class AnalyzerHub {
       }
     }
     for (const state of this.states.values()) {
-      if (!state.monitor && state.collector) this.stopState(state, 'stopped')
+      if (!state.monitor && state.roomSocket) this.stopState(state, 'stopped')
       else if (!state.monitor && state.phase !== 'off') {
         state.phase = 'off'
         state.failure = null
@@ -919,7 +907,7 @@ export class AnalyzerHub {
   }
 
   private async startMonitor(state: RoomState): Promise<void> {
-    if (state.collector || state.startToken || this.states.get(state.webRid) !== state) return
+    if (state.roomSocket || state.startToken || this.states.get(state.webRid) !== state) return
     const token = (this.startSeq += 1)
     state.startToken = token
     /**
@@ -959,25 +947,13 @@ export class AnalyzerHub {
       state.sessionId = sessionId
       state.recorder.begin(sessionId, this.settings.maxItems)
       state.danmaku = { phase: 'connecting', failure: null, since: Date.now(), received: 0 }
-      const collector = new DanmakuCollector(
-        { webRid: state.webRid, roomId: resolved.room.roomId, cookie: resolved.cookie },
-        {
-          onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
-          onMic: (userIds) => this.handleMic(state, userIds),
-          onStatus: (status) => this.handleDanmakuStatus(state, status.phase, status.failure)
-        }
-      )
-      state.collector = collector
       state.phase = 'connecting'
-      this.emitRooms(true)
       logger.info(
         `[douyin-link] 开始监控 ${state.webRid}《${state.title}》` +
-          `${state.voice ? '（语音聊天室：会跟着麦位表）' : ''}`
+          `${state.voice ? '（语音聊天室：会跟着麦位表）' : ''}（${since(startedAt)}）`
       )
-      // 启动是同步的（真正的连接建立是后台的轮询循环）：这里只确认没被立刻取消
-      collector.start()
-      logger.info(`[douyin-link] ${state.webRid} 弹幕通道已启动（${since(startedAt)}）`)
       this.startRoomSocket(state)
+      this.emitRooms(true)
     } catch (error) {
       if (!alive()) return
       const failure: FailureInfo =
@@ -998,17 +974,14 @@ export class AnalyzerHub {
   private stopState(state: RoomState, reason: string): void {
     // 让进行中的启动立刻失效（见 RoomState.startToken）：它会在下一个 await 处退出
     state.startToken = 0
+    const hadSocket = Boolean(state.roomSocket)
     this.stopRoomSocket(state)
     const timer = this.retryTimers.get(state.webRid)
     if (timer) {
       clearTimeout(timer)
       this.retryTimers.delete(state.webRid)
     }
-    if (state.collector) {
-      state.collector.stop()
-      state.collector = null
-      logger.info(`[douyin-link] 停止监控 ${state.webRid}（${reason}）`)
-    }
+    if (hadSocket) logger.info(`[douyin-link] 停止监控 ${state.webRid}（${reason}）`)
     if (state.sessionId) {
       const id = state.sessionId
       const messages = state.recorder.received
@@ -1021,60 +994,28 @@ export class AnalyzerHub {
   }
 
   /**
-   * 实时通道：spawn 本机 Chromium 加载直播间页，用 CDP 抓页面那条**已签名**的推送 ws URL，
-   * 再由**主进程自己**连这条 ws 收逐条消息（弹幕/进场/点赞/关注/人数/麦位），整批上报。
-   * 它连上时暂停 HTTP 轮询、掉线时把轮询接回来。找不到浏览器则本会话放弃、HTTP 轮询顶班。
+   * 实时通道：主进程**纯 Node 直连**抖音推送 ws（离线签名 + 心跳 + ACK，无需浏览器），
+   * 收逐条消息（弹幕/进场/点赞/关注/人数/麦位）整批上报。**这是唯一的采集通道**。
    */
   private startRoomSocket(state: RoomState): void {
-    if (!this.settings.realtimeStream || state.roomSocket) return
-    const socket = new RoomSocketCapture(
-      { webRid: state.webRid, roomId: state.roomId, cookie: state.cookie },
+    if (state.roomSocket) return
+    const socket = new DirectPushCapture(
+      { webRid: state.webRid, roomId: state.roomId, cookie: mergeCookieHeaders(this.settings.douyinCookie, state.cookie) },
       {
         onItems: (items, users, meta) => this.handleItems(state, items, users, meta.roomEnded),
         onMic: (userIds) => this.handleMic(state, userIds),
-        onStatus: (status) => this.onRealtimeStatus(state, status.phase, status.failure)
-      },
-      { browserPath: this.settings.browserPath }
+        onStatus: (status) => this.handleChannelStatus(state, status.phase, status.failure)
+      }
     )
     state.roomSocket = socket
     socket.start()
   }
 
-  /** 停掉实时通道（不负责把轮询接回来；那是调用方按场景决定的事） */
+  /** 停掉实时通道（采集就此停止；重启由 reconcile / scheduleRetry 负责） */
   private stopRoomSocket(state: RoomState): void {
     const socket = state.roomSocket
     state.roomSocket = null
-    state.wsLive = false
     if (socket) socket.stop()
-  }
-
-  /**
-   * 实时通道相位 → 决定这一路消息用谁：
-   * ws 活着就让 HTTP 轮询歇着（二者二选一，否则同一条消息会被记两次）；
-   * ws 掉线/重试/失败就把轮询接回来——**永远有一路在跑**，实时通道只是加速，不是唯一依赖。
-   */
-  private onRealtimeStatus(
-    state: RoomState,
-    phase: DanmakuStatus['phase'],
-    failure: FailureInfo | null
-  ): void {
-    logger.info(`[douyin-link] ${state.webRid} 实时通道：${phase}${failure ? `（${failure.code}）` : ''}`)
-    this.setWsLive(state, phase === 'live')
-  }
-
-  /** ws 顶班 / 交班：切换 HTTP 轮询的启停（保持 state.collector 非空，reconcile 不会另起一路） */
-  private setWsLive(state: RoomState, live: boolean): void {
-    if (state.wsLive === live) return
-    state.wsLive = live
-    const collector = state.collector
-    if (!collector) return
-    if (live) {
-      collector.stop()
-      logger.info(`[douyin-link] ${state.webRid} 实时通道顶班，暂停 HTTP 轮询（消息不再走轮询）`)
-    } else {
-      collector.start()
-      logger.info(`[douyin-link] ${state.webRid} 实时通道交班，HTTP 轮询接管`)
-    }
   }
 
   /** 掉线自动重试（监控是长期的，中断要自己爬起来） */
@@ -1091,8 +1032,7 @@ export class AnalyzerHub {
         this.retryTimers.delete(state.webRid)
         if (!state.monitor) return
         if (this.states.get(state.webRid) !== state) return
-        state.collector?.stop()
-        state.collector = null
+        this.stopRoomSocket(state)
         this.reconcile()
       }, RETRY_DELAY_MS)
     )
@@ -1198,7 +1138,7 @@ export class AnalyzerHub {
       if (this.emptyGiftLogged >= EMPTY_GIFT_LOG_LIMIT) return
       this.emptyGiftLogged += 1
       logger.warn(
-        `[douyin-link][gift-empty] trace=${item.trace ?? '(未标)'} channel=${state.wsLive ? 'ws' : 'http'}` +
+        `[douyin-link][gift-empty] trace=${item.trace ?? '(未标)'} channel=ws` +
           ` user=${item.user || '(空)'}/${item.userId || '(空)'} to=${item.toUser || '(空)'}/${item.toUserId || '(空)'}` +
           ` count=${item.count} diamonds=${item.diamonds} at=${new Date(item.at).toISOString()}`
       )
@@ -1254,7 +1194,8 @@ export class AnalyzerHub {
     this.roomsDirty = true
   }
 
-  private handleDanmakuStatus(state: RoomState, phase: DanmakuStatus['phase'], failure: FailureInfo | null): void {
+  /** 实时通道上报的相位 → 房间相位 / 失败提示（并驱动掉线重试） */
+  private handleChannelStatus(state: RoomState, phase: DanmakuStatus['phase'], failure: FailureInfo | null): void {
     const changed = phase !== state.danmaku.phase
     const since = changed ? Date.now() : state.danmaku.since
     state.danmaku = { ...state.danmaku, phase, failure, since }
@@ -1274,7 +1215,7 @@ export class AnalyzerHub {
     }
     if (changed) {
       const detail = failure ? `（${failure.code}${failure.detail ? ': ' + failure.detail : ''}）` : ''
-      logger.info(`[douyin-link] ${state.webRid} 弹幕通道：${phase}${detail}`)
+      logger.info(`[douyin-link] ${state.webRid} 实时通道：${phase}${detail}`)
     }
     this.roomsDirty = true
     this.pushRoomsThrottled()
@@ -1373,13 +1314,17 @@ export class AnalyzerHub {
         if (state.startToken) continue
         // 监控中的房间刷得勤（在线人数/成员名单在动），没监控的只求「面板有房间级数据」：
         // 半小时一次，既不让面板空着，也不为闲置房间每 5 分钟抓一次页面。
-        const interval = state.collector ? ROOM_REFRESH_MS : IDLE_REFRESH_MS
+        const interval = state.roomSocket ? ROOM_REFRESH_MS : IDLE_REFRESH_MS
         if (now - state.refreshedAt < interval) continue
         // 先记时刻再请求：失败也要等下一个周期，不要变成每 2 秒一次的请求风暴
         state.refreshedAt = now
         try {
           if (state.cookie) {
-            const entered = await enterLiveRoom(state.webRid, state.roomId, state.cookie)
+            const entered = await enterLiveRoom(
+              state.webRid,
+              state.roomId,
+              mergeCookieHeaders(this.settings.douyinCookie, state.cookie)
+            )
             this.applyResolved(state, {
               room: entered.room,
               flv: entered.flv,
@@ -2169,9 +2114,7 @@ export class AnalyzerHub {
       refreshedAt: 0,
       sourceUrl: '',
       recorder: new RoomRecorder(room.webRid),
-      collector: null,
       roomSocket: null,
-      wsLive: false,
       startToken: 0,
       sessionId: 0,
       attempts: 0,
@@ -2220,12 +2163,6 @@ export const FAILURE_CODES = [
   'resolveFailed',
   'connectFailed',
   'timeout',
-  'httpError',
-  'throttled',
-  'badResponse',
-  'sessionExpired',
-  'rejected',
-  'pollFailed',
   'notConnected',
   'audioUnsupported',
   'noAudioStream',
@@ -2236,10 +2173,10 @@ export const FAILURE_CODES = [
   'noAudio',
   'decodeFailed',
   'unsupported',
-  // 实时通道（借本机浏览器签名 + 主进程直连）新增
-  'noBrowser',
-  'browserLaunchFailed',
-  'noSignedUrl',
+  // 实时通道（主进程纯 Node 直连推送 ws）新增
+  'signFailed',
+  'noRoomId',
+  'pushRejected',
   'realtimeChannelLost'
 ]
 

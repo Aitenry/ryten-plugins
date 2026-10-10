@@ -182,8 +182,10 @@ export interface DanmakuItem {
    */
   text: string
   /**
-   * 计数：点赞数（like）/ 进场后的在线人数（member）/ **该条消息里的礼物数量**（gift）。
-   * 0 = 无。
+   * 计数：点赞数（like）/ 进场后的在线人数（member）/ **礼物数量**（gift）。
+   *
+   * 礼物那一项是**本次增量**（同一次连送的累积量之差，见 `main/gift/group.ts`），
+   * 不是服务端推的累积量。0 = 无。
    */
   count: number
   /**
@@ -220,6 +222,19 @@ export interface DanmakuItem {
    * 否则后到的那条没记录的帧会把已经查到的礼物名抹成「想听 X 演唱」（实测两种先后顺序都出现过）。
    */
   giftRecord?: boolean
+  /**
+   * **礼物 id**（`GiftStruct.id` / `GiftMessage.gift_id`；只有真礼物 `WebcastGiftMessage` 才有）。
+   * 用于「同一次连送」的分组去重（见 `main/gift/group.ts`）。
+   */
+  giftId?: number
+  /**
+   * **礼物组 id**（`GiftMessage.group_id`；只有真礼物才有）。
+   *
+   * 抖音对**同一次连送**会反复推**累积数量**（`1→2→5→5`）；逐帧落库会把它们全加起来
+   * （重复计数）。落库前按 `group_id + 送礼人 + 收礼人 + 礼物 id` 分组，用历史最大累积量
+   * 算「本次增量」，只把增量写进 `count` / `diamonds`（见 `main/gift/group.ts`）。
+   */
+  groupId?: string
   /** 主进程收到的时刻（ms） */
   at: number
 }
@@ -435,22 +450,18 @@ export interface LiveSettings {
   maxItems: number
   /** 要显示的弹幕类型 */
   kinds: DanmakuKind[]
-  /**
-   * 实时通道：借**本机已安装的 Chromium 浏览器**（Chrome/Edge/Brave/Chromium）产生「已签名的推送
-   * ws URL」，再由**主进程自己**连这条 ws 收**逐条消息**（弹幕/进场/点赞/关注/人数/麦位）。
-   *
-   * 它比 HTTP 轮询（`im/fetch`）更实时；打开它时中枢会**暂停 HTTP 轮询**、改用 ws
-   * （ws 断了再自动回落到轮询）。签名依赖真实浏览器上下文（推送 ws 有设备指纹闸，纯 Node 算不出
-   * 合法签名），所以会无头 spawn 一个本机浏览器进程；找不到浏览器时自动降级，不影响监听本身。
-   */
-  realtimeStream: boolean
-  /**
-   * 实时通道用的浏览器可执行文件路径。空字符串 = 自动发现常见安装位置
-   * （Chrome/Edge/Brave/Chromium）；填绝对路径则优先用它。
-   */
-  browserPath: string
   /** 弹幕列表自动跟随最新 */
   autoScroll: boolean
+  /**
+   * **登录态 Cookie**（从抖音网页版复制，形如 `ttwid=…; passport_csrf_token=…; sessionid=…`）。
+   *
+   * 为什么需要：**平台只向「已登录会话」推送礼物消息**（`WebcastGiftMessage`），匿名会话在普通
+   * 直播间基本收不到礼物（当前插件在聊天室能拿到礼物，是因为那条走的是点歌 `…OrderSingMessage`）。
+   * 填上你自己账号的 Cookie 后，实时通道握手会带上它，普通直播间也能收到礼物。
+   *
+   * 留空 = 匿名（礼物可能收不到，但不影响弹幕/进场/点赞）。只存在本机数据库里，不随插件分发。
+   */
+  douyinCookie: string
   /** 同时监控的房间数上限（每个房间一路推送连接，超了排队） */
   monitorConcurrency: number
   /** 启动应用时接着监控上次在监控的房间（默认关：打开应用不该自己连上直播间） */

@@ -14,7 +14,7 @@ import * as crypto from 'node:crypto'
  * - **只认握手返回 101**；非 101 时把响应头里的 `Handshake-Msg`（抖音会写 `DEVICE_BLOCKED`）
  *   原样抛给上层——这正是我们要在日志里看到的关键信息；
  * - **不发 `Sec-WebSocket-Extensions`**：否则会协商 permessage-deflate，收帧要额外处理 RSV1（压缩位），
- *   我们不需要压缩（抖音推送帧自身在应用层就是 gzip，见 ws-capture）；
+ *   我们不需要压缩（抖音推送帧自身在应用层就是 gzip，见 push-capture）；
  * - 客户端出帧**一律掩码**（协议要求），支持 126/127 长度；服务端帧按 1/2/8/9/10 处理；
  * - 分片（continuation）按 opcode 0 累积，够 CDP 的大消息用。
  */

@@ -1,6 +1,6 @@
 /**
  * 解码器自检（dev-only，不参与打包）：把**按官方/实测字段号手搓的 protobuf 帧**喂给
- * **真实的解码器**（`main/douyin/proto-messages.ts`、`main/douyin/json.ts`），
+ * **真实的解码器**（`main/douyin/proto-messages.ts`），
  * 断言礼物与点歌解出来的东西对不对。
  *
  * 为什么要有它：这个插件的两条纪律是「字段号必须实测」和「宁可没有，不给错数」，
@@ -154,16 +154,10 @@ const orderSingFollowUpFrame = ({
  * 也实现 `resolveByName`：真礼物帧按字段号解不出名字时的兜底靠它。
  */
 const fakeCatalog = (pairs = {}) => {
-  const warned = []
   const names = new Map(Object.values(pairs).map((gift) => [gift.name, gift]))
   return {
-    warned,
     resolve: (id) => pairs[id],
-    resolveByName: (name) => names.get(name),
-    noteFramePrice: (id, framePrice) => {
-      const hit = pairs[id]
-      if (hit && hit.diamonds !== framePrice) warned.push(`${id}:${framePrice}≠${hit.diamonds}`)
-    }
+    resolveByName: (name) => names.get(name)
   }
 }
 
@@ -234,9 +228,10 @@ function check(label, actual, expected) {
 }
 
 const proto = await bundle('proto-messages.ts')
-const json = await bundle('json.ts')
 /** 落库时「同一单两帧合并成一行」的规则（纯函数，见 main/gift/merge.ts） */
 const mergeMod = await bundle('merge.ts', 'main/gift')
+/** 连送（combo）累积量 → 本次增量 的去重（纯函数，见 main/gift/group.ts） */
+const groupMod = await bundle('group.ts', 'main/gift')
 
 /** `--frame=Method:hex`：把真帧喂回解码器，只看它解出什么（不做断言） */
 const frameArg = process.argv.find((arg) => arg.startsWith('--frame='))
@@ -322,11 +317,10 @@ const recordFallback = proto.decodeProtoMessage(
 )
 check('单号串那段不在目录里 → 退回记录里的礼物', [recordFallback.item.text, recordFallback.item.diamonds], ['跑车', 1200])
 
-/* 帧价与目录不符 → 自检必须报警（这条读法只做过一次交叉核对） */
+/* 点歌的价以**目录**为准（记录里的价永远是那件固定点唱礼物的，与用户实际送的那件无关） */
 const mismatch = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 } })
 const wrong = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ price: 5 }), mismatch)
-check('点歌 + 目录价不符 → 写一条自检告警', mismatch.warned, ['3200:5≠99'])
-check('点歌 + 目录价不符 → 仍以目录为准', wrong.item.diamonds, 99)
+check('点歌 → 忽略记录里的固定礼物价，用目录价', wrong.item.diamonds, 99)
 
 /* 结构未知的真礼物帧：按字段号解不出名字时，靠「帧里出现的目录礼物名」兜底 */
 const unknown = proto.decodeProtoMessage('WebcastGiftMessage', unknownGiftFrame(), catalog)
@@ -485,18 +479,50 @@ check('两条都没记录 → 正文退回「想听 X 演唱」', [allWeak.conte
 /* 真礼物（有记录的另一种来源）也带记录标记，合并时才有资格覆盖 */
 check('真礼物帧 → giftRecord=true', [gift.item.giftRecord, unknown.item.giftRecord], [true, true])
 
+/* 真礼物的**单价以帧里的 `diamondCount`(12) 为准**（升级礼物/活动价与目录标准价不同） */
+const priced = proto.decodeProtoMessage(
+  'WebcastGiftMessage',
+  giftFrame({ unit: 7, repeat: 3, name: '玫瑰' }),
+  fakeCatalog({ 10990: { name: '玫瑰', diamonds: 99 } })
+)
+check('真礼物 → 帧价优先于目录（升级/活动价）', [priced.item.text, priced.item.diamonds], ['玫瑰', 21])
+check('真礼物 → 带出礼物 id（连送分组用）', priced.item.giftId, 10990)
+
 /* 别的消息不该带出抖币 */
 const chat = proto.decodeProtoMessage('WebcastChatMessage', chatFrame())
 check('弹幕 → kind / 抖币 0', [chat.item.kind, chat.item.diamonds], ['chat', 0])
 
-/* JSON 那条路（服务端忽略 resp_content_type 时才会走到）也得有同样的口径 */
-const jsonGift = json.decodeMessageJson('WebcastGiftMessage', {
-  gift: { name: '玫瑰', diamond_count: 1 },
-  repeat_count: 3,
-  user: { id_str: '7694190253011159818', nickname: '送花的人' }
-})
-check('JSON 礼物 → 名字 / 数量 / 总额', [jsonGift.item.text, jsonGift.item.count, jsonGift.item.diamonds], ['玫瑰', 3, 3])
-check('JSON 弹幕 → 抖币 0', json.decodeMessageJson('WebcastChatMessage', { content: 'hi', user: { id_str: '1', nickname: 'a' } }).item.diamonds, 0)
+/* 连送去重：服务端推**累积量** 1→2→5→5，落库的应是增量 1、1、3，最后那条重复帧被丢弃 */
+{
+  const state = new Map()
+  const mk = (cumulative, unit) => ({
+    id: 1, kind: 'gift', user: 'a', userId: '1', text: '玫瑰',
+    count: cumulative, diamonds: unit * cumulative, toUser: '', toUserId: '2',
+    giftId: 999, groupId: '7', at: 0
+  })
+  const counts = []
+  let totalDiamonds = 0
+  for (const cumulative of [1, 2, 5, 5]) {
+    const out = groupMod.applyGiftIncrements([mk(cumulative, 10)], state)
+    counts.push(out.length > 0 ? out[0].count : 0)
+    if (out.length > 0) totalDiamonds += out[0].diamonds
+  }
+  check('连送累积 1,2,5,5 → 增量 1,1,3,0', counts, [1, 1, 3, 0])
+  check('连送总额 = 10×(1+1+3) = 50', totalDiamonds, 50)
+}
+
+/* 不同 group_id 是不同的一次连送：不该互相抵消 */
+{
+  const state = new Map()
+  const mk = (groupId, cumulative, unit) => ({
+    id: 1, kind: 'gift', user: 'a', userId: '1', text: '玫瑰',
+    count: cumulative, diamonds: unit * cumulative, toUser: '', toUserId: '2',
+    giftId: 999, groupId: String(groupId), at: 0
+  })
+  const a = groupMod.applyGiftIncrements([mk(1, 3, 10)], state)
+  const b = groupMod.applyGiftIncrements([mk(2, 3, 10)], state)
+  check('不同 group_id 各自计首帧增量', [a[0].count, b[0].count], [3, 3])
+}
 
 /* ------------------------------------------------------- 真帧回放（--replay=探针日志） */
 /*

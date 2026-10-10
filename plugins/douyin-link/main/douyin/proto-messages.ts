@@ -45,6 +45,8 @@ export interface ProtoResponse {
   internalExt: string
   /** 服务端建议的轮询间隔（字段 3，毫秒） */
   intervalMs: number
+  /** 是否需要回 ack（字段 9）：推送 ws 通道据此回 `PushFrame{payloadType:'ack'}` */
+  needAck: boolean
 }
 
 export interface ProtoBatch {
@@ -66,7 +68,8 @@ export function decodeProtoResponse(buf: Buffer, gifts?: GiftResolver): ProtoRes
     fetchType: 0,
     cursor: '',
     internalExt: '',
-    intervalMs: 0
+    intervalMs: 0,
+    needAck: false
   }
   if (!buf || buf.length === 0) return fallback
   try {
@@ -95,7 +98,8 @@ export function decodeProtoResponse(buf: Buffer, gifts?: GiftResolver): ProtoRes
       fetchType: getVarint(root, 6) ?? 0,
       cursor: getString(root, 2, 300) ?? '',
       internalExt: getString(root, 5, 500) ?? '',
-      intervalMs: interval > 0 ? interval : 0
+      intervalMs: interval > 0 ? interval : 0,
+      needAck: (getVarint(root, 9) ?? 0) === 1
     }
   } catch {
     return fallback
@@ -157,9 +161,6 @@ export function decodeProtoMessage(
       return { ...nothing(), item: item('social', nickname, userId, '', 0), users: withUser(user ? [user] : []) }
     case 'WebcastGiftMessage':
       return decodeProtoGift(msg, user, gifts, payload)
-    case 'WebcastLinkmicOrderSingMessage':
-      // 语音房「点歌」：房间里显示成「X 送了 想听 Y 演唱」，归到礼物这一类（见下面的解码器）
-      return decodeProtoOrderSing(msg, gifts, payload)
     case 'WebcastRoomStatsMessage': {
       // 在线人数（JSON 模式根本收不到这条）：4 是展示串（"31在线观众"），5 是数字
       const total = pickVarintInRange(msg, [5, 9], 0, 100000000) ?? 0
@@ -195,26 +196,16 @@ export function decodeProtoMessage(
 /**
  * 礼物消息（`WebcastGiftMessage`）。
  *
- * ⚠️ 字段号的来源要说清楚（本仓库的纪律是「宁可没有，不给错数」）：
- * 这几条**不是**本机抓到的真帧量出来的——2026-10 对着语音房连采了两条通道（HTTP 轮询与页面 ws，
- * 各几十分钟），`WebcastGiftMessage` **一条都没出现**（房间里肉眼可见的「X 送了…」是点歌，
- * 见下面的 `decodeProtoOrderSing`）。所以这里的 `5 = repeatCount`、`6 = comboCount`、`7 = user`、
- * `15 = gift(GiftStruct)`，以及 `GiftStruct` 的 `2 = describe`、`12 = diamondCount`、`16 = name`，
- * 取的是社区公开的 webcast proto 定义（与抖音服务端一致的那份字段号表），
- * 并按「猜错也不给错数」的口径实现：**只有 `diamondCount` 明确解出来才显示价值，否则一律 0 = 未知**。
+ * 字段号（`5 = repeatCount`、`6 = comboCount`、`7 = user`、`8 = toUser`、`11 = groupId`、
+ * `15 = gift(GiftStruct: 2 describe, 5 id, 12 diamondCount, 16 name)`）与参考项目
+ * `LiukerSun/DouyinDanmu` 用 C++ 生产验证过的 `backend/proto/douyin.proto` 一致。
  *
- * 抓到真礼物帧之后要做的第一件事：用 `spike/decoder-check.mjs --frame=WebcastGiftMessage:<hex>`
- * 把它喂回这里，核对上面这几个字段号，再把这段注释改成「实测」。
- *
- * 显示口径：
- * - 正文 = 礼物名（`name`，拿不到退回 `describe`；两个都没有就留空，行上只显示昵称）；
- * - 数量 = `repeatCount`（缺省 1：免费礼物/单发消息常常不带这个字段）；
- * - 抖币价值 = `diamondCount × 数量`；`diamondCount` 拿不到就是 **0 = 未知**，
- *   界面据此显示「价值未知」而不是「0 抖币」；
+ * 三条口径：
+ * - **单价以帧自带的 `GiftStruct.diamondCount`（12）为准**（升级礼物/活动价与目录标准价不同），
+ *   目录价只在帧没给价时兜底；两边都没有 = 0 = 未知（不编数）；
+ * - **数量**取 `combo_count`(6) 与 `repeat_count`(5) 的较大者，即服务端推的**累积量**；
+ *   「累积量 → 本次增量」的连送去重（按 `group_id`+双方+gift_id）在 `main/gift/group.ts` 里做；
  * - **收礼人** = `8 = toUser`（谁收到了这份礼物）。
- *
- * 连击不单独成一列：`repeatEnd = 0` 的连击服务端会**逐条推增量**，逐条落库本来就是逐条明细，
- * 再合成一列反而会把「这一条到底送了几个」搞乱。
  */
 function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResolver | undefined, payload: Buffer): ProtoDecoded {
   const gift = getMessage(msg, 15)
@@ -224,20 +215,23 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResol
   const frameUnit = gift ? (pickVarintInRange(gift, [12], 0, 1000000) ?? 0) : 0
   const giftId = (gift ? (getVarint(gift, 5) ?? 0) : 0) || (getVarint(msg, 2) ?? 0)
   let hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
-  /**
-   * 兜底一：**帧里出现了某个目录礼物名**就直接认它。
-   *
-   * 为什么需要（2026-10-08 实测）：社区 proto 给的 `GiftStruct` 字段号在本机真帧上没解出名字——
-   * 用户库里出现了一条「收礼人 不乖ఇ 有、礼物名空」的行（写它的就是 0.7.6），
-   * 说明真礼物帧**确实在推**，只是结构和我们照抄的那份不一样。与其再猜字段号，
-   * 不如把帧里所有字符串拿去和官方目录的 1000 多个礼物名对一遍：对上了就是这件礼物（且目录里有价）。
-   */
+  /** 兜底：帧里出现了某个目录礼物名就直接认它（按字段号解不出名字时才走） */
   if (!frameName && !hit) hit = matchGiftNameInFrame(msg, gifts)
-  // 帧里同时给了 id 和价：顺手做一次「帧 vs 官方目录」的运行时自检（不一致会在日志里 warn）
-  if (giftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(giftId, frameUnit)
   const name = frameName || hit?.name || ''
+  /**
+   * **单价以帧自带的 `GiftStruct.diamondCount`（字段 12）为准**：它反映这次实际发送的价格，
+   * 而目录里的是标准价——**升级礼物、神秘商店/活动价都与标准价不同**（用户反馈「金额对不上」
+   * 就是这个原因）。目录价只在帧没给价时兜底；两边都没有就是 0 = **未知**（不编数）。
+   */
   const unit = frameUnit || hit?.diamonds || 0
-  const repeat = pickVarintInRange(msg, [5], 1, 100000) ?? 1
+  /**
+   * 连送数量：服务端推的是**累积量**，取 `combo_count`(6) 与 `repeat_count`(5) 的较大者（至少 1）。
+   * `group_count`(4) 是「原始组数」，参考项目明确**不作为连送乘数**，这里也不用。
+   * 「累积量 → 本次增量」的去重在后处理里做（`main/gift/group.ts`，需要 `group_id`）。
+   */
+  const cumulative = Math.max(getVarint(msg, 6) ?? 0, pickVarintInRange(msg, [5], 1, 100000) ?? 1, 1)
+  /** 连送分组身份之一（`GiftMessage.group_id`，字段 11） */
+  const groupId = getVarintString(msg, 11) ?? ''
   /**
    * 名字解不出来的真礼物：把**原始帧**记进日志（限几次）。
    *
@@ -248,10 +242,18 @@ function decodeProtoGift(msg: PbMessage, user: UserInfo | null, gifts: GiftResol
    */
   if (!name && nickname) logGiftWithoutName(msg, payload)
   if (!name && !nickname) return nothing()
-  const base = item('gift', nickname, user?.id ?? '', name, repeat, unit * repeat)
+  const base = item('gift', nickname, user?.id ?? '', name, cumulative, unit * cumulative)
   return {
     ...nothing(),
-    item: { ...base, toUser: toUser?.nickname ?? '', toUserId: toUser?.id ?? '', trace: 'proto-gift', giftRecord: true },
+    item: {
+      ...base,
+      toUser: toUser?.nickname ?? '',
+      toUserId: toUser?.id ?? '',
+      trace: 'proto-gift',
+      giftRecord: true,
+      giftId,
+      groupId
+    },
     users: [...(user ? [user] : []), ...(toUser ? [toUser] : [])]
   }
 }
@@ -320,174 +322,6 @@ function logGiftWithoutName(msg: PbMessage, payload: Buffer): void {
   }
 }
 
-/**
- * 点歌（`WebcastLinkmicOrderSingMessage`）：语音/聊天室里「点了歌」那条礼物栏消息。
- *
- * **为什么把它归到礼物这一类**（而不是新开一个类型）：房间里它的显示就是
- * 「X 送了 想听 Y 演唱」——用户看到的那一条就在礼物栏里；而真正的 `WebcastGiftMessage`
- * 在这类房间的推送里实测**一条都没有**（2026-10：HTTP 轮询 420s 收到 28 种消息、
- * 页面 ws 收到 79 帧/100s，两边都没见过礼物帧，但房间里肉眼能看到送礼/点歌）。
- * 只做后者，这个房间的「礼物」页签会永远是空的。
- *
- * 两条通道**都**会推这条点歌消息（实测：HTTP 抓 3 条、ws 抓 3 条，msgId 能对上），
- * 所以解码放在这里（两条通道共用 `decodeProtoResponse`）就够，不必依赖 ws。
- *
- * 字段号实测（2026-10，真帧喂回 `spike/decoder-check.mjs --frame=…` 核对过）：顶层 `2` 是**事件类型**，
- * 同一首歌会连着来几种：
- * - `2 = 4`：**点歌本身**，payload 在 `6` —— `6.1` 单号串 `发送者id_歌手id_单号_0_歌曲id_1_Normal`、
- *   `6.2` 歌曲状态、`6.3` **歌手的完整 `User`**、`6.4` 时间（秒）、`6.6` 歌曲封面。**这条才解码**；
- * - `2 = 5`：这首歌的**播放状态变更**（payload 在 `7`：`7.2` 歌曲/MV、`7.3` 状态文案如「MV已被切换」、
- *   `7.4` 同一个单号串、`7.5` 歌手 id）——它不是一条新点歌，解出来只会把列表刷满，所以**跳过**。
- *
- * 单号串的第一段就是**送出这份点唱礼物的人**（`item.userId`）。这不是猜的，同一份抓帧日志里能对上两次
- * （2026-10，`spike/ws-spike.mjs` 的 `WebcastRoomRankMessage` 里带着用户 id→昵称）：
- * - 单号串 `58709692971_7667087264728728634_…`（歌手 `摇尾乞怜ఇ`）+ 榜单里 `58709692971 = 皓晨`
- *   → 房间里显示的就是「皓晨 送了 想听 摇尾乞怜ఇ 演唱」（用户当时看到的正是这条）；
- * - 单号串 `3540905398897175_2965843922913211_…`（歌手 `困ఇ`）+ 榜单里 `3540905398897175 = 无Wei`
- *   → 「无Wei 送了 想听 困ఇ 演唱」。
- *
- * 三条诚实性约束：
- * - **送礼人的昵称在这一帧里，但要往下挖两层**：`6.5.1.2` 是送礼人的完整 `User`
- *   （实测：`6.5.1.2.1 = 97531140566`、`6.5.1.2.3 = 「少走点弯路🪀」`，与单号串第一段同一个 id），
- *   `6.5.1.1` 是**收礼人**（= 歌手，`6.5.1.1.1 = 1249525342678500 = 「VVఇ」`，也就是 `6.3`）。
- *   两个 `User` 都记下来；万一老帧里没有这份记录，退回单号串第一段当 id，
- *   昵称再由中枢用我们自己的数据补（`main/monitor/hub.ts` 的 `resolveGiftSenders`）；
- * - **点唱礼物的名字与价格以官方目录为准**：帧里只有礼物 id（`6.5.1.5`，实测 3200）和一个
- *   **场景标签**（`6.5.1.10` = 「点唱礼物」——它**不是**礼物名：同一房间里不同的人点歌用的是
- *   不同的礼物）。名字与价格按 id 查 `../gift/catalog.ts`（官方 `webcast/gift/list/`，
- *   1282 件、免签名）：实测 `id = 3200` = 「爱的纸鹤 = 99 抖币」，与帧里 `6.5.1.6 = 99` 一致；
- *   目录查不到时才退回帧里的标签与价格。帧价与目录不一致会由目录那边写一条 warn（运行时自检）。
- *   `6.5.2 = { 2: 1000, 3: 4 }` 至今没有对得上的解释，**不用**；
- * - `2 = 5` 那几帧也带同一个单号串，但它们是播放状态变更，不是新的送礼——照旧跳过。
- */
-function decodeProtoOrderSing(msg: PbMessage, gifts: GiftResolver | undefined, raw: Buffer): ProtoDecoded {
-  const payload = getMessage(msg, 6)
-  if (!payload) return nothing()
-  const singer = parseProtoUser(getMessage(payload, 3))
-  // 6.5 = 这份点歌礼物的记录；6.5.1 = 记录本体
-  // （1 收礼人 User、2 送礼人 User、3 单号串、5 **房间固定的点唱礼物 id**、6 它的价、10 场景标签）
-  const envelope = getMessage(payload, 5)
-  const record = envelope ? getMessage(envelope, 1) : undefined
-  const recipient = (record ? parseProtoUser(getMessage(record, 1)) : null) ?? singer
-  const sender = record ? parseProtoUser(getMessage(record, 2)) : null
-  const key = (record ? getString(record, 3, 160) : '') || (getString(payload, 1, 160) ?? '')
-  const label = (record ? getString(record, 10, 40) : '') ?? ''
-  /** 记录里的礼物（实测**永远是 3200 = 爱的纸鹤 99**，是房间固定那件「点唱礼物」，不是用户送的那件） */
-  const recordGiftId = record ? (getVarint(record, 5) ?? 0) : 0
-  const frameUnit = record ? (pickVarintInRange(record, [6], 0, 10000000) ?? 0) : 0
-  /** 用户**实际送的**那件礼物：单号串第 5 段（见 `orderSingGiftId`） */
-  const keyGiftId = orderSingGiftId(key, gifts)
-  const giftId = keyGiftId || recordGiftId
-  /**
-   * 同一个点歌单会**反复推**：只有「刚点下去」那条带礼物记录（`6.5.1`），后面几条只有单号串与歌手
-   * （实测：同一单号串先来带记录的、后来不带；库里因此出现「同一单两行、一行没名字」）。
-   * 所以这里**按单号串去重**：已经有过带记录的那条，就不再为同一单号串补一条没有名字的。
-   */
-  const orderKey = orderSingKey(key)
-  if (!record && orderKey && seenOrders.has(orderKey)) return nothing()
-  if (record && orderKey) {
-    seenOrders.add(orderKey)
-    if (seenOrders.size > ORDER_MEMORY) {
-      const oldest = seenOrders.values().next().value
-      if (oldest) seenOrders.delete(oldest)
-    }
-  }
-  /**
-   * 名字与价格**以官方目录为准**，而且**按用户送的那件礼物查**（单号串第 5 段）。
-   *
-   * 为什么不是记录里的 `5`（2026-10-08 修）：用户明明看到有人送「跑车」，插件却显示
-   * 「爱的纸鹤 / 99」或者干脆「未知」。把 26 个探针日志里 40 条点歌帧全扫一遍才看清：
-   * 记录里的 `5` **永远是 3200（爱的纸鹤 99）**——那是房间固定的点唱礼物；而单号串第 5 段有 10 种取值，
-   * **10/10 都能在官方目录里查到**（跑车 4353 ×9、闪耀星辰 5564 ×6、无限热爱 15711 ×3、
-   * 彩虹炸毛 15472、捏捏小脸 5557、礼花筒 2114、爱的纸鹤 3200、比心 781、一束花开 5831、
-   * 暮光星辰 13564），随机撞上目录的概率是 1e-12 级——**那一段就是礼物 id**。
-   * 价格同理取目录价：记录里的 99 是那件固定礼物的价，拿它当「跑车」的价就错了 12 倍。
-   *
-   * 记录帧里的 `(id, 价)` 仍然拿去做目录自检（读法错了会在日志里 warn）；
-   * 目录查不到（Key 段认不出来）时退回记录里的那份，再不行退回房间自己的说法「想听 X 演唱」。
-   * **不再用场景标签当礼物名**（`10 = 点唱礼物` 本来就不是礼物名，显示成名字只会让人以为
-   * 「送了就叫礼物」——用户 2026-10-08 的原话）。
-   */
-  const hit = giftId > 0 ? gifts?.resolve(giftId) : undefined
-  if (recordGiftId > 0 && frameUnit > 0) gifts?.noteFramePrice?.(recordGiftId, frameUnit)
-  const name = hit?.name || (recipient?.nickname ? `想听 ${recipient.nickname} 演唱` : '')
-  /** 认出了用户送的那件礼物就只信目录价（记录里的 99 是点唱礼物那件的价，跟它无关） */
-  const unit = keyGiftId > 0 ? (hit?.diamonds ?? 0) : hit?.diamonds || frameUnit
-  const senderId = sender?.id ?? orderSingSenderId(key)
-  /**
-   * 名字还是空的：**这一条将来在库里就是「礼物名未知」，而且再也补不回来**，
-   * 所以把原始帧记下来（限 5 条）——排查「明明有礼物却只有个空名字」时只有它说得清。
-   */
-  if (!name) logOrderSingWithoutName(raw, { key, label, giftId, senderId, recipient: recipient?.nickname ?? '' })
-  const base = item('gift', sender?.nickname ?? '', senderId, name, 1, unit)
-  const users = [sender, recipient, singer].filter((entry): entry is UserInfo => Boolean(entry?.id))
-  const unique = new Map(users.map((entry) => [entry.id, entry]))
-  return {
-    ...nothing(),
-    item: {
-      ...base,
-      toUser: recipient?.nickname ?? '',
-      toUserId: recipient?.id ?? '',
-      trace: 'proto-order',
-      /** 这一帧有没有礼物记录（`6.5.1`）：落库合并时只有「有记录」的那条能覆盖正文与价格 */
-      giftRecord: Boolean(record),
-      /** 单号串给落库用：同一单的几次推送合并成一行（见 types 的 `DanmakuItem.orderKey`） */
-      orderKey
-    },
-    users: [...unique.values()]
-  }
-}
-
-/** 点歌帧解不出礼物名时的诊断（原始 payload 前 512 字节 + 关键字段） */
-let orderDumpCount = 0
-function logOrderSingWithoutName(
-  payload: Buffer,
-  info: { key: string; label: string; giftId: number; senderId: string; recipient: string }
-): void {
-  if (orderDumpCount >= 5) return
-  orderDumpCount += 1
-  logger.info(
-    `[douyin-link][gift-empty-order] len=${payload.length} key=${info.key} label=${info.label || '（空）'}` +
-      ` giftId=${info.giftId} senderId=${info.senderId} recipient=${info.recipient || '（空）'}`
-  )
-  logger.info(`[douyin-link][gift-empty-order] hex=${payload.subarray(0, 512).toString('hex')}`)
-}
-
-/** 「最近见过的点歌单号串」的上限（只为去重，一场直播几千单也不至于涨到哪去） */
-const ORDER_MEMORY = 300
-const seenOrders = new Set<string>()
-
-/** 单号串去掉「歌曲 id」那段之前的整串都算同一单（`6.1` 与 `6.5.1.3` 是同一个串） */
-function orderSingKey(key: string): string {
-  return /^\d+_\d+_\d+/.test(key) ? key : ''
-}
-
-/**
- * 单号串 `发送者id_歌手id_点歌单id_0_<礼物 id>_1_Normal` 里**第 5 段 = 用户送出的那件礼物 id**。
- *
- * 这不是猜的（2026-10-08，26 个探针日志 / 40 条真帧全扫过）：10 个不同的第 5 段
- * （4353、5564、15711、15472、5557、2114、3200、781、5831、13564）**10/10 都能在官方礼物目录里查到**
- * ——分别是跑车 4353（×9）、闪耀星辰 5564（×6）、无限热爱 15711（×3）、彩虹炸毛、捏捏小脸、礼花筒、
- * 爱的纸鹤、比心、一束花开、暮光星辰。随机数字撞上目录 1281 件的概率在 1e-12 量级，
- * 所以它是礼物 id 而不是歌曲 id（同一房间里不同价位的点歌礼物，正是这个房间的「点歌菜单」）。
- *
- * **只有在目录里查得到才认**：认不出来就返回 0（退回记录帧里那份），绝不拿一个查不到的 id 去显示。
- */
-function orderSingGiftId(key: string, gifts?: GiftResolver): number {
-  const segment = key.split('_')[4] ?? ''
-  if (!/^\d{3,}$/.test(segment)) return 0
-  const id = Number(segment)
-  return gifts?.resolve(id) ? id : 0
-}
-
-/**
- * 单号串 `发送者id_歌手id_点歌单id_0_歌曲id_1_Normal` 的第一段（送出礼物的人）。
- * 只在它**确实是一串数字**时才认（认不出来就返回空串，界面上显示未知用户，而不是写半截垃圾）。
- */
-function orderSingSenderId(key: string): string {
-  const first = key.split('_')[0] ?? ''
-  return /^\d{4,}$/.test(first) ? first : ''
-}
 
 /**
  * 榜单/贡献类消息的字段号**仍未实测**（`WebcastRoomRankMessage` / `WebcastLinkerContributeMessage` /
@@ -656,10 +490,9 @@ function item(
   return { id: nextId++, kind, user, userId, text, count, diamonds, toUser: '', toUserId: '', at: Date.now() }
 }
 
-/** 测试用：重置自增序号与「见过的点歌单」 */
+/** 测试用：重置自增序号 */
 export function __resetProtoIds(): void {
   nextId = 1
-  seenOrders.clear()
 }
 
 /**
@@ -678,11 +511,7 @@ export function __resetProtoIds(): void {
  * WebcastSocialMessage: 2 user
  * WebcastGiftMessage: 2 giftId, 5 repeatCount, 6 comboCount, 7 user, 8 toUser, 9 repeatEnd,
  *                     15 gift(GiftStruct: 2 describe, 5 id, 11 type, 12 diamondCount, 16 name)
- *                     —— 来源是社区公开的 webcast proto（本机**还没抓到真礼物帧**，见 decodeProtoGift）
- * WebcastLinkmicOrderSingMessage: 顶层 2 = 事件类型（**4 = 点歌**，payload 在 6：单号串 6.1、
- *                     歌手 User 6.3、封面 6.6；**5 = 播放状态变更**，payload 在 7，跳过不解码）
- *                     —— 实测；发送者的 User 不在帧里
- * WebcastGiftMessage 的字段号来源见 `decodeProtoGift` 上方（社区 proto，本机尚未抓到真礼物帧）
+ *                     —— 与参考项目 `backend/proto/douyin.proto` 一致（生产验证过）
  * WebcastRoomStatsMessage: 2/3/4 展示串（"31"、"31在线观众"）, 5 count（JSON 模式收不到这条）
  * WebcastRoomUserSeqMessage: 2 total, 3 popStr, 7 totalUserStr, 8 totalStr
  * WebcastRoomMessage: 2 content（进房欢迎语这类房间级提示）
