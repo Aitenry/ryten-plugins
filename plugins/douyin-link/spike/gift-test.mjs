@@ -10,7 +10,7 @@
  * 用插件自己的 `main/douyin/proto-messages.ts` 解码；掉线自动重连（每次重新签名）直到到点。
  */
 import { build } from 'esbuild'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,8 +27,11 @@ const UA =
 
 const args = process.argv.slice(2)
 const seconds = Number(args.find((a) => a.startsWith('--seconds='))?.slice(10) ?? 90)
-/** `--cookie=<完整 Cookie 头>`：登录态 Cookie（留空 = 匿名）。抖音只向已登录会话推送礼物消息 */
-const cookieArg = args.find((a) => a.startsWith('--cookie='))?.slice('--cookie='.length) ?? ''
+/** `--cookie=<完整 Cookie 头>` 或 `--cookie-file=<路径>`：登录态 Cookie（留空 = 匿名）。抖音只向已登录会话推送礼物消息 */
+const cookieFile = args.find((a) => a.startsWith('--cookie-file='))?.slice('--cookie-file='.length) ?? ''
+const cookieArg =
+  args.find((a) => a.startsWith('--cookie='))?.slice('--cookie='.length) ??
+  (cookieFile ? readFileSync(cookieFile, 'utf8').trim() : '')
 const rooms = args
   .filter((a) => !a.startsWith('--'))
   .flatMap((a) => a.split(','))
