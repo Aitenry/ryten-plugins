@@ -79,20 +79,7 @@ export function RoomRail(props: {
   const ordered = [...props.rooms].sort((a, b) => b.addedAt - a.addedAt)
 
   return (
-    <Panel
-      className="min-h-0 flex-1"
-      title={t('douyin-link.page.rooms', { count: props.rooms.length })}
-      extra={
-        <Button
-          size="small"
-          type="text"
-          loading={props.busy}
-          onClick={() => props.onMonitorAll(!monitoring)}
-        >
-          {monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
-        </Button>
-      }
-    >
+    <Panel className="min-h-0 flex-1" title={t('douyin-link.page.rooms', { count: props.rooms.length })}>
       <div className="flex min-h-0 flex-1 flex-col gap-2">
         <div className="flex shrink-0 items-center gap-2">
           <Input
@@ -104,6 +91,14 @@ export function RoomRail(props: {
           />
           <Button size="small" type="primary" icon={<RiAddLine size={14} />} loading={props.busy} onClick={add}>
             {t('douyin-link.page.add')}
+          </Button>
+          <Button
+            size="small"
+            type="text"
+            loading={props.busy}
+            onClick={() => props.onMonitorAll(!monitoring)}
+          >
+            {monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
           </Button>
         </div>
 
