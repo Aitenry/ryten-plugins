@@ -27,6 +27,14 @@ import type {
   RoomTick,
   StoredMessage,
   SummaryPush,
+  UserAnalysis,
+  UserAnalysisChat,
+  UserAnalysisFacts,
+  UserAnalysisGifting,
+  UserAnalysisInsight,
+  UserAnalysisNetwork,
+  UserAnalysisPeer,
+  UserAnalysisScore,
   UserBatch,
   UserProfile,
   UserRankPage,
@@ -234,6 +242,106 @@ export function normalizePresence(value: unknown, webRid: string): PresenceSnaps
   }
 }
 
+/**
+ * 「分析用户」画像归一化：缺字段一律给安全默认，界面永远拿到形状完整的对象
+ * （打分用的 `key` 是机器键，界面再按当前语言拼句）。
+ */
+export function normalizeUserAnalysis(value: unknown): UserAnalysis {
+  const raw = isRecord(value) ? value : {}
+  const scores = (input: unknown): UserAnalysisScore[] =>
+    asList<unknown>(input)
+      .filter((item): item is Record<string, unknown> => isRecord(item) && typeof item.key === 'string')
+      .map((item) => ({ key: item.key as string, score: asCount(item.score) }))
+  const insights = (input: unknown): UserAnalysisInsight[] =>
+    asList<unknown>(input)
+      .filter((item): item is Record<string, unknown> => isRecord(item) && typeof item.key === 'string')
+      .map((item) => ({
+        key: item.key as string,
+        params: isRecord(item.params) ? (item.params as Record<string, string | number>) : {}
+      }))
+  const factsRaw = isRecord(raw.facts) ? raw.facts : {}
+  const facts: UserAnalysisFacts = {
+    recencyHours: asCount(factsRaw.recencyHours),
+    activeDays: asCount(factsRaw.activeDays),
+    spanDays: asCount(factsRaw.spanDays),
+    monetary: asCount(factsRaw.monetary),
+    avgGift: asCount(factsRaw.avgGift),
+    peakHour: asCount(factsRaw.peakHour),
+    sentiment: asCount(factsRaw.sentiment),
+    positive: asCount(factsRaw.positive),
+    negative: asCount(factsRaw.negative),
+    topGiftName: asText(factsRaw.topGiftName),
+    topGiftCount: asCount(factsRaw.topGiftCount),
+    topGiftDiamonds: asCount(factsRaw.topGiftDiamonds),
+    giftKinds: asCount(factsRaw.giftKinds),
+    recipients: asCount(factsRaw.recipients)
+  }
+  const chatRaw = isRecord(raw.chat) ? raw.chat : {}
+  const chat: UserAnalysisChat = {
+    sampleCount: asCount(chatRaw.sampleCount),
+    avgLength: asCount(chatRaw.avgLength),
+    emojiRate: asCount(chatRaw.emojiRate),
+    mentionRate: asCount(chatRaw.mentionRate),
+    questionRate: asCount(chatRaw.questionRate),
+    exclaimRate: asCount(chatRaw.exclaimRate),
+    repeatRate: asCount(chatRaw.repeatRate),
+    valence: asCount(chatRaw.valence),
+    arousal: asCount(chatRaw.arousal),
+    topics: scores(chatRaw.topics),
+    keywords: asList<unknown>(chatRaw.keywords).filter((word): word is string => typeof word === 'string')
+  }
+  const peers = (input: unknown): UserAnalysisPeer[] =>
+    asList<unknown>(input)
+      .filter((item): item is Record<string, unknown> => isRecord(item) && typeof item.userId === 'string')
+      .map((item) => ({
+        userId: item.userId as string,
+        name: asText(item.name),
+        diamonds: asCount(item.diamonds),
+        items: asCount(item.items),
+        hits: asCount(item.hits),
+        share: asCount(item.share),
+        lastAt: asCount(item.lastAt)
+      }))
+  const giftingRaw = isRecord(raw.gifting) ? raw.gifting : {}
+  const giftHoursRaw = asList<unknown>(giftingRaw.hours).map((value) => asCount(value))
+  const gifting: UserAnalysisGifting = {
+    giftDays: asCount(giftingRaw.giftDays),
+    perDay: asCount(giftingRaw.perDay),
+    maxGift: asCount(giftingRaw.maxGift),
+    topGiftShare: asCount(giftingRaw.topGiftShare),
+    peakHour: asCount(giftingRaw.peakHour),
+    spanDays: asCount(giftingRaw.spanDays),
+    hours: giftHoursRaw.length === 24 ? giftHoursRaw : new Array(24).fill(0),
+    recipients: asCount(giftingRaw.recipients),
+    topRecipientShare: asCount(giftingRaw.topRecipientShare),
+    topRecipientName: asText(giftingRaw.topRecipientName)
+  }
+  const networkRaw = isRecord(raw.network) ? raw.network : {}
+  const network: UserAnalysisNetwork = {
+    outgoing: peers(networkRaw.outgoing),
+    incoming: peers(networkRaw.incoming),
+    outTotal: asCount(networkRaw.outTotal),
+    inTotal: asCount(networkRaw.inTotal)
+  }
+  return {
+    hasData: raw.hasData === true,
+    archetype: asText(raw.archetype) || 'balanced',
+    confidence: asCount(raw.confidence),
+    archetypes: scores(raw.archetypes),
+    traits: scores(raw.traits),
+    personality: scores(raw.personality),
+    personalityTop: asText(raw.personalityTop),
+    motivations: scores(raw.motivations),
+    motivationTop: asText(raw.motivationTop),
+    chat,
+    gifting,
+    network,
+    tags: asList<unknown>(raw.tags).filter((tag): tag is string => typeof tag === 'string'),
+    insights: insights(raw.insights),
+    facts
+  }
+}
+
 export const api = {
   /* ------------------------------------------------------------- 快照 */
   snapshot: async (): Promise<AnalyzerSnapshot> => normalizeSnapshot(await invoke(`${PREFIX}snapshot`)),
@@ -400,6 +508,11 @@ export const api = {
   /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
   userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>
     asList<GiftBreakdownRow>(await invoke(`${PREFIX}user-gifts`, webRid, userId)),
+  /** 「分析用户」：按库里的数据用确定性规则生成画像（**不依赖大模型**；文案由界面本地化） */
+  userAnalysis: async (webRid: string, userId: string): Promise<UserAnalysis | null> => {
+    const raw = await invoke(`${PREFIX}user-analysis`, webRid, userId)
+    return isRecord(raw) ? normalizeUserAnalysis(raw) : null
+  },
   /**
    * 礼物榜点一行后的礼物历史（`sent` = 他送的 / `received` = 他收到的）。
    * 走消息流水，所以是**明细**：时间、礼物名、件数、抖币、对方。

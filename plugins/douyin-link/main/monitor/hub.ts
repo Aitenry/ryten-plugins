@@ -32,6 +32,7 @@ import {
   type RoomSummary,
   type RoomTick,
   type SummaryPush,
+  type UserAnalysis,
   type UserInfo,
   type UserProfile,
   type UserRankPage,
@@ -48,6 +49,7 @@ import type { RoomResolveResult } from '../douyin/room'
 import { fetchUserProfile, revealMysteryProfile } from '../douyin/mystery'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
+import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
 import { isAnonymousName } from '../../shared/anonymous'
 
@@ -2015,6 +2017,17 @@ export class AnalyzerHub {
       lastSeen: Math.max(base.lastSeen, session?.lastSeen ?? 0),
       stats: base.stats
     }
+  }
+
+  /**
+   * 「分析用户」：把库里的聚合数据交给**确定性规则算法**打分，产出用户画像。
+   *
+   * 全程**不经过大模型、不需要人工**：同一份数据必然得到同一份结论
+   * （方法论与口径见 `main/analysis/portrait.ts`）。
+   */
+  async userAnalysis(webRid: string, userId: string): Promise<UserAnalysis> {
+    const data = await store.userAnalysisData(webRid, userId)
+    return buildUserAnalysis(data, Date.now())
   }
 
   /** 头像 → data URL（渲染层 CSP 不许外链图片，所以这一步在主进程做） */

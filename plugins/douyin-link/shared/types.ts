@@ -650,6 +650,195 @@ export interface UserRankPage {
   lastSeen: number
 }
 
+/* --------------------------------------------- 「分析用户」画像（规则算法，不依赖大模型） */
+
+/**
+ * 画像的一个评分项：**维度**或**行为原型**（`key` 是稳定的机器键，界面本地化；`score` 0-100）。
+ *
+ * 为什么给机器键而不是直接给人话：主进程不能产出中文/英文——文案必须留在
+ * `locales/*` 里（跟插件其它文案一套机制），所以打分只输出键，由界面拼句。
+ */
+export interface UserAnalysisScore {
+  key: string
+  score: number
+}
+
+/** 画像结论里的一条要点：`key` 机器键 + `params` 参数（界面按当前语言拼句） */
+export interface UserAnalysisInsight {
+  key: string
+  params: Record<string, string | number>
+}
+
+/** 画像用到的量化事实（界面直接显示数字；不本地化，只做格式化） */
+export interface UserAnalysisFacts {
+  /** 距最近一次出现的小时数 */
+  recencyHours: number
+  /** 出现过的天数（按本地时区分天） */
+  activeDays: number
+  /** 首末出现跨度（天） */
+  spanDays: number
+  /** 累计送出抖币 */
+  monetary: number
+  /** 单次平均抖币（无送礼为 0） */
+  avgGift: number
+  /** 最活跃的小时（0-23；无数据为 -1） */
+  peakHour: number
+  /** 情感倾向（-100 消极 ~ +100 积极；0 = 中性/无词命中） */
+  sentiment: number
+  /** 正面词命中数 */
+  positive: number
+  /** 负面词命中数 */
+  negative: number
+  /** 送得最多的礼物名（没有为空串） */
+  topGiftName: string
+  /** 该礼物的件数 / 抖币 */
+  topGiftCount: number
+  topGiftDiamonds: number
+  /** 送过的礼物种类数 */
+  giftKinds: number
+  /** 送礼对象去重个数（1 = 定向给同一个人，多 = 泛社交） */
+  recipients: number
+}
+
+/**
+ * 弹幕文本分析结果（**只看这个人自己发的弹幕**，纯词典法 + 规则统计，不依赖大模型）。
+ *
+ * 维度设计参考情绪心理学与语用学：
+ * - **情绪效价 valence + 唤起度 arousal**：Russell 情绪环状模型的两个主轴（愉悦度 × 激活度），
+ *   比单一「积极/消极」更能刻画情绪状态（同样开心，高唤起的「啊啊啊」与低唤起的「舒服」不同）；
+ * - **内容主题**：按直播语用把弹幕分成赞美 / 提问 / 应援 / 玩梗 / 催促 / 打招呼 / 闲聊，
+ *   用来判断这个人在直播间里「说什么、想干什么」；
+ * - **语言特征**：平均字数、表情率、疑问率、外放率、重复率，作为人格与动机的行为线索。
+ */
+export interface UserAnalysisChat {
+  /** 参与分析的弹幕样本数 */
+  sampleCount: number
+  /** 平均字数（保留 1 位小数） */
+  avgLength: number
+  /** 使用表情符号的弹幕占比（0-100）：`[名字]` 方括号表情或 unicode emoji */
+  emojiRate: number
+  /** 带 @提及 的弹幕占比（0-100） */
+  mentionRate: number
+  /** 疑问句占比（0-100） */
+  questionRate: number
+  /** 外放表达（感叹号 / 叠字 / 强化词）占比（0-100） */
+  exclaimRate: number
+  /** 重复刷屏占比（0-100） */
+  repeatRate: number
+  /** 情绪效价（-100 消极 ~ +100 积极；0 = 中性） */
+  valence: number
+  /** 情绪唤起度（0 平静 ~ 100 激动） */
+  arousal: number
+  /** 内容主题占比（机器键 + 百分比打分，按占比降序，最多 6 项） */
+  topics: UserAnalysisScore[]
+  /** 高频关键词（最多 8 个，纯展示；无数据为空数组） */
+  keywords: string[]
+}
+
+/**
+ * 关系网里的一个人：该用户**送礼的对象**，或**送礼给该用户的人**。
+ * 一条边 = 一个人（同一对关系在多条礼物帧里被聚合）。
+ */
+export interface UserAnalysisPeer {
+  /** 对方 userId */
+  userId: string
+  /** 昵称（消息流水里记的；可能为空 → 界面显示 id 尾号） */
+  name: string
+  /** 抖币总额 */
+  diamonds: number
+  /** 礼物件数 */
+  items: number
+  /** 互动次数（礼物条数） */
+  hits: number
+  /** 占该方向抖币总额的百分比（0-100） */
+  share: number
+  /** 最近一次时间（ms，0 = 未知） */
+  lastAt: number
+}
+
+/** 送礼习惯：把礼物流水按时间 / 种类 / 对象摊开看 */
+export interface UserAnalysisGifting {
+  /** 送过礼的天数（本地时区分天） */
+  giftDays: number
+  /** 平均每个送礼日的送礼次数 */
+  perDay: number
+  /** 单笔最大抖币 */
+  maxGift: number
+  /** 最常送的礼物占总抖币的百分比（0-100） */
+  topGiftShare: number
+  /** 送礼时段高峰（0-23；-1 = 无） */
+  peakHour: number
+  /** 送礼时间跨度（天） */
+  spanDays: number
+  /** 24 小时送礼分布（仅礼物条数） */
+  hours: number[]
+  /** 送礼对象去重个数 */
+  recipients: number
+  /** 最青睐对象的占比（0-100） */
+  topRecipientShare: number
+  /** 最青睐对象的昵称 / id 尾号（无为空串） */
+  topRecipientName: string
+}
+
+/** 人物关系网：以本人为中心的**一跳图**（谁给谁送了礼） */
+export interface UserAnalysisNetwork {
+  /** 本人 → 对方（本人送出的礼） */
+  outgoing: UserAnalysisPeer[]
+  /** 对方 → 本人（本人收到的礼） */
+  incoming: UserAnalysisPeer[]
+  /** 本人送出的总抖币 */
+  outTotal: number
+  /** 本人收到的总抖币 */
+  inTotal: number
+}
+
+/**
+ * 「分析用户」的用户画像结果。
+ *
+ * 方法论（**确定性规则，不依赖大模型**，见 `main/analysis/portrait.ts`）：
+ * - 价值分层用经典的 **RFM**（Recency / Frequency / Monetary）；
+ * - 行为原型借鉴 **Bartle 玩家类型学**（社交 / 认同 / 消费 / 氛围 / 旁观）适配直播场景；
+ * - 人格侧写用 **大五人格模型（Big Five / OCEAN）**：由弹幕与行为做**行为侧写**（behavioral proxy），
+ *   只表示「从数据里看到的行为倾向」，不是临床人格判定；
+ * - 动机结构借 **自我决定论（SDT）** 的基本心理需求：社交连接 / 身份认同 / 内容欣赏 / 习惯陪伴；
+ * - 弹幕文本用**词典法情感分析 + 语用主题分类**（情绪效价与唤起度、内容主题、语言特征）；
+ * - 送礼习惯把礼物流水按**时段 / 种类 / 对象**摊开（频率、单笔峰值、礼物与对象的集中度）；
+ * - 人物关系网是**以本人为中心的一跳图**（本人送出的对象 + 送礼给本人的人），用于看「青睐谁」。
+ * 所有分值都是「现有数据 → 归一化 → 加权」的纯函数结果，同一份数据同一天必然同一份结论。
+ */
+export interface UserAnalysis {
+  /** 数据是否足以成画（互动太少 → false，界面给一句说明） */
+  hasData: boolean
+  /** 主行为原型（机器键；`balanced` = 无明显主导） */
+  archetype: string
+  /** 主原型的置信度（0-100，= 主原型占比） */
+  confidence: number
+  /** 全部原型的评分（按分数降序） */
+  archetypes: UserAnalysisScore[]
+  /** 六个维度的评分（顺序固定：消费力 / 活跃度 / 社交性 / 忠诚度 / 情绪热度 / 身份标识） */
+  traits: UserAnalysisScore[]
+  /** 大五人格行为侧写（固定顺序：开放性 / 尽责性 / 外向性 / 宜人性 / 情绪稳定性） */
+  personality: UserAnalysisScore[]
+  /** 最突出的人格维度（机器键） */
+  personalityTop: string
+  /** 动机结构（固定顺序：社交连接 / 身份认同 / 内容欣赏 / 习惯陪伴） */
+  motivations: UserAnalysisScore[]
+  /** 主导动机（机器键） */
+  motivationTop: string
+  /** 弹幕文本分析 */
+  chat: UserAnalysisChat
+  /** 送礼习惯 */
+  gifting: UserAnalysisGifting
+  /** 人物关系网（一跳） */
+  network: UserAnalysisNetwork
+  /** 命中的标签（机器键；顺序稳定，最多 6 个） */
+  tags: string[]
+  /** 结论文本要点（机器键 + 参数；最多 8 条） */
+  insights: UserAnalysisInsight[]
+  /** 量化事实 */
+  facts: UserAnalysisFacts
+}
+
 /** 消息检索条件（全部可选；空条件 = 最近的消息） */
 export interface MessageQuery {
   /** 房间号；'' = 所有房间 */

@@ -177,6 +177,9 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 某个人送过的礼物（用户榜悬停看明细）
     'plugin:douyin-link:user-gifts': (webRid?: string, userId?: string) =>
       hub.userGifts(String(webRid ?? ''), String(userId ?? '')),
+    // 「分析用户」：按库里的数据用确定性规则算法生成用户画像（不依赖大模型）
+    'plugin:douyin-link:user-analysis': (webRid?: string, userId?: string) =>
+      hub.userAnalysis(String(webRid ?? ''), String(userId ?? '')),
     // 礼物榜点一行：这个人的礼物历史（sent = 他送的 / received = 他收到的），明细分页
     // `from`/`to` 是榜单当时那段范围（前端把同一段传下来）——明细必须与榜单同一段：今天就是今天
     'plugin:douyin-link:gift-history': (

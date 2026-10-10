@@ -26,6 +26,7 @@ import {
 } from './schema'
 import { schemaReady } from './ddl'
 import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
+import type { UserAnalysisData } from '../analysis/portrait'
 
 /**
  * 抖音直播分析器 的数据访问层。
@@ -1026,6 +1027,252 @@ export async function userGiftBreakdown(
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(Math.min(Math.max(1, limit), 50))
     return rows.map((row) => ({ name: row.name, count: row.count, diamonds: row.diamonds, users: 1 }))
+  })
+}
+
+/** 「分析用户」的空白输入（没有有效的房间/用户时，让上层直接得到一份「无数据」画像） */
+function emptyAnalysisData(): UserAnalysisData {
+  return {
+    chat: 0,
+    enter: 0,
+    likes: 0,
+    follows: 0,
+    gift: 0,
+    diamonds: 0,
+    firstSeen: 0,
+    lastSeen: 0,
+    hours: new Array(24).fill(0),
+    activeDays: 0,
+    giftKinds: 0,
+    topGiftName: '',
+    topGiftCount: 0,
+    topGiftDiamonds: 0,
+    recipients: 0,
+    honorLevel: 0,
+    fansClubLevel: 0,
+    chatTexts: [],
+    giftHours: new Array(24).fill(0),
+    giftDays: 0,
+    giftMax: 0,
+    giftFirstAt: 0,
+    giftLastAt: 0,
+    outEdges: [],
+    inEdges: []
+  }
+}
+
+/**
+ * 「分析用户」的聚合数据（喂给 `main/analysis/portrait.ts` 做确定性打分，**不经过大模型**）。
+ *
+ * 口径：
+ * - **用户档案表是权威**（跨会话累计，与榜单/档案页显示的数字一致）；
+ * - 档案缺失时（例如只剩消息流水的历史数据）退回**消息流水**现场聚合：
+ *   非礼物按 `count(*)`、礼物按 `sum(count)`、抖币按 `sum(diamonds)`（对齐 recorder 的口径）；
+ * - 分天/分时按**本地时区**，偏移拼字面量（同 `dayRecords`：绑定参数会让 GROUP BY 认不出同一表达式）。
+ */
+export async function userAnalysisData(webRid: string, userId: string): Promise<UserAnalysisData> {
+  if (!webRid || !userId) return emptyAnalysisData()
+  await schemaReady
+  const offsetMs = -new Date().getTimezoneOffset() * 60000
+  return withOrm('douyin-link.userAnalysisData', async (db) => {
+    const offset = sql.raw(String(Math.trunc(offsetMs)))
+    const scope = and(eq(douyinLinkMessages.webRid, webRid), eq(douyinLinkMessages.userId, userId))
+
+    const profileRows = await db
+      .select()
+      .from(douyinLinkUsers)
+      .where(and(eq(douyinLinkUsers.webRid, webRid), eq(douyinLinkUsers.userId, userId)))
+      .limit(1)
+    const profile = profileRows[0]
+
+    // 各类型的条数（礼物另给 sum(count) 作为件数）
+    const kindRows = await db
+      .select({
+        kind: douyinLinkMessages.kind,
+        hits: sql<number>`count(*)::int`,
+        items: sql<number>`coalesce(sum(${douyinLinkMessages.count}), 0)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(scope)
+      .groupBy(douyinLinkMessages.kind)
+
+    const timeRows = await db
+      .select({
+        firstAt: sql<number>`coalesce(min(${douyinLinkMessages.atMs}), 0)::double precision`,
+        lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+      })
+      .from(douyinLinkMessages)
+      .where(scope)
+
+    const hourBucket = sql`floor((${douyinLinkMessages.atMs} + ${offset}) / 3600000)::bigint % 24`
+    const hourRows = await db
+      .select({ hour: sql<number>`(${hourBucket})::int`, hits: sql<number>`count(*)::int` })
+      .from(douyinLinkMessages)
+      .where(scope)
+      .groupBy(hourBucket)
+
+    const dayBucket = sql`floor((${douyinLinkMessages.atMs} + ${offset}) / 86400000)`
+    const dayRows = await db
+      .select({ days: sql<number>`count(distinct (${dayBucket})::int)::int` })
+      .from(douyinLinkMessages)
+      .where(scope)
+
+    // 礼物汇总：时间跨度 / 送礼天数 / 单笔最大（送礼习惯用）
+    const giftAggRows = await db
+      .select({
+        firstAt: sql<number>`coalesce(min(${douyinLinkMessages.atMs}), 0)::double precision`,
+        lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`,
+        maxDiamonds: sql<number>`coalesce(max(${douyinLinkMessages.diamonds}), 0)::int`,
+        days: sql<number>`count(distinct (${dayBucket})::int)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift')))
+
+    // 礼物时段分布（本地时区，24 桶）
+    const giftHourRows = await db
+      .select({ hour: sql<number>`(${hourBucket})::int`, hits: sql<number>`count(*)::int` })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift')))
+      .groupBy(hourBucket)
+
+    // 送礼对象（本人 → 对方）：昵称优先消息里记的，再退回用户表
+    const outEdgeRows = await db
+      .select({
+        userId: douyinLinkMessages.toUserId,
+        name: sql<string>`coalesce(nullif(max(${douyinLinkMessages.toUserName}), ''), max(${douyinLinkUsers.nickname}), '')`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        items: sql<number>`coalesce(sum(${douyinLinkMessages.count}), 0)::int`,
+        hits: sql<number>`count(*)::int`,
+        lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+      })
+      .from(douyinLinkMessages)
+      .leftJoin(
+        douyinLinkUsers,
+        and(
+          eq(douyinLinkUsers.webRid, douyinLinkMessages.webRid),
+          eq(douyinLinkUsers.userId, douyinLinkMessages.toUserId)
+        )
+      )
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift'), ne(douyinLinkMessages.toUserId, '')))
+      .groupBy(douyinLinkMessages.toUserId)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+      .limit(40)
+
+    // 送礼给本人的人（对方 → 本人）：注意这里按「收礼人 = 本人」筛，不能复用 scope（它钉的是发送者）
+    const inEdgeRows = await db
+      .select({
+        userId: douyinLinkMessages.userId,
+        name: sql<string>`coalesce(nullif(max(${douyinLinkMessages.userName}), ''), max(${douyinLinkUsers.nickname}), '')`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        items: sql<number>`coalesce(sum(${douyinLinkMessages.count}), 0)::int`,
+        hits: sql<number>`count(*)::int`,
+        lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+      })
+      .from(douyinLinkMessages)
+      .leftJoin(
+        douyinLinkUsers,
+        and(
+          eq(douyinLinkUsers.webRid, douyinLinkMessages.webRid),
+          eq(douyinLinkUsers.userId, douyinLinkMessages.userId)
+        )
+      )
+      .where(
+        and(
+          eq(douyinLinkMessages.webRid, webRid),
+          eq(douyinLinkMessages.toUserId, userId),
+          eq(douyinLinkMessages.kind, 'gift'),
+          ne(douyinLinkMessages.userId, '')
+        )
+      )
+      .groupBy(douyinLinkMessages.userId)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+      .limit(40)
+
+    const giftRows = await db
+      .select({
+        name: douyinLinkMessages.content,
+        items: sql<number>`coalesce(sum(${douyinLinkMessages.count}), 0)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift')))
+      .groupBy(douyinLinkMessages.content)
+      .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
+
+    const recipientRows = await db
+      .select({ value: sql<number>`count(distinct nullif(${douyinLinkMessages.toUserId}, ''))::int` })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift')))
+
+    const textRows = await db
+      .select({ content: douyinLinkMessages.content })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'chat')))
+      .orderBy(desc(douyinLinkMessages.atMs))
+      .limit(600)
+
+    const byKind = new Map(kindRows.map((row) => [row.kind, row]))
+    const countOf = (kind: string): number => byKind.get(kind)?.hits ?? 0
+
+    const hours = new Array(24).fill(0)
+    for (const row of hourRows) {
+      const hour = Math.trunc(row.hour)
+      if (hour >= 0 && hour < 24) hours[hour] = row.hits
+    }
+
+    const topGift = giftRows[0]
+    const firstAt = timeRows[0]?.firstAt ?? 0
+    const lastAt = timeRows[0]?.lastAt ?? 0
+
+    const giftHours = new Array(24).fill(0)
+    for (const row of giftHourRows) {
+      const hour = Math.trunc(row.hour)
+      if (hour >= 0 && hour < 24) giftHours[hour] = row.hits
+    }
+    const giftAgg = giftAggRows[0]
+
+    return {
+      chat: profile ? profile.chat : countOf('chat'),
+      enter: profile ? profile.enter : countOf('member'),
+      likes: profile ? profile.likes : countOf('like'),
+      follows: profile ? profile.follows : countOf('social'),
+      gift: profile ? profile.gift : countOf('gift'),
+      diamonds: profile ? profile.diamonds : (byKind.get('gift')?.diamonds ?? 0),
+      firstSeen: profile && profile.firstSeen > 0 ? profile.firstSeen : firstAt,
+      lastSeen: profile && profile.lastSeen > 0 ? profile.lastSeen : lastAt,
+      hours,
+      activeDays: dayRows[0]?.days ?? 0,
+      giftKinds: giftRows.length,
+      topGiftName: topGift?.name ?? '',
+      topGiftCount: topGift?.items ?? 0,
+      topGiftDiamonds: topGift?.diamonds ?? 0,
+      recipients: recipientRows[0]?.value ?? 0,
+      honorLevel: profile?.honorLevel ?? 0,
+      fansClubLevel: profile?.fansClubLevel ?? 0,
+      chatTexts: textRows.map((row) => row.content).filter((text) => text.length > 0),
+      giftHours,
+      giftDays: giftAgg?.days ?? 0,
+      giftMax: giftAgg?.maxDiamonds ?? 0,
+      giftFirstAt: giftAgg?.firstAt ?? 0,
+      giftLastAt: giftAgg?.lastAt ?? 0,
+      outEdges: outEdgeRows.map((row) => ({
+        userId: row.userId,
+        name: row.name ?? '',
+        diamonds: row.diamonds,
+        items: row.items,
+        hits: row.hits,
+        lastAt: row.lastAt
+      })),
+      inEdges: inEdgeRows.map((row) => ({
+        userId: row.userId,
+        name: row.name ?? '',
+        diamonds: row.diamonds,
+        items: row.items,
+        hits: row.hits,
+        lastAt: row.lastAt
+      }))
+    }
   })
 }
 

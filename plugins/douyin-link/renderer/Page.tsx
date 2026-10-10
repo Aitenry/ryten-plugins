@@ -12,6 +12,7 @@ import type {
   MysteryProfile,
   MysteryReveal,
   RoomRuntime,
+  UserAnalysis,
   UserProfile
 } from '../shared/types'
 import { isAnonymousId } from '../shared/anonymous'
@@ -985,6 +986,11 @@ function UserProfileModal(props: {
   /** 「查看神秘人信息」的结果（null = 还没查过；点了按钮才查） */
   const [reveal, setReveal] = useState<MysteryReveal | null>(null)
   const [revealing, setRevealing] = useState(false)
+  /** 「分析用户」的画像结果（null = 还没点过；按钮在弹窗页脚） */
+  const [analysis, setAnalysis] = useState<UserAnalysis | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  /** 分析失败（主进程没回话）：只给一句提示，不留半截结果 */
+  const [analyzeError, setAnalyzeError] = useState(false)
 
   /**
    * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
@@ -1000,6 +1006,8 @@ function UserProfileModal(props: {
     let alive = true
     setLoading(true)
     setReveal(null)
+    setAnalysis(null)
+    setAnalyzeError(false)
     void api
       .userGet(props.webRid, props.userId)
       .then((next) => {
@@ -1023,6 +1031,23 @@ function UserProfileModal(props: {
       .finally(() => setRevealing(false))
   }, [props.userId])
 
+  /**
+   * 「分析用户」：把库里的数据交给主进程的**确定性规则算法**（RFM + Bartle 原型 + 词典法情感）
+   * 生成画像——不依赖大模型、不需要人工处理，同一份数据结论一致（见 `main/analysis/portrait.ts`）。
+   */
+  const doAnalyze = useCallback((): void => {
+    setAnalyzing(true)
+    setAnalyzeError(false)
+    void api
+      .userAnalysis(props.webRid, props.userId)
+      .then((result) => {
+        if (result) setAnalysis(result)
+        else setAnalyzeError(true)
+      })
+      .catch(() => setAnalyzeError(true))
+      .finally(() => setAnalyzing(false))
+  }, [props.webRid, props.userId])
+
   return (
     <Modal
       {...formModalProps}
@@ -1030,7 +1055,11 @@ function UserProfileModal(props: {
       title={t('douyin-link.users.detailTitle')}
       onCancel={props.onClose}
       footer={
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between">
+          {/* 「分析用户」：按库里的数据用规则算法出画像（不依赖大模型），结果贴在档案下面 */}
+          <Button type="primary" loading={analyzing} onClick={doAnalyze}>
+            {analyzing ? t('douyin-link.users.analyzeLoading') : t('douyin-link.users.analyzeButton')}
+          </Button>
           <Button onClick={props.onClose}>{t('douyin-link.users.close')}</Button>
         </div>
       }
@@ -1125,6 +1154,15 @@ function UserProfileModal(props: {
           </>
         )}
 
+        {/* 「分析用户」的结果：同样**不挂在档案分支里** —— 画像用的是消息流水里的互动数据，
+            就算档案被清空也能成画（跟历史弹幕一个道理）。 */}
+        {analyzeError ? (
+          <span className="text-xs" style={{ color: palette.down }}>
+            {t('douyin-link.users.analyzeFailed')}
+          </span>
+        ) : null}
+        {analysis ? <UserAnalysisPanel analysis={analysis} palette={palette} t={t} /> : null}
+
         {/* 神秘人还原：**不挂在档案分支里** —— 纯匿名的送礼人往往连档案都没有，只剩一个 id，
             这种时候也要能查看（用户 2026-10-09：「如果是神秘人，增加一个按钮可以查看其信息」） */}
         {revealable ? (
@@ -1195,6 +1233,529 @@ function StatBlock(props: {
         {props.value}
       </span>
       {props.hint ? <span className="truncate text-[10px] opacity-50">{props.hint}</span> : null}
+    </div>
+  )
+}
+
+/** 机器键 → i18n 键后缀：首字母大写（`spending` → `Spending`、`bigSpender` → `BigSpender`） */
+function cap(key: string): string {
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : ''
+}
+
+/** 距最近出现：刚刚 / N 分钟前 / N 小时前 / N 天前（`hours` 是小时数） */
+function recencyText(t: Translate, hours: number): string {
+  if (hours < 1 / 60) return t('douyin-link.users.analyzeRecencyNow')
+  if (hours < 1) return t('douyin-link.users.analyzeRecencyMinutesAgo', { n: Math.max(1, Math.round(hours * 60)) })
+  if (hours < 48) return t('douyin-link.users.analyzeRecencyHoursAgo', { n: Math.round(hours) })
+  return t('douyin-link.users.analyzeRecencyDaysAgo', { n: Math.round(hours / 24) })
+}
+
+/** 情感倾向：积极 / 中性 / 消极（带符号分值） */
+function sentimentText(t: Translate, sentiment: number): string {
+  if (sentiment >= 20) return t('douyin-link.users.analyzeSentimentPositive', { n: sentiment })
+  if (sentiment <= -20) return t('douyin-link.users.analyzeSentimentNegative', { n: sentiment })
+  return t('douyin-link.users.analyzeSentimentNeutral')
+}
+
+/** 情绪唤起度：平静 / 适中 / 高能（`value` 是 0-100） */
+function arousalText(t: Translate, value: number): string {
+  if (value < 25) return t('douyin-link.users.analyzeArousalCalm')
+  if (value < 60) return t('douyin-link.users.analyzeArousalMedium')
+  return t('douyin-link.users.analyzeArousalHigh')
+}
+
+/** 六维特征条：软底进度条 + 分值（宽度 = 分值，颜色走插件主题色，不做褒贬暗示） */
+function TraitBar(props: { label: string; score: number; palette: PluginPalette; suffix?: string }): React.JSX.Element {
+  const score = Math.max(0, Math.min(100, props.score))
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-14 shrink-0 truncate text-[10px] opacity-70">{props.label}</span>
+      <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full" style={{ backgroundColor: props.palette.border }}>
+        <span className="block h-full rounded-full" style={{ width: `${score}%`, backgroundColor: props.palette.accent }} />
+      </span>
+      <span className="w-9 shrink-0 text-right text-[10px] tabular-nums opacity-70">
+        {score}
+        {props.suffix ?? ''}
+      </span>
+    </div>
+  )
+}
+
+/** 区块小标题（画像面板里各段统一用） */
+function SectionTitle(props: { label: string; hint?: string }): React.JSX.Element {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="text-xs font-medium">{props.label}</span>
+      {props.hint ? <span className="truncate text-[10px] opacity-50">{props.hint}</span> : null}
+    </div>
+  )
+}
+
+/** 长名字截断（SVG 里没有 CSS truncate，只好自己切） */
+function shorten(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+/** 送礼时段分布：24 根迷你柱（无数据的时段淡显，峰值最高拉满） */
+function GiftHourStrip(props: { hours: number[]; palette: PluginPalette }): React.JSX.Element {
+  const hours = props.hours.length === 24 ? props.hours : new Array(24).fill(0)
+  const max = Math.max(1, ...hours)
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-end gap-[2px]" style={{ height: 26 }}>
+        {hours.map((value, hour) => (
+          <span
+            key={hour}
+            className="min-h-[2px] min-w-0 flex-1 rounded-sm"
+            title={`${String(hour).padStart(2, '0')}:00 · ${value}`}
+            style={{
+              height: `${Math.max(4, (value / max) * 100)}%`,
+              backgroundColor: props.palette.accent,
+              opacity: value > 0 ? 0.85 : 0.15
+            }}
+          />
+        ))}
+      </div>
+      <span className="flex justify-between text-[9px] leading-3 opacity-40">
+        <span>0</span>
+        <span>6</span>
+        <span>12</span>
+        <span>18</span>
+        <span>24</span>
+      </span>
+    </div>
+  )
+}
+
+/** 关系排行的一行：昵称 + 占比条 + 数值（送礼习惯/关系网共用） */
+function PeerBar(props: { name: string; value: string; share: number; palette: PluginPalette }): React.JSX.Element {
+  const share = Math.max(0, Math.min(100, props.share))
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-16 shrink-0 truncate text-[10px] opacity-80" title={props.name}>
+        {props.name}
+      </span>
+      <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full" style={{ backgroundColor: props.palette.border }}>
+        <span className="block h-full rounded-full" style={{ width: `${share}%`, backgroundColor: props.palette.accent }} />
+      </span>
+      <span className="shrink-0 text-[10px] tabular-nums opacity-70">{props.value}</span>
+    </div>
+  )
+}
+
+/** 关系网图里单侧最多画几个节点（更多的看下面的排行列表） */
+const NETWORK_MAX_NODES = 5
+
+/**
+ * 人物关系网（一跳）：中间是本人，左边画「本人送出的对象」，右边画「送礼给本人的人」。
+ *
+ * 手写 SVG 而不是上 ECharts 的 graph：这里的关系是**确定的一跳星形**，没有布局算法要跑，
+ * 手写能精确控制节点半径/连线粗细与「占比」的对应关系，也不用为一个小组件再拉一份图表依赖。
+ */
+function RelationshipGraph(props: {
+  analysis: UserAnalysis
+  palette: PluginPalette
+  t: Translate
+}): React.JSX.Element | null {
+  const { analysis, palette, t } = props
+  const outgoing = analysis.network.outgoing.slice(0, NETWORK_MAX_NODES)
+  const incoming = analysis.network.incoming.slice(0, NETWORK_MAX_NODES)
+  if (outgoing.length === 0 && incoming.length === 0) return null
+
+  const centerX = 150
+  const leftX = 96
+  const rightX = 204
+  const rows = Math.max(outgoing.length, incoming.length, 1)
+  const height = rows * 30 + 34
+  const centerY = height / 2
+  const yOf = (index: number, count: number): number => {
+    if (count <= 1) return centerY
+    const top = 16
+    const span = height - 32
+    return top + (span * index) / (count - 1)
+  }
+  const radiusOf = (share: number): number => 5 + (7 * Math.max(0, Math.min(100, share))) / 100
+  const widthOf = (share: number): number => 1 + (4 * Math.max(0, Math.min(100, share))) / 100
+  const weightText = (peer: UserAnalysis['network']['outgoing'][number]): string =>
+    peer.diamonds > 0 ? formatNumber(peer.diamonds) : `${formatNumber(peer.items)} ${t('douyin-link.users.analyzeGiftItem')}`
+
+  return (
+    <div className="flex flex-col gap-1">
+      <svg viewBox={`0 0 300 ${height}`} className="w-full" style={{ height }} role="img">
+        {outgoing.map((peer, index) => (
+          <line
+            key={`oe-${peer.userId}`}
+            x1={centerX}
+            y1={centerY}
+            x2={leftX}
+            y2={yOf(index, outgoing.length)}
+            stroke={palette.accent}
+            strokeWidth={widthOf(peer.share)}
+            strokeOpacity={0.4}
+            strokeLinecap="round"
+          />
+        ))}
+        {incoming.map((peer, index) => (
+          <line
+            key={`ie-${peer.userId}`}
+            x1={centerX}
+            y1={centerY}
+            x2={rightX}
+            y2={yOf(index, incoming.length)}
+            stroke={palette.up}
+            strokeWidth={widthOf(peer.share)}
+            strokeOpacity={0.4}
+            strokeLinecap="round"
+          />
+        ))}
+        {outgoing.map((peer, index) => {
+          const y = yOf(index, outgoing.length)
+          const r = radiusOf(peer.share)
+          return (
+            <g key={`on-${peer.userId}`}>
+              <circle cx={leftX} cy={y} r={r} fill={palette.soft} stroke={palette.accent} strokeWidth={1.2} />
+              <text x={leftX - r - 5} y={y + 3} textAnchor="end" fontSize={9} fill="currentColor" opacity={0.8}>
+                {shorten(peer.name, 6)}
+              </text>
+            </g>
+          )
+        })}
+        {incoming.map((peer, index) => {
+          const y = yOf(index, incoming.length)
+          const r = radiusOf(peer.share)
+          return (
+            <g key={`in-${peer.userId}`}>
+              <circle cx={rightX} cy={y} r={r} fill={palette.soft} stroke={palette.up} strokeWidth={1.2} />
+              <text x={rightX + r + 5} y={y + 3} textAnchor="start" fontSize={9} fill="currentColor" opacity={0.8}>
+                {shorten(peer.name, 6)}
+              </text>
+            </g>
+          )
+        })}
+        <circle cx={centerX} cy={centerY} r={15} fill={palette.soft} stroke={palette.accent} strokeWidth={1.5} />
+        <text x={centerX} y={centerY + 3} textAnchor="middle" fontSize={9} fill="currentColor" opacity={0.9}>
+          {t('douyin-link.users.analyzeNetworkSelf')}
+        </text>
+      </svg>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] opacity-60">
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-1.5 w-3 rounded-full" style={{ backgroundColor: palette.accent }} />
+          {t('douyin-link.users.analyzeNetworkOut', { coins: formatNumber(analysis.network.outTotal) })}
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-1.5 w-3 rounded-full" style={{ backgroundColor: palette.up }} />
+          {t('douyin-link.users.analyzeNetworkIn', { coins: formatNumber(analysis.network.inTotal) })}
+        </span>
+      </div>
+      {outgoing.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <SectionTitle label={t('douyin-link.users.analyzeNetworkFavorTitle')} />
+          {analysis.network.outgoing.slice(0, NETWORK_MAX_NODES).map((peer) => (
+            <PeerBar
+              key={peer.userId}
+              name={peer.name}
+              value={weightText(peer)}
+              share={peer.share}
+              palette={palette}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 「分析用户」画像面板：主画像 + 大五人格 + 六维特征 + 弹幕分析 + 送礼习惯 + 人物关系网 +
+ * 动机结构 + 标签 + 结论 + 量化事实 + 方法依据。
+ *
+ * 全部文案本地化：主进程只给机器键与数值参数（见 `shared/types.ts` 的 `UserAnalysis`），
+ * 这里用 `cap` 把机器键拼成 `analysisBig5*` / `analysisTrait*` / `analysisChatTopic*` /
+ * `analysisMotivation*` / `analysisArchetype*` / `analysisTag*` / `analysisInsight*` 键。
+ */
+function UserAnalysisPanel(props: {
+  analysis: UserAnalysis
+  palette: PluginPalette
+  t: Translate
+}): React.JSX.Element {
+  const { analysis, palette, t } = props
+  if (!analysis.hasData) {
+    return (
+      <div className="rounded-md px-2.5 py-2 text-xs opacity-70" style={{ backgroundColor: palette.soft }}>
+        {t('douyin-link.users.analyzeEmpty')}
+      </div>
+    )
+  }
+  const facts = analysis.facts
+  return (
+    <div className="flex flex-col gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium">{t('douyin-link.users.analyzeTitle')}</span>
+        <span className="ml-auto shrink-0 text-sm font-semibold" style={{ color: palette.accent }}>
+          {t(`douyin-link.users.analysisArchetype${cap(analysis.archetype)}`)}
+        </span>
+        <span className="shrink-0 text-[10px] opacity-60">
+          {t('douyin-link.users.analyzeConfidence')} {analysis.confidence}%
+        </span>
+      </div>
+      <span className="text-[11px] leading-4 opacity-70">
+        {t(`douyin-link.users.analysisArchetype${cap(analysis.archetype)}Desc`)}
+      </span>
+
+      {/* 大五人格（Big Five / OCEAN）：从行为数据做侧写，不是心理测量量表 */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle
+          label={t('douyin-link.users.analyzePersonalityTitle')}
+          hint={t('douyin-link.users.analyzePersonalityHint')}
+        />
+        {analysis.personality.map((trait) => (
+          <TraitBar
+            key={trait.key}
+            label={t(`douyin-link.users.analysisBig5${cap(trait.key)}`)}
+            score={trait.score}
+            palette={palette}
+          />
+        ))}
+        {analysis.personalityTop ? (
+          <span className="text-[11px] leading-4 opacity-70">
+            {t('douyin-link.users.analyzePersonalityTop')}
+            {t(`douyin-link.users.analysisBig5${cap(analysis.personalityTop)}Desc`)}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeTraitsTitle')} />
+        {analysis.traits.map((trait) => (
+          <TraitBar
+            key={trait.key}
+            label={t(`douyin-link.users.analysisTrait${cap(trait.key)}`)}
+            score={trait.score}
+            palette={palette}
+          />
+        ))}
+      </div>
+
+      {/* 弹幕文本分析：主题 + 情绪效价/唤起度 + 语言特征 + 高频词 */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeChatTitle')} />
+        {analysis.chat.sampleCount <= 0 ? (
+          <span className="text-[11px] leading-4 opacity-60">{t('douyin-link.users.analyzeChatEmpty')}</span>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-1.5">
+              <StatBlock
+                label={t('douyin-link.users.analyzeChatValence')}
+                value={sentimentText(t, analysis.chat.valence)}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeChatArousal')}
+                value={arousalText(t, analysis.chat.arousal)}
+                palette={palette}
+              />
+            </div>
+            {analysis.chat.topics.length > 0 ? (
+              <div className="flex flex-col gap-1">
+                <SectionTitle label={t('douyin-link.users.analyzeChatTopicsTitle')} />
+                {analysis.chat.topics.map((topic) => (
+                  <TraitBar
+                    key={topic.key}
+                    label={t(`douyin-link.users.analysisChatTopic${cap(topic.key)}`)}
+                    score={topic.score}
+                    palette={palette}
+                    suffix="%"
+                  />
+                ))}
+              </div>
+            ) : null}
+            <FactLine
+              items={[
+                `${t('douyin-link.users.analyzeChatSample')} ${analysis.chat.sampleCount}`,
+                `${t('douyin-link.users.analyzeChatEmoji')} ${analysis.chat.emojiRate}%`,
+                `${t('douyin-link.users.analyzeChatMention')} ${analysis.chat.mentionRate}%`,
+                `${t('douyin-link.users.analyzeChatAvgLength')} ${analysis.chat.avgLength}${t('douyin-link.users.analyzeUnitChar')}`,
+                `${t('douyin-link.users.analyzeChatFeatureQuestion')} ${analysis.chat.questionRate}%`,
+                `${t('douyin-link.users.analyzeChatFeatureExclaim')} ${analysis.chat.exclaimRate}%`,
+                `${t('douyin-link.users.analyzeChatFeatureRepeat')} ${analysis.chat.repeatRate}%`
+              ]}
+            />
+            {analysis.chat.keywords.length > 0 ? (
+              <span className="flex flex-wrap items-center gap-1">
+                <span className="shrink-0 text-[10px] opacity-60">{t('douyin-link.users.analyzeChatKeywordsTitle')}</span>
+                {analysis.chat.keywords.map((word) => (
+                  <span
+                    key={word}
+                    className="rounded-full px-2 py-0.5 text-[10px]"
+                    style={{ border: `1px solid ${palette.border}` }}
+                  >
+                    {word}
+                  </span>
+                ))}
+              </span>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      {/* 送礼习惯：把礼物流水按时间 / 种类 / 对象摊开 */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeGiftingTitle')} />
+        {facts.monetary <= 0 && analysis.gifting.giftDays <= 0 ? (
+          <span className="text-[11px] leading-4 opacity-60">{t('douyin-link.users.analyzeGiftingEmpty')}</span>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-1.5">
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingDays')}
+                value={`${formatNumber(analysis.gifting.giftDays)} ${t('douyin-link.users.analyzeUnitDay')}`}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingPerDay')}
+                value={String(analysis.gifting.perDay)}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingMax')}
+                value={formatNumber(analysis.gifting.maxGift)}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingPeak')}
+                value={analysis.gifting.peakHour >= 0 ? `${String(analysis.gifting.peakHour).padStart(2, '0')}:00` : '-'}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingSpan')}
+                value={`${formatNumber(Math.round(analysis.gifting.spanDays))} ${t('douyin-link.users.analyzeUnitDay')}`}
+                palette={palette}
+              />
+              <StatBlock
+                label={t('douyin-link.users.analyzeGiftingTopKind')}
+                value={`${analysis.gifting.topGiftShare}%`}
+                palette={palette}
+              />
+            </div>
+            <SectionTitle label={t('douyin-link.users.analyzeGiftingHoursTitle')} />
+            <GiftHourStrip hours={analysis.gifting.hours} palette={palette} />
+            <FactLine
+              items={[
+                `${t('douyin-link.users.analyzeGiftingTargets')} ${analysis.gifting.recipients}`,
+                analysis.gifting.topRecipientName
+                  ? `${t('douyin-link.users.analyzeGiftingFavorite')} ${analysis.gifting.topRecipientName} ${analysis.gifting.topRecipientShare}%`
+                  : t('douyin-link.users.analyzeGiftingNoTarget')
+              ]}
+            />
+          </>
+        )}
+      </div>
+
+      {/* 人物关系网：以本人为中心的一跳图（左 = 送出，右 = 收到） */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeNetworkTitle')} />
+        {analysis.network.outgoing.length === 0 && analysis.network.incoming.length === 0 ? (
+          <span className="text-[11px] leading-4 opacity-60">{t('douyin-link.users.analyzeNetworkEmpty')}</span>
+        ) : (
+          <RelationshipGraph analysis={analysis} palette={palette} t={t} />
+        )}
+      </div>
+
+      {/* 动机结构（自我决定论 SDT）：解释「他为什么留在这里」 */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeMotivationTitle')} />
+        {analysis.motivations.map((item) => (
+          <TraitBar
+            key={item.key}
+            label={t(`douyin-link.users.analysisMotivation${cap(item.key)}`)}
+            score={item.score}
+            palette={palette}
+          />
+        ))}
+        {analysis.motivationTop ? (
+          <span className="text-[11px] leading-4 opacity-70">
+            {t('douyin-link.users.analyzeMotivationTop')}
+            {t(`douyin-link.users.analysisMotivation${cap(analysis.motivationTop)}Desc`)}
+          </span>
+        ) : null}
+      </div>
+
+      {analysis.tags.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <SectionTitle label={t('douyin-link.users.analyzeTagsTitle')} />
+          <span className="flex flex-wrap gap-1">
+            {analysis.tags.map((tag) => (
+              <span
+                key={tag}
+                className="rounded-full px-2 py-0.5 text-[10px]"
+                style={{ border: `1px solid ${palette.border}` }}
+              >
+                {t(`douyin-link.users.analysisTag${cap(tag)}`)}
+              </span>
+            ))}
+          </span>
+        </div>
+      ) : null}
+
+      {analysis.insights.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <SectionTitle label={t('douyin-link.users.analyzeInsightsTitle')} />
+          {analysis.insights.map((insight, index) => (
+            <span key={`${insight.key}-${index}`} className="flex items-start gap-1 text-[11px] leading-4 opacity-80">
+              <span style={{ color: palette.accent }}>•</span>
+              <span className="min-w-0 flex-1">
+                {t(`douyin-link.users.analysisInsight${cap(insight.key)}`, insight.params)}
+              </span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeFactsTitle')} />
+        <div className="grid grid-cols-3 gap-1.5">
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactRecency')}
+            value={recencyText(t, facts.recencyHours)}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactActiveDays')}
+            value={`${formatNumber(facts.activeDays)} ${t('douyin-link.users.analyzeUnitDay')}`}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactMonetary')}
+            value={formatNumber(facts.monetary)}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactAvgGift')}
+            value={formatNumber(facts.avgGift)}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactPeakHour')}
+            value={facts.peakHour >= 0 ? `${String(facts.peakHour).padStart(2, '0')}:00` : '-'}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeFactSentiment')}
+            value={sentimentText(t, facts.sentiment)}
+            palette={palette}
+          />
+        </div>
+        <FactLine
+          items={[
+            facts.topGiftName
+              ? `${t('douyin-link.users.analyzeFactTopGift')} ${facts.topGiftName} ×${formatNumber(facts.topGiftCount)}`
+              : `${t('douyin-link.users.analyzeFactGiftKinds')} ${facts.giftKinds}`,
+            `${t('douyin-link.users.analyzeFactRecipients')} ${facts.recipients}`
+          ]}
+        />
+      </div>
+
+      <span className="text-[10px] leading-3 opacity-50">{t('douyin-link.users.analyzeBasis')}</span>
     </div>
   )
 }
