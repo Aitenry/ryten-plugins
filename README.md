@@ -60,6 +60,26 @@ npm run fixture      # http://127.0.0.1:8799 serves plugins.json and the zips
 # then point RytenBench at it (app-side env: RB_PLUGINS_REPO=http://127.0.0.1:8799)
 ```
 
+### Regression probes
+
+`plugins/<id>/spike/` holds dev-only checks that run the **real** code (nothing there is imported by
+`main/` or `renderer/`, so none of it is packaged). The douyin-link cookie path has three of them —
+they exist because a silently truncated cookie is invisible in the UI, and because "the diagnostic is
+in the code" is not the same as "the diagnostic fires" (see the 2026-10-08 and 2026-10-10 incidents):
+
+```bash
+npm run build
+node plugins/douyin-link/spike/cookie-check.mjs           # limits, parsing, merge order (offline)
+node plugins/douyin-link/spike/cookie-main-check.mjs      # real main.cjs: IPC → memory → settings JSON
+node plugins/douyin-link/spike/settings-render-check.mjs  # real renderer.mjs mounted in jsdom
+```
+
+Real credentials stay out of the repo — measure a copy instead (prints counts, never values):
+
+```bash
+node plugins/douyin-link/spike/cookie-check.mjs "--cookie-file=$env:TEMP\my-cookie.txt" --live
+```
+
 ## Releasing
 
 Push a tag (see `.github/workflows/release.yml`):

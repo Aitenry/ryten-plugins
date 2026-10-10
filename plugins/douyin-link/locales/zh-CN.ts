@@ -601,6 +601,10 @@ export const DouyinLinkZhCN = {
       cookieHint:
         '抖音只向已登录会话推送礼物消息：匿名会话能收到弹幕/进场/点赞，但收不到礼物（所以聊天室的礼物以前只能靠点歌那条专线）。只要你在直播间里看得到礼物、插件里却没有，就是这个原因——把抖音网页版的 Cookie 整行贴进来即可。留空 = 匿名。Cookie 只存在本机数据库、不随插件分发，请勿分享给他人。',
       cookiePlaceholder: '例如：ttwid=…; passport_csrf_token=…; sessionid=…',
+      cookieTruncated:
+        '这段 Cookie 有 {{length}} 字符，超过上限 {{max}}，尾部已被截断——而 ttwid / odin_tt 这些字段正好在尾部，抖音会当它是无效会话。请确认粘贴的是完整的一行。',
+      cookieAnonymous:
+        '这段 Cookie 里没有 {{missing}}：抖音会把它当匿名会话（弹幕能收、礼物收不到）。',
 
       retentionLabel: '消息保留',
       retentionHint:

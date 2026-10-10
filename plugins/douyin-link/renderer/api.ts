@@ -1,4 +1,5 @@
 import { DANMAKU_KINDS, isQualityKey } from '../shared/types'
+import { clampCookie } from '../shared/cookie'
 import type {
   AllAnalysisPush,
   AllRoomsAnalysis,
@@ -123,7 +124,7 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
     maxItems: asCount(value.maxItems) || fallback.maxItems,
     kinds: kinds.length > 0 ? kinds : fallback.kinds,
     autoScroll: bool(value.autoScroll, fallback.autoScroll),
-    douyinCookie: asText(value.douyinCookie).slice(0, 4096),
+    douyinCookie: clampCookie(value.douyinCookie).value,
     monitorConcurrency: asCount(value.monitorConcurrency) || fallback.monitorConcurrency,
     resumeOnStart: bool(value.resumeOnStart, fallback.resumeOnStart),
     retentionDays: typeof value.retentionDays === 'number' && Number.isFinite(value.retentionDays) ? value.retentionDays : fallback.retentionDays

@@ -52,6 +52,7 @@ import { RoomRecorder, minuteOf } from './recorder'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
 import { isAnonymousName } from '../../shared/anonymous'
+import { COOKIE_MAX_LENGTH, clampCookie } from '../../shared/cookie'
 
 /**
  * 分析中枢：**所有网络与数据都在这里**（渲染层只是视图）。
@@ -472,7 +473,19 @@ export class AnalyzerHub {
     }
     if (Array.isArray(patch.kinds)) next.kinds = patch.kinds
     if (typeof patch.autoScroll === 'boolean') next.autoScroll = patch.autoScroll
-    if (typeof patch.douyinCookie === 'string') next.douyinCookie = patch.douyinCookie.trim().slice(0, 4096)
+    if (typeof patch.douyinCookie === 'string') {
+      // 上限只有一处（shared/cookie.ts）：真实登录态 cookie 约 6 KB，这里只防「粘贴了一大坨别的东西」。
+      // 一旦真的截断，尾巴上丢的往往是 ttwid / odin_tt —— 必须留下日志，别让用户对着
+      // 「填了却没内容」发呆（2026-10-10 的 4096 静默截断就是这么被发现的）。
+      const cookie = clampCookie(patch.douyinCookie)
+      if (cookie.truncated) {
+        logger.warn(
+          `[douyin-link] 登录态 Cookie 有 ${cookie.length} 字符，超过上限 ${COOKIE_MAX_LENGTH}，已截断：` +
+            '被截掉的是尾部的字段（ttwid / odin_tt 之类），抖音可能因此不当它是有效会话，请确认粘贴的是完整的一行'
+        )
+      }
+      next.douyinCookie = cookie.value
+    }
     if (typeof patch.monitorConcurrency === 'number' && Number.isFinite(patch.monitorConcurrency)) {
       next.monitorConcurrency = Math.min(8, Math.max(1, Math.round(patch.monitorConcurrency)))
     }

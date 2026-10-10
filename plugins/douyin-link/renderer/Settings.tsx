@@ -7,6 +7,7 @@ import {
   type DbStats,
   type LiveSettings
 } from '../shared/types'
+import { COOKIE_MAX_LENGTH, clampCookie, cookieHealth } from '../shared/cookie'
 import api from './api'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -34,6 +35,14 @@ export default function Settings(): React.JSX.Element {
   const [notice, setNotice] = useState('')
   /** 登录态 Cookie 的本地草稿（失焦才存，别每敲一个字就写盘） */
   const [cookieDraft, setCookieDraft] = useState('')
+  /**
+   * 上一次存盘时**被上限截掉前的字符数**（0 = 没被截）。
+   *
+   * 为什么要记这个数：截断是主进程做的，存完回来的草稿已经是砍过的那一份——
+   * 只在 `cookieDraft.length` 上做判断永远看不出「刚才被砍了」，界面就会安静地骗人
+   * （2026-10-10 的 4096 静默截断事故：输入框里看着完整，实际存下去的是前半截）。
+   */
+  const [cookieClampedFrom, setCookieClampedFrom] = useState(0)
 
   const load = useCallback(async (): Promise<void> => {
     const [snapshot, db] = await Promise.all([api.snapshot(), api.dbStats()])
@@ -54,6 +63,36 @@ export default function Settings(): React.JSX.Element {
   const save = async (patch: Partial<LiveSettings>): Promise<void> => {
     setSettings(await api.setSettings(patch))
   }
+
+  /**
+   * 存 Cookie：存完**比一下长度**——短了就是被上限截了（主进程只留前 N 个字符）。
+   * 顺便把主进程回来的那份（已归一化）当准：界面显示的就是真正会发出去的那一行。
+   */
+  const saveCookie = async (): Promise<void> => {
+    const draft = cookieDraft
+    if (draft === (settings?.douyinCookie ?? '')) return
+    const sent = clampCookie(draft).length
+    const next = await api.setSettings({ douyinCookie: draft })
+    setSettings(next)
+    setCookieClampedFrom(sent > next.douyinCookie.length ? sent : 0)
+  }
+
+  /**
+   * Cookie 那一行底下要说的话（**只在真有问题时说**，平时一个字都不显示）：
+   * 被上限截了；或者这份 cookie 里根本没有 `sessionid` / `ttwid`（匿名会话：弹幕能收、礼物收不到）。
+   */
+  const cookieAlert = ((): string => {
+    if (cookieClampedFrom > 0) {
+      return t('douyin-link.settingsPage.cookieTruncated', {
+        length: cookieClampedFrom,
+        max: COOKIE_MAX_LENGTH
+      })
+    }
+    if (!cookieDraft.trim()) return ''
+    const health = cookieHealth(cookieDraft)
+    if (health.missing.length === 0) return ''
+    return t('douyin-link.settingsPage.cookieAnonymous', { missing: health.missing.join(' / ') })
+  })()
 
   /** 取消（用户按了取消）与失败用的是同一个提示位，靠 message 键区分 */
   const runExport = (): void => {
@@ -176,7 +215,11 @@ export default function Settings(): React.JSX.Element {
           />
         </Row>
 
-        <Row label={t('douyin-link.settingsPage.cookieLabel')} hint={t('douyin-link.settingsPage.cookieHint')}>
+        <Row
+          label={t('douyin-link.settingsPage.cookieLabel')}
+          hint={t('douyin-link.settingsPage.cookieHint')}
+          alert={cookieAlert}
+        >
           <Input.TextArea
             size="small"
             autoSize={{ minRows: 2, maxRows: 5 }}
@@ -184,9 +227,7 @@ export default function Settings(): React.JSX.Element {
             placeholder={t('douyin-link.settingsPage.cookiePlaceholder')}
             value={cookieDraft}
             onChange={(event) => setCookieDraft(event.target.value)}
-            onBlur={() => {
-              if (cookieDraft !== (settings?.douyinCookie ?? '')) void save({ douyinCookie: cookieDraft })
-            }}
+            onBlur={() => void saveCookie()}
           />
         </Row>
 
@@ -257,8 +298,16 @@ export default function Settings(): React.JSX.Element {
  * 为什么说明不放标签那一列（用户 2026-10-10：设置里那个输入框「好丑」时的根因）：
  * 说明往往很长（如 Cookie 那条），挤在标签列里只能窄窄地折成好多行，还会把右侧控件顶到
  * 容器外、显得又挤又乱。放到整行下方就能用满宽度、只占两三行，标签与控件那一行始终清爽。
+ *
+ * `alert` 是**同一版式下的第二行**，只在真有问题时给（目前只有 Cookie 那条用）：
+ * 它说的不是「这个字段怎么用」，而是「你刚填的这一份有问题」——用告警色与说明区分开。
  */
-function Row(props: { label: string; hint?: string; children: React.ReactNode }): React.JSX.Element {
+function Row(props: {
+  label: string
+  hint?: string
+  alert?: string
+  children: React.ReactNode
+}): React.JSX.Element {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-4">
@@ -269,6 +318,11 @@ function Row(props: { label: string; hint?: string; children: React.ReactNode })
         <span className="text-xs leading-5" style={{ opacity: 0.6 }}>
           {props.hint}
         </span>
+      ) : null}
+      {props.alert ? (
+        <Typography.Text type="danger" style={{ fontSize: 12, lineHeight: '20px' }}>
+          {props.alert}
+        </Typography.Text>
       ) : null}
     </div>
   )

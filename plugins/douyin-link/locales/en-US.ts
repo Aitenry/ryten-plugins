@@ -593,6 +593,10 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       cookieHint:
         'Douyin only pushes gift messages to logged-in sessions; an anonymous session gets no gifts in regular rooms (chat-room gifts work because they arrive as song requests). Paste the full Douyin web Cookie here and the realtime channel will send it, so gifts also arrive in regular rooms. Empty = anonymous. The cookie is stored only in the local database and never shipped with the plugin; do not share it.',
       cookiePlaceholder: 'e.g. ttwid=…; passport_csrf_token=…; sessionid=…',
+      cookieTruncated:
+        'This cookie is {{length}} characters, past the {{max}} limit, so its tail was cut off \u2014 and ttwid / odin_tt live in that tail, which makes Douyin treat it as an invalid session. Make sure you pasted the complete single line.',
+      cookieAnonymous:
+        'This cookie has no {{missing}}: Douyin will treat it as an anonymous session (danmaku arrive, gifts do not).',
       retentionLabel: 'Message retention',
       retentionHint:
         '0 (default) keeps everything forever and never cleans up. Set N days to delete the message stream and minute buckets older than N days; user stats are kept.',
