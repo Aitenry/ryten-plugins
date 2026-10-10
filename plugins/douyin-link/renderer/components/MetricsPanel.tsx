@@ -4,7 +4,9 @@ import { RiPauseLine, RiPlayLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { AllRoomsAnalysis, RoomSeriesRow } from '../../shared/types'
 import api, { normalizeAllRoomsAnalysis } from '../api'
-import { ChartBox, EmptyHint, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
+import { EmptyHint, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
+import { EChart } from './EChart'
+import type { ChartOption } from '../lib/echarts'
 import { clock, formatNumber } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -84,7 +86,7 @@ export function MetricsPanel(props: {
   }, [rooms])
 
   const empty = !analysis || rooms.length === 0
-  const emptyText = loading ? t('douyin-link.page.loading') : t('douyin-link.metrics.empty')
+  const emptyText = loading ? t('douyin-link.page.loading') : t('douyin-link.page.metrics.empty')
 
   /** 窗口抖币总额（KPI 与占比的分母） */
   const totalDiamonds = useMemo(
@@ -108,7 +110,7 @@ export function MetricsPanel(props: {
   return (
     <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
       <div className="col-span-8 flex min-h-0 flex-col gap-3">
-        <Panel className="shrink-0" title={t('douyin-link.metrics.kpiTitle')}>
+        <Panel className="shrink-0" title={t('douyin-link.page.metrics.kpiTitle')}>
           <div className="grid grid-cols-4 gap-2">
             <Kpi
               label={t('douyin-link.page.kpiDiamonds')}
@@ -118,26 +120,26 @@ export function MetricsPanel(props: {
               palette={palette}
             />
             <Kpi
-              label={t('douyin-link.metrics.roomsWithGift')}
+              label={t('douyin-link.page.metrics.roomsWithGift')}
               value={formatNumber(rooms.length)}
               accent={palette.accent}
               palette={palette}
             />
             <Kpi
-              label={t('douyin-link.metrics.peakHour')}
+              label={t('douyin-link.page.metrics.peakHour')}
               value={peakHour < 0 ? '-' : `${String(peakHour).padStart(2, '0')}:00`}
               accent={palette.up}
               palette={palette}
             />
             <Kpi
-              label={t('douyin-link.metrics.topRoom')}
+              label={t('douyin-link.page.metrics.topRoom')}
               value={rooms[0] ? roomLabel(rooms[0]) : '-'}
               palette={palette}
             />
           </div>
         </Panel>
 
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.metrics.raceTitle')}>
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.raceTitle')}>
           {empty ? (
             <EmptyHint text={emptyText} />
           ) : (
@@ -145,7 +147,7 @@ export function MetricsPanel(props: {
           )}
         </Panel>
 
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.metrics.intradayTitle')}>
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.intradayTitle')}>
           {empty ? (
             <EmptyHint text={emptyText} />
           ) : (
@@ -155,14 +157,14 @@ export function MetricsPanel(props: {
       </div>
 
       <div className="col-span-4 flex min-h-0 flex-col gap-3">
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.metrics.rankTitle')}>
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.rankTitle')}>
           {empty ? (
             <EmptyHint text={emptyText} />
           ) : (
             <RevenueRank rooms={rooms} total={totalDiamonds} colorOf={colorOf} t={t} palette={palette} onSelect={props.onSelectRoom} />
           )}
         </Panel>
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.metrics.hourlyTitle')}>
+        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.hourlyTitle')}>
           {empty ? <EmptyHint text={emptyText} /> : <HourBars rooms={rooms} peakHour={peakHour} t={t} palette={palette} />}
         </Panel>
       </div>
@@ -214,13 +216,12 @@ function hourTotals(rooms: RoomSeriesRow[]): number[] {
 }
 
 /**
- * 动态排序柱状图（bar race）：时间往前推，房间按**累计抖币收入**赛跑。
+ * 动态排序柱状图（bar race）：时间往前推，房间按**累计抖币收入**赛跑。**用 ECharts 画。**
  *
- * 实现要点（对照 echarts 的 bar-race-country）：
- * - **名次用位移表达**：一行一个房间，`translateY(名次 × 行高)` + CSS `transition`
- *   ——名次一变，行自己滑到新位置，这就是「换位」的动画；
- * - **条长用宽度过渡**：宽度按当前累计值 / 当前最大值给百分比，也带 `transition`；
- * - 房间集合固定为「窗口总抖币前 `RACE_TOP` 名」，不随中间过程增减（否则行列会跳）。
+ * 实现要点：保留外层「播放/暂停 + 时间轴」的游标状态机（`cursor`/`playing`），
+ * 每个 tick 只把当前这一帧的数据交给 ECharts；换位动画由 `realtimeSort` +
+ * `animationDurationUpdate` 表达（对照 echarts 的 bar-race-country）。
+ * 房间集合固定为「窗口总抖币前 `RACE_TOP` 名」，不随中间过程增减（否则行列会跳）。
  */
 function BarRace(props: {
   rooms: RoomSeriesRow[]
@@ -266,18 +267,51 @@ function BarRace(props: {
   /** 当前这一格的时刻标签（用第一条序列的分钟起点；各房分桶口径一致） */
   const atLabel = racers[0]?.series[at]?.minute ?? 0
 
-  /** 名次：按当前累计值降序（并列时按固定房间顺序，避免同分时来回抖） */
-  const order = racers
-    .map((room, index) => ({ index, value: cumulative[index][at] ?? 0 }))
-    .sort((a, b) => b.value - a.value)
-  const maxValue = Math.max(1, ...order.map((entry) => entry.value))
-  const rankOf = new Map<string, number>()
-  order.forEach((entry, rank) => rankOf.set(racers[entry.index].webRid, rank))
-
   const toggle = (): void => {
     if (!playing && at >= length - 1) setCursor(0)
     setPlaying((current) => !current)
   }
+
+  /** 当前帧：房间按累计值降序（并列时按固定房间顺序，避免同分时来回抖） */
+  const option: ChartOption = useMemo(() => {
+    const ordered = racers
+      .map((room, index) => ({ room, value: cumulative[index][at] ?? 0 }))
+      .sort((a, b) => b.value - a.value)
+    return {
+      animation: true,
+      grid: { left: 8, right: 48, top: 6, bottom: 6, containLabel: true },
+      xAxis: { type: 'value', show: false },
+      yAxis: {
+        type: 'category',
+        inverse: true,
+        max: Math.max(0, racers.length - 1),
+        data: ordered.map((entry) => roomLabel(entry.room)),
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: { color: palette.axis, fontSize: 10, width: 96, overflow: 'truncate' },
+        animationDuration: 300,
+        animationDurationUpdate: RACE_TICK_MS
+      },
+      series: [
+        {
+          type: 'bar' as const,
+          realtimeSort: true,
+          barWidth: 10,
+          data: ordered.map((entry) => ({
+            value: entry.value,
+            itemStyle: { color: colorOf.get(entry.room.webRid) ?? palette.accent, borderRadius: 2 }
+          })),
+          label: {
+            show: true,
+            position: 'right',
+            color: palette.text,
+            fontSize: 10,
+            formatter: (params: unknown): string => formatNumber((params as { value?: number }).value ?? 0)
+          }
+        }
+      ]
+    }
+  }, [racers, cumulative, at, colorOf, palette])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -288,10 +322,10 @@ function BarRace(props: {
           icon={playing ? <RiPauseLine size={14} /> : <RiPlayLine size={14} />}
           onClick={toggle}
         >
-          {playing ? t('douyin-link.metrics.pause') : t('douyin-link.metrics.play')}
+          {playing ? t('douyin-link.page.metrics.pause') : t('douyin-link.page.metrics.play')}
         </Button>
         <span className="shrink-0 text-[10px] opacity-60">
-          {t('douyin-link.metrics.raceAt', { time: atLabel ? clock(atLabel) : '-' })}
+          {t('douyin-link.page.metrics.raceAt', { time: atLabel ? clock(atLabel) : '-' })}
         </span>
         <div className="ml-auto min-w-0 flex-1" style={{ maxWidth: 260 }}>
           <Slider
@@ -306,58 +340,15 @@ function BarRace(props: {
           />
         </div>
       </div>
-      <ChartBox>
-        {(size) => {
-          const rowHeight = Math.max(16, Math.min(30, size.height / RACE_TOP))
-          return (
-            <div className="relative" style={{ width: size.width, height: size.height }}>
-              {racers.map((room, index) => {
-                const value = cumulative[index][at] ?? 0
-                const rank = rankOf.get(room.webRid) ?? index
-                const color = colorOf.get(room.webRid) ?? palette.accent
-                return (
-                  <div
-                    key={room.webRid}
-                    className="absolute left-0 right-0 flex items-center gap-2 text-[10px]"
-                    style={{
-                      top: 0,
-                      height: rowHeight,
-                      transform: `translateY(${rank * rowHeight}px)`,
-                      transition: 'transform .45s ease'
-                    }}
-                  >
-                    <span className="w-28 shrink-0 truncate" title={roomLabel(room)} style={{ color }}>
-                      {roomLabel(room)}
-                    </span>
-                    <span
-                      className="h-3 min-w-0 flex-1 overflow-hidden rounded-sm"
-                      style={{ backgroundColor: palette.track }}
-                    >
-                      <span
-                        className="block h-full rounded-sm"
-                        style={{
-                          width: `${value > 0 ? Math.max(2, (value / maxValue) * 100) : 0}%`,
-                          backgroundColor: color,
-                          transition: 'width .45s ease'
-                        }}
-                      />
-                    </span>
-                    <span className="w-16 shrink-0 text-right font-medium">{formatNumber(value)}</span>
-                  </div>
-                )
-              })}
-            </div>
-          )
-        }}
-      </ChartBox>
+      <EChart option={option} notMerge={false} themeKey={palette.dark ? 'dark' : 'light'} />
     </div>
   )
 }
 
 /**
- * 日内走势图：每个房间一条折线（**每分钟**抖币收入，不累计——累计看上面的赛跑图）。
+ * 日内走势图：每个房间一条折线（**每分钟**抖币收入，不累计——累计看上面的赛跑图）。**用 ECharts 画。**
  *
- * 悬浮时打一条竖线并在右上角列出**所有线**在该时刻的值（按值降序），
+ * 悬浮时打一条竖线，tooltip 里按值**降序**列出**所有线**在该时刻的值，
  * 这样一屏就能读出「这一刻谁的流水高」。
  */
 function IntradayChart(props: {
@@ -367,151 +358,77 @@ function IntradayChart(props: {
   t: Translate
 }): React.JSX.Element {
   const { rooms, colorOf, palette, t } = props
-  const series = useMemo(() => rooms.slice(0, LINE_MAX), [rooms])
   const { token } = theme.useToken()
-  const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(null)
-
-  const length = series.reduce((max, room) => Math.max(max, room.series.length), 1)
-  const padLeft = 40
-  const padBottom = 16
-  const padTop = 8
-
-  const max = Math.max(
-    1,
-    ...series.flatMap((room) => room.series.map((point) => point.diamonds))
-  )
-  const last = series[0]?.series[length - 1]?.minute ?? 0
-
+  const series = useMemo(() => rooms.slice(0, LINE_MAX), [rooms])
+  const labels = series[0]?.series.map((point) => clock(point.minute)) ?? []
+  const option: ChartOption = {
+    animation: false,
+    grid: { left: 46, right: 10, top: 8, bottom: 20 },
+    legend: {
+      top: 0,
+      type: 'scroll',
+      icon: 'roundRect',
+      itemWidth: 8,
+      itemHeight: 8,
+      itemGap: 10,
+      textStyle: { color: palette.axis, fontSize: 10 }
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: palette.accent, type: 'dashed', width: 1 } },
+      backgroundColor: token.colorBgElevated,
+      borderColor: palette.split,
+      borderWidth: 1,
+      padding: [6, 8],
+      textStyle: { color: palette.text, fontSize: 10 },
+      extraCssText: `width:160px;border-radius:8px;box-shadow:${token.boxShadowSecondary}`,
+      formatter: (params: unknown): string => {
+        const first = (Array.isArray(params) ? params[0] : params) as { dataIndex?: number } | undefined
+        const index = first?.dataIndex ?? -1
+        if (index < 0) return ''
+        const minute = series[0]?.series[index]?.minute ?? 0
+        const rows = [...series]
+          .map((room) => ({ room, value: room.series[index]?.diamonds ?? 0 }))
+          .sort((a, b) => b.value - a.value)
+        const head = `<div style="font-weight:500;margin-bottom:4px">${minute ? clock(minute) : '-'}</div>`
+        const body = rows
+          .map(
+            (row) =>
+              `<div style="display:flex;justify-content:space-between;gap:8px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${colorOf.get(row.room.webRid) ?? palette.accent};margin-right:4px"></span>${roomLabel(row.room)}</span><span style="flex-shrink:0">${formatNumber(row.value)}</span></div>`
+          )
+          .join('')
+        return `${head}<div style="border-top:1px solid ${palette.split};padding-top:4px">${body}</div>`
+      }
+    },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: palette.split } },
+      axisTick: { show: false },
+      axisLabel: { color: palette.axis, fontSize: 10, hideOverlap: true }
+    },
+    yAxis: {
+      type: 'value',
+      splitNumber: 3,
+      splitLine: { lineStyle: { color: palette.split } },
+      axisLabel: { color: palette.axis, fontSize: 10 }
+    },
+    series: series.map((room) => ({
+      name: roomLabel(room),
+      type: 'line' as const,
+      showSymbol: false,
+      lineStyle: { width: 1.6, color: colorOf.get(room.webRid) ?? palette.accent },
+      itemStyle: { color: colorOf.get(room.webRid) ?? palette.accent },
+      data: room.series.map((point) => point.diamonds)
+    }))
+  }
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="mb-1 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px]">
-        {series.map((room) => (
-          <span key={room.webRid} className="flex items-center gap-1" style={{ color: palette.axis }}>
-            <span
-              className="inline-block rounded-sm"
-              style={{ width: 8, height: 8, backgroundColor: colorOf.get(room.webRid) ?? palette.accent }}
-            />
-            <span className="min-w-0 max-w-[140px] truncate" title={roomLabel(room)}>
-              {roomLabel(room)}
-            </span>
-          </span>
-        ))}
-      </div>
-      <ChartBox>
-        {(size) => {
-          const svgHeight = Math.max(48, size.height)
-          const plotWidth = Math.max(10, size.width - padLeft - 8)
-          const plotHeight = Math.max(10, svgHeight - padBottom - padTop)
-          const x = (index: number): number => padLeft + (length <= 1 ? 0 : (index / (length - 1)) * plotWidth)
-          const y = (value: number): number => padTop + plotHeight * (1 - value / max)
-          const hoveredIndex = hover?.index ?? -1
-          const hoveredMinute = hoveredIndex >= 0 ? series[0]?.series[hoveredIndex]?.minute ?? 0 : 0
-          const hoverRows = [...series]
-            .map((room) => ({ room, value: room.series[hoveredIndex]?.diamonds ?? 0 }))
-            .sort((a, b) => b.value - a.value)
-          return (
-            <div className="relative" style={{ width: size.width, height: svgHeight }}>
-              <svg
-                width={size.width}
-                height={svgHeight}
-                role="img"
-                onMouseMove={(event) => {
-                  const rect = event.currentTarget.getBoundingClientRect()
-                  const px = event.clientX - rect.left
-                  const py = event.clientY - rect.top
-                  const index = length <= 1 ? 0 : Math.round(((px - padLeft) / plotWidth) * (length - 1))
-                  if (index < 0 || index >= length) setHover(null)
-                  else setHover({ index, x: px, y: py })
-                }}
-                onMouseLeave={() => setHover(null)}
-              >
-                {[0, 0.5, 1].map((ratio) => {
-                  const gridY = padTop + plotHeight * ratio
-                  return (
-                    <g key={ratio}>
-                      <line x1={padLeft} x2={size.width - 8} y1={gridY} y2={gridY} stroke={palette.split} strokeWidth={1} />
-                      <text x={padLeft - 6} y={gridY + 3} textAnchor="end" fontSize={10} fill={palette.axis}>
-                        {formatNumber(Math.round(max * (1 - ratio)))}
-                      </text>
-                    </g>
-                  )
-                })}
-                {series.map((room) => {
-                  const color = colorOf.get(room.webRid) ?? palette.accent
-                  const points = room.series
-                    .map((point, index) => `${x(index)},${y(point.diamonds)}`)
-                    .join(' ')
-                  return (
-                    <polyline
-                      key={room.webRid}
-                      points={points}
-                      fill="none"
-                      stroke={color}
-                      strokeWidth={1.6}
-                      strokeLinejoin="round"
-                      strokeLinecap="round"
-                      opacity={hoveredIndex < 0 ? 0.9 : 0.75}
-                    />
-                  )
-                })}
-                {hover ? (
-                  <line
-                    x1={x(hover.index)}
-                    x2={x(hover.index)}
-                    y1={padTop}
-                    y2={padTop + plotHeight}
-                    stroke={palette.accent}
-                    strokeWidth={1}
-                    strokeDasharray="2 2"
-                    opacity={0.7}
-                  />
-                ) : null}
-                <text x={padLeft} y={svgHeight - 4} fontSize={10} fill={palette.axis}>
-                  {series[0]?.series[0]?.minute ? clock(series[0].series[0].minute) : '-'}
-                </text>
-                <text x={size.width - 8} y={svgHeight - 4} textAnchor="end" fontSize={10} fill={palette.axis}>
-                  {last ? clock(last) : '-'}
-                </text>
-              </svg>
-              {hover ? (
-                <div
-                  className="pointer-events-none absolute rounded-md px-2 py-1.5 text-[10px]"
-                  style={{
-                    left: Math.min(Math.max(4, hover.x + 12), Math.max(4, size.width - 164)),
-                    top: 4,
-                    width: 160,
-                    maxHeight: svgHeight - 8,
-                    overflow: 'hidden',
-                    backgroundColor: token.colorBgElevated,
-                    border: `1px solid ${palette.split}`,
-                    boxShadow: token.boxShadowSecondary,
-                    color: palette.text
-                  }}
-                >
-                  <div className="mb-1 font-medium">{clock(hoveredMinute)}</div>
-                  <div className="border-t pt-1" style={{ borderColor: palette.split }}>
-                    {hoverRows.map((row) => (
-                      <div key={row.room.webRid} className="flex items-baseline justify-between gap-2">
-                        <span className="flex min-w-0 items-center gap-1" style={{ color: palette.axis }}>
-                          <span
-                            className="inline-block shrink-0 rounded-sm"
-                            style={{ width: 6, height: 6, backgroundColor: colorOf.get(row.room.webRid) ?? palette.accent }}
-                          />
-                          <span className="min-w-0 truncate" title={roomLabel(row.room)}>
-                            {roomLabel(row.room)}
-                          </span>
-                        </span>
-                        <span className="shrink-0">{formatNumber(row.value)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          )
-        }}
-      </ChartBox>
-      <span className="shrink-0 text-[10px] opacity-50">{t('douyin-link.metrics.intradayHint', { count: LINE_MAX })}</span>
+      <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} />
+      <span className="shrink-0 text-[10px] opacity-50">
+        {t('douyin-link.page.metrics.intradayHint', { count: LINE_MAX })}
+      </span>
     </div>
   )
 }
@@ -540,7 +457,7 @@ function RevenueRank(props: {
               type="button"
               data-rb-row=""
               className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left text-[10px]"
-              title={t('douyin-link.metrics.rankHint')}
+              title={t('douyin-link.page.metrics.rankHint')}
               onClick={() => props.onSelect(room.webRid)}
             >
               <span className="min-w-0 flex-1 truncate" title={roomLabel(room)}>
@@ -567,42 +484,64 @@ function RevenueRank(props: {
   )
 }
 
-/** 按小时分布：把窗口内所有房间的抖币按本地小时（0~23）汇总成一根根竖条 */
+/** 按小时分布：把窗口内所有房间的抖币按本地小时（0~23）汇总成竖条，峰值高亮。**用 ECharts 画。** */
 function HourBars(props: {
   rooms: RoomSeriesRow[]
   peakHour: number
   t: Translate
   palette: PluginPalette
 }): React.JSX.Element {
-  const { palette } = props
-  const byHour = hourTotals(props.rooms)
-  const max = Math.max(1, ...byHour)
-  const peak = Math.max(1, ...byHour) > 0 ? props.peakHour : -1
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1">
-      <div className="flex min-h-0 flex-1 items-end gap-px">
-        {byHour.map((value, hour) => (
-          <span key={hour} className="flex min-h-0 flex-1 flex-col items-center justify-end" title={`${String(hour).padStart(2, '0')}:00 · ${formatNumber(value)}`}>
-            <span
-              className="w-full rounded-sm"
-              style={{
-                height: `${value > 0 ? Math.max(3, (value / max) * 100) : 1}%`,
-                backgroundColor: value <= 0 ? palette.track : hour === peak ? palette.warn : palette.accent,
-                opacity: value <= 0 ? 0.4 : 1
-              }}
-            />
-          </span>
-        ))}
-      </div>
-      <div className="flex shrink-0 justify-between text-[10px] opacity-50">
-        <span>00:00</span>
-        <span>06:00</span>
-        <span>12:00</span>
-        <span>18:00</span>
-        <span>23:00</span>
-      </div>
-    </div>
-  )
+  const { rooms, peakHour, palette } = props
+  const { token } = theme.useToken()
+  const byHour = hourTotals(rooms)
+  const peak = Math.max(1, ...byHour) > 0 ? peakHour : -1
+  const option: ChartOption = {
+    animation: false,
+    grid: { left: 4, right: 4, top: 8, bottom: 4, containLabel: true },
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: token.colorBgElevated,
+      borderColor: palette.split,
+      borderWidth: 1,
+      padding: [4, 8],
+      textStyle: { color: palette.text, fontSize: 10 },
+      extraCssText: `border-radius:8px;box-shadow:${token.boxShadowSecondary}`,
+      formatter: (params: unknown): string => {
+        const item = params as { name?: string; value?: number }
+        const hour = (item.name ?? '').padStart(2, '0')
+        return `${hour}:00 · ${formatNumber(item.value ?? 0)}`
+      }
+    },
+    xAxis: {
+      type: 'category',
+      data: byHour.map((_, hour) => String(hour)),
+      axisLine: { lineStyle: { color: palette.split } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: palette.axis,
+        fontSize: 10,
+        // 每 6 小时标一个 + 末位 23（与旧版 00/06/12/18/23 一致）
+        interval: (index: number): boolean => index % 6 === 0 || index === 23,
+        formatter: (value: string): string => `${value.padStart(2, '0')}:00`
+      }
+    },
+    yAxis: { type: 'value', show: false },
+    series: [
+      {
+        type: 'bar' as const,
+        barCategoryGap: '40%',
+        data: byHour.map((value, hour) => ({
+          value,
+          itemStyle: {
+            color: value <= 0 ? palette.track : hour === peak ? palette.warn : palette.accent,
+            opacity: value <= 0 ? 0.4 : 1,
+            borderRadius: [2, 2, 0, 0]
+          }
+        }))
+      }
+    ]
+  }
+  return <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} />
 }
 
 /** KPI 小方块（与全局分析同款：label 灰、数字加粗、可选强调色） */

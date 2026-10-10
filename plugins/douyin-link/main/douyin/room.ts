@@ -172,8 +172,8 @@ async function tryEnter(
     room: {
       webRid,
       roomId: String(room.id_str ?? roomId),
-      title: String(room.title ?? ''),
-      anchor: String(room.owner?.nickname ?? ''),
+      title: cleanName(room.title),
+      anchor: cleanName(room.owner?.nickname),
       onlineText: String(room.user_count_str ?? ''),
       status: mapStatus(room.status),
       cover: String(room.cover?.url_list?.[0] ?? ''),
@@ -203,6 +203,17 @@ function build(webRid: string, cookie: string, entered: EnterResult): RoomResolv
   }
 }
 
+/**
+ * 抖音给的「标题 / 昵称」偶尔是**没渲染出来的占位串**（如页面 HTML 里的 `"nickname":"$undefined"`，
+ * 或接口直接回 `"undefined"` / `"null"`）——这些不是真名字，统一当空处理，
+ * 免得界面把它当主播名显示成「$undefined」。
+ */
+const PLACEHOLDER_NAME = /^\$?(undefined|null|nan)$/i
+function cleanName(value: unknown): string {
+  const text = String(value ?? '').trim()
+  return PLACEHOLDER_NAME.test(text) ? '' : text
+}
+
 /** 页面 HTML 里嵌着的同一份数据（enter 接口不可用时的兜底） */
 function fromPageHtml(webRid: string, html: string): EnterResult | null {
   const unescaped = html.replace(/\\u0026/g, '&').replace(/\\\//g, '/').replace(/\\"/g, '"')
@@ -219,8 +230,8 @@ function fromPageHtml(webRid: string, html: string): EnterResult | null {
     room: {
       webRid,
       roomId: pickRoomId(html) ?? '',
-      title: title ?? '',
-      anchor: anchor ?? '',
+      title: cleanName(title),
+      anchor: cleanName(anchor),
       onlineText: online ?? '',
       status: Object.keys(flv).length > 0 ? 'live' : 'ended',
       cover: '',

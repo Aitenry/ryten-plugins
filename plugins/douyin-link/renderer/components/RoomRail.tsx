@@ -10,7 +10,7 @@ import {
 } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
-import { FitList, HOVER_BG, Panel, roomLabel, usePluginPalette } from './ui'
+import { FitList, HOVER_BG, Panel, cleanName, roomLabel, usePluginPalette } from './ui'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -157,10 +157,11 @@ function RoomRow(props: {
 }): React.JSX.Element {
   const { room, palette, t } = props
   const phase = phaseMeta(t, room, palette)
-  // 主标题 = **直播间名 · 房间号**（用户 2026-10-10：标题会撞车，只有房间号分得清是哪一个）
+  // 主标题 = **主播名 · 房间号**（用户 2026-10-10：抖音的 `title` 是引流口号，认不出房间；
+  // 认房间靠主播名，再加房间号兜底唯一性）
   const title = roomLabel(room)
-  // 次行 = 主播 / 备注 / 相位 / 速率 / 库里累计（房间号已经在主标题里，不再重复）
-  const meta = [room.anchor, room.note].filter(Boolean).join(' · ')
+  // 次行 = 直播标题 / 备注 / 相位 / 速率 / 库里累计（主播名与房间号已经在主标题里，不再重复）
+  const meta = [cleanName(room.title), cleanName(room.note)].filter(Boolean).join(' · ')
 
   return (
     <div

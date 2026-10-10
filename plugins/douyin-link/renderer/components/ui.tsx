@@ -286,14 +286,27 @@ export interface PillTabItem {
 const PILL_BASE_CLASS = 'rounded-full px-3 py-1 text-[13px] leading-5 whitespace-nowrap transition-colors'
 
 /**
- * 直播间展示名：**名字 + 房间号**（形如 `xxx · 123456789`）。
- *
- * 为什么强制带 id（用户 2026-10-10：「两个直播间标题一样，我怎么知道是哪一个」）：
- * 直播间标题可以随时被主播改、也常常撞车（多家主播起同一个标题），只有 `webRid` 是稳定的唯一标识。
- * 所有「选择 / 切换直播间」的地方（下拉、清单、表格行、图例）都用它，**不要再只写标题**。
+ * 抖音偶尔把「标题 / 昵称」当占位串回给我们（如 `$undefined` / `undefined` / `null`）——这些不是真名字。
+ * 统一当空处理，免得界面上显示成「$undefined」（用户 2026-10-10：刚开播时名字变成 undefined）。
  */
-export function roomLabel(room: { title: string; webRid: string }): string {
-  return room.title ? `${room.title} · ${room.webRid}` : room.webRid
+const PLACEHOLDER_NAME = /^\$?(undefined|null|nan)$/i
+export function cleanName(value: string | undefined | null): string {
+  const text = (value ?? '').trim()
+  return PLACEHOLDER_NAME.test(text) ? '' : text
+}
+
+/**
+ * 直播间展示名：**主播名 + 房间号**（形如 `少爷 · 123456789`）。
+ *
+ * 为什么用主播名而不是直播间标题（用户 2026-10-10）：
+ * 抖音接口给的 `title` 常是主播挂的**口号 / 引流文案**（如「10级以上进来喊少爷！」），
+ * 拿它当直播间名字根本认不出是哪个房间；真正认得出房间的是**主播昵称**（`anchor`）。
+ * 再用房间号（`webRid`）兜底唯一性——标题会被改、也常常撞车，只有它是稳定的唯一标识。
+ * 没有主播名时才退回标题（占位串一律当空）。所有「选择 / 切换直播间」的地方都用它。
+ */
+export function roomLabel(room: { title: string; anchor?: string; webRid: string }): string {
+  const name = cleanName(room.anchor) || cleanName(room.title)
+  return name ? `${name} · ${room.webRid}` : room.webRid
 }
 
 /**
