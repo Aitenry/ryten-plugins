@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, DatePicker, Modal, Segmented, Tag } from 'antd'
 import dayjs, { type Dayjs } from 'dayjs'
-import { RiDeleteBin6Line, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
+import { RiDeleteBin6Line, RiRadarLine, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
@@ -28,7 +28,9 @@ import {
   Panel,
   PillTabBar,
   PillTabsBody,
+  ScrollStyle,
   formModalProps,
+  splitModalProps,
   cleanName,
   roomLabel,
   usePluginPalette
@@ -646,6 +648,7 @@ export default function Page(): React.JSX.Element {
             onRange={changeRange}
             bounds={dayBounds}
             onOpenGifts={(target) => setOpenGifts(target)}
+            onOpenUser={setOpenUser}
           />
         </Pane>
       )
@@ -744,6 +747,7 @@ export default function Page(): React.JSX.Element {
             range={dashboardRange}
             onSelectRoom={openRoom}
             onOpenGifts={(target) => setOpenGifts(target)}
+            onOpenUser={setOpenUser}
           />
         </Pane>
       )
@@ -883,7 +887,9 @@ export default function Page(): React.JSX.Element {
       {/* 模式切换动画的关键帧（见 MODE_SWITCH_CSS） */}
       <style>{MODE_SWITCH_CSS}</style>
 
-      {openUser && activeRoom ? (
+      {/* 用户档案：礼物榜点名字、在线观众点一行、弹幕点昵称都走这里。
+          大屏模式下可能没有「当前房间」（`activeRoom` 为空串），此时档案按跨房间查（mapper 支持空 webRid）。 */}
+      {openUser ? (
         <UserProfileModal
           webRid={activeRoom}
           userId={openUser}
@@ -971,6 +977,9 @@ function RoomHeader(props: { room: RoomRuntime | null; t: Translate }): React.JS
  *
  * 历史弹幕（`UserHistory`）摆在档案分支**外面**：用户记录被「清空用户记录」清掉之后，
  * 档案查不到了，但消息流水还在——那种时候照样能翻出他说过什么，比一个「没有档案」的空框有用。
+ *
+ * 版式（用户 2026-10-10）：**没有页脚**（「关闭」与右上角 × 重复）+ 点「分析」后**右栏出画像**，
+ * 两栏等高、各自滚（细滚动条）。见下方 `splitModalProps` 那段注释。
  */
 function UserProfileModal(props: {
   webRid: string
@@ -986,11 +995,13 @@ function UserProfileModal(props: {
   /** 「查看神秘人信息」的结果（null = 还没查过；点了按钮才查） */
   const [reveal, setReveal] = useState<MysteryReveal | null>(null)
   const [revealing, setRevealing] = useState(false)
-  /** 「分析用户」的画像结果（null = 还没点过；按钮在弹窗页脚） */
+  /** 「分析用户」的画像结果（null = 还没点过；按钮在名字行、荣誉等级旁边） */
   const [analysis, setAnalysis] = useState<UserAnalysis | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   /** 分析失败（主进程没回话）：只给一句提示，不留半截结果 */
   const [analyzeError, setAnalyzeError] = useState(false)
+  /** 点过「分析」之后弹窗右侧多一栏画像，弹窗跟着变宽（没点就保持原来的窄弹窗） */
+  const splitOpen = Boolean(analysis || analyzeError)
 
   /**
    * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
@@ -1032,40 +1043,43 @@ function UserProfileModal(props: {
   }, [props.userId])
 
   /**
-   * 「分析用户」：把库里的数据交给主进程的**确定性规则算法**（RFM + Bartle 原型 + 词典法情感）
+   * 「分析用户」：把库里的数据交给主进程的**确定性规则算法**（RFM + Bartle 原型 + 情感词典 + …）
    * 生成画像——不依赖大模型、不需要人工处理，同一份数据结论一致（见 `main/analysis/portrait.ts`）。
+   *
+   * **跨全部直播间**（只传 userId，见用户 2026-10-10 的要求）：得到的是「这个人在这个平台的画像」，
+   * 所以换个房间看同一个人，画像不会变。
    */
   const doAnalyze = useCallback((): void => {
     setAnalyzing(true)
     setAnalyzeError(false)
     void api
-      .userAnalysis(props.webRid, props.userId)
+      .userAnalysis(props.userId)
       .then((result) => {
         if (result) setAnalysis(result)
         else setAnalyzeError(true)
       })
       .catch(() => setAnalyzeError(true))
       .finally(() => setAnalyzing(false))
-  }, [props.webRid, props.userId])
+  }, [props.userId])
 
+  /**
+   * 两栏版式：左栏是档案与历史，右栏是点了「分析」才出现的画像。
+   * 两个决定（用户 2026-10-10）：
+   * 1. **页脚不再放按钮**——原来的「关闭」与右上角的 × 重复，去掉后正文还能多出一行高度；
+   * 2. 点过分析后弹窗**变宽**（右栏 336px 需要地方），两栏由 `splitModalProps` 保证等高、各自滚。
+   */
   return (
     <Modal
-      {...formModalProps}
+      {...splitModalProps}
       open={Boolean(props.userId)}
       title={t('douyin-link.users.detailTitle')}
       onCancel={props.onClose}
-      footer={
-        <div className="flex items-center justify-between">
-          {/* 「分析用户」：按库里的数据用规则算法出画像（不依赖大模型），结果贴在档案下面 */}
-          <Button type="primary" loading={analyzing} onClick={doAnalyze}>
-            {analyzing ? t('douyin-link.users.analyzeLoading') : t('douyin-link.users.analyzeButton')}
-          </Button>
-          <Button onClick={props.onClose}>{t('douyin-link.users.close')}</Button>
-        </div>
-      }
+      footer={null}
+      width={splitOpen ? 892 : undefined}
     >
-      {/* 外层的列容器是必需的：档案分支用 fragment，块与块之间的 gap 靠它（fragment 不生成节点） */}
-      <div className="flex flex-col gap-3">
+      <ScrollStyle />
+      {/* 左栏：档案 + 互动统计 + 神秘人还原 + 历史弹幕。自己滚，跟右栏同高（超出才出滚动条） */}
+      <div data-rb-scroll="" className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
         {!profile ? (
           <span className="text-xs opacity-60">
             {loading ? t('douyin-link.users.loading') : t('douyin-link.users.missing')}
@@ -1075,7 +1089,8 @@ function UserProfileModal(props: {
             <div className="flex items-center gap-3">
               <UserAvatar webRid={props.webRid} userId={profile.id} nickname={profile.nickname} size={48} />
               <div className="flex min-w-0 flex-1 flex-col gap-1">
-                {/* 荣誉等级 / 粉丝团跟在名字这一行的**最右端**（原来单独占一行，把名字行也拉长了） */}
+                {/* 荣誉等级 / 粉丝团 / 「分析用户」都跟在名字这一行的**最右端**
+                    （原来荣誉等级单独占一行，把名字行也拉长了；分析按钮原在页脚，现在收进图标） */}
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="min-w-0 truncate text-sm font-semibold">
                     {profile.nickname || t('douyin-link.page.unknownUser')}
@@ -1091,6 +1106,17 @@ function UserProfileModal(props: {
                         {t('douyin-link.users.fansClub')} {profile.fansClubLevel}
                       </Tag>
                     ) : null}
+                    {/* 只用图标：文案进 title / aria-label，鼠标悬停可见、读屏可读；
+                        分析中 antd 会把图标换成转圈，不需要再来一套「分析中…」文案 */}
+                    <Button
+                      size="small"
+                      type="text"
+                      loading={analyzing}
+                      title={t('douyin-link.users.analyzeButton')}
+                      aria-label={t('douyin-link.users.analyzeButton')}
+                      icon={<RiRadarLine size={15} />}
+                      onClick={doAnalyze}
+                    />
                   </span>
                 </div>
                 <span className="flex flex-wrap items-center gap-1 text-xs opacity-70">
@@ -1154,15 +1180,6 @@ function UserProfileModal(props: {
           </>
         )}
 
-        {/* 「分析用户」的结果：同样**不挂在档案分支里** —— 画像用的是消息流水里的互动数据，
-            就算档案被清空也能成画（跟历史弹幕一个道理）。 */}
-        {analyzeError ? (
-          <span className="text-xs" style={{ color: palette.down }}>
-            {t('douyin-link.users.analyzeFailed')}
-          </span>
-        ) : null}
-        {analysis ? <UserAnalysisPanel analysis={analysis} palette={palette} t={t} /> : null}
-
         {/* 神秘人还原：**不挂在档案分支里** —— 纯匿名的送礼人往往连档案都没有，只剩一个 id，
             这种时候也要能查看（用户 2026-10-09：「如果是神秘人，增加一个按钮可以查看其信息」） */}
         {revealable ? (
@@ -1198,6 +1215,19 @@ function UserProfileModal(props: {
         {/* 这个人说过什么：**不挂在档案分支里** —— 用户记录被清掉后档案查不到，但消息流水还在 */}
         <UserHistory webRid={props.webRid} userId={props.userId} rooms={props.rooms} />
       </div>
+
+      {/* 右栏：用户画像。**不挂在档案分支里** —— 画像用的是消息流水里的互动数据，
+          就算档案被清空也能成画（跟历史弹幕一个道理）；没点过「分析」就不占位、也不撑宽弹窗 */}
+      {splitOpen ? (
+        <div data-rb-scroll="" className="flex w-[336px] shrink-0 flex-col gap-2 overflow-y-auto pr-1">
+          {analyzeError ? (
+            <span className="text-xs" style={{ color: palette.down }}>
+              {t('douyin-link.users.analyzeFailed')}
+            </span>
+          ) : null}
+          {analysis ? <UserAnalysisPanel analysis={analysis} palette={palette} t={t} /> : null}
+        </div>
+      ) : null}
     </Modal>
   )
 }
@@ -1466,8 +1496,8 @@ function RelationshipGraph(props: {
 }
 
 /**
- * 「分析用户」画像面板：主画像 + 大五人格 + 六维特征 + 弹幕分析 + 送礼习惯 + 人物关系网 +
- * 动机结构 + 标签 + 结论 + 量化事实 + 方法依据。
+ * 「分析用户」画像面板：主画像 + **互动结构**（五类互动全量）+ 大五人格 + 六维特征 +
+ * 弹幕分析 + 送礼习惯 + 人物关系网 + 动机结构 + 标签 + 结论 + 量化事实 + 方法依据。
  *
  * 全部文案本地化：主进程只给机器键与数值参数（见 `shared/types.ts` 的 `UserAnalysis`），
  * 这里用 `cap` 把机器键拼成 `analysisBig5*` / `analysisTrait*` / `analysisChatTopic*` /
@@ -1491,6 +1521,8 @@ function UserAnalysisPanel(props: {
     <div className="flex flex-col gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">{t('douyin-link.users.analyzeTitle')}</span>
+        {/* 画像跨全部直播间，跟上面「本房间累计」的档案不是一个口径，写明白免得对不上号 */}
+        <span className="shrink-0 text-[10px] opacity-50">{t('douyin-link.users.analyzeScopeHint')}</span>
         <span className="ml-auto shrink-0 text-sm font-semibold" style={{ color: palette.accent }}>
           {t(`douyin-link.users.analysisArchetype${cap(analysis.archetype)}`)}
         </span>
@@ -1501,6 +1533,64 @@ function UserAnalysisPanel(props: {
       <span className="text-[11px] leading-4 opacity-70">
         {t(`douyin-link.users.analysisArchetype${cap(analysis.archetype)}Desc`)}
       </span>
+
+      {/* 互动结构：五类互动全量摊开（弹幕 / 进场 / 点赞 / 关注 / 礼物）+ 场次 / 停留 / 关注转化。
+          只看弹幕会漏掉「只看不说」「疯狂点赞」「反复打卡」这几类最典型的观众 */}
+      <div className="flex flex-col gap-1">
+        <SectionTitle label={t('douyin-link.users.analyzeBehaviorTitle')} />
+        <div className="flex flex-col gap-1">
+          {/* 只画真正发生过的互动类型：全是 0% 的空条只是噪声（占比会四舍五入，所以按 score 过滤） */}
+          {analysis.behavior.kinds
+            .filter((item) => item.score > 0)
+            .map((item) => (
+              <TraitBar
+                key={item.key}
+                label={t(`douyin-link.kinds.${item.key}`)}
+                score={item.score}
+                palette={palette}
+                suffix="%"
+              />
+            ))}
+        </div>
+        <div className="grid grid-cols-3 gap-1.5">
+          <StatBlock
+            label={t('douyin-link.users.analyzeBehaviorSessions')}
+            value={`${formatNumber(analysis.behavior.sessions)} ${t('douyin-link.users.analyzeUnitSession')}`}
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeBehaviorStay')}
+            value={
+              analysis.behavior.avgStayMinutes > 0
+                ? `${analysis.behavior.avgStayMinutes} ${t('douyin-link.users.analyzeUnitMinute')}`
+                : '-'
+            }
+            hint={
+              analysis.behavior.maxStayMinutes > 0
+                ? `${t('douyin-link.users.analyzeBehaviorMaxStay')} ${analysis.behavior.maxStayMinutes}${t('douyin-link.users.analyzeUnitMinute')}`
+                : undefined
+            }
+            palette={palette}
+          />
+          <StatBlock
+            label={t('douyin-link.users.analyzeBehaviorPerSession')}
+            value={String(analysis.behavior.perSession)}
+            palette={palette}
+          />
+        </div>
+        <FactLine
+          items={[
+            analysis.behavior.topKind
+              ? `${t('douyin-link.users.analyzeBehaviorTop')} ${t(`douyin-link.kinds.${analysis.behavior.topKind}`)}`
+              : '',
+            `${t('douyin-link.users.analyzeBehaviorFollow')} ${
+              analysis.behavior.followDays < 0
+                ? t('douyin-link.users.analyzeBehaviorFollowNone')
+                : t('douyin-link.users.analyzeBehaviorFollowDays', { n: analysis.behavior.followDays })
+            }`
+          ].filter((item) => item.length > 0)}
+        />
+      </div>
 
       {/* 大五人格（Big Five / OCEAN）：从行为数据做侧写，不是心理测量量表 */}
       <div className="flex flex-col gap-1">
@@ -1555,6 +1645,22 @@ function UserAnalysisPanel(props: {
                 palette={palette}
               />
             </div>
+            {/* 7 大类情感构成（大连理工《情感词汇本体》的分类体系）：比分正负轴更细，
+                能看出「他的情绪是乐/好，还是哀/怒」 */}
+            {analysis.chat.emotions.some((item) => item.score > 0) ? (
+              <div className="flex flex-col gap-1">
+                <SectionTitle label={t('douyin-link.users.analyzeChatEmotionsTitle')} />
+                {analysis.chat.emotions.map((item) => (
+                  <TraitBar
+                    key={item.key}
+                    label={t(`douyin-link.users.analysisEmotion${cap(item.key)}`)}
+                    score={item.score}
+                    palette={palette}
+                    suffix="%"
+                  />
+                ))}
+              </div>
+            ) : null}
             {analysis.chat.topics.length > 0 ? (
               <div className="flex flex-col gap-1">
                 <SectionTitle label={t('douyin-link.users.analyzeChatTopicsTitle')} />

@@ -1057,33 +1057,83 @@ function emptyAnalysisData(): UserAnalysisData {
     giftFirstAt: 0,
     giftLastAt: 0,
     outEdges: [],
-    inEdges: []
+    inEdges: [],
+    sessions: 0,
+    sessionSpans: [],
+    firstFollowAt: 0
   }
 }
 
 /**
  * 「分析用户」的聚合数据（喂给 `main/analysis/portrait.ts` 做确定性打分，**不经过大模型**）。
  *
- * 口径：
- * - **用户档案表是权威**（跨会话累计，与榜单/档案页显示的数字一致）；
+ * 口径（用户 2026-10-10：「只需要跨房间进行构建画像，即这个人在这个平台的画像」）：
+ * - **跨全部直播间**：只按 `user_id` 筛，**不带 webRid**——画像回答的是「这个人在这个平台什么样」，
+ *   而不是「他在某一个房间什么样」。所以所有查询都不再钉房间；
+ * - **用户档案表是权威**，但档案是**按房间**存的（同一个人每个房间一行），跨房间要把它**并起来**：
+ *   互动数各自累加、首末时间取最早/最晚、等级取最高（等级本身是平台级的，各房一般一致）；
  * - 档案缺失时（例如只剩消息流水的历史数据）退回**消息流水**现场聚合：
  *   非礼物按 `count(*)`、礼物按 `sum(count)`、抖币按 `sum(diamonds)`（对齐 recorder 的口径）；
  * - 分天/分时按**本地时区**，偏移拼字面量（同 `dayRecords`：绑定参数会让 GROUP BY 认不出同一表达式）。
  */
-export async function userAnalysisData(webRid: string, userId: string): Promise<UserAnalysisData> {
-  if (!webRid || !userId) return emptyAnalysisData()
+export async function userAnalysisData(userId: string): Promise<UserAnalysisData> {
+  if (!userId) return emptyAnalysisData()
   await schemaReady
   const offsetMs = -new Date().getTimezoneOffset() * 60000
   return withOrm('douyin-link.userAnalysisData', async (db) => {
     const offset = sql.raw(String(Math.trunc(offsetMs)))
-    const scope = and(eq(douyinLinkMessages.webRid, webRid), eq(douyinLinkMessages.userId, userId))
+    /** 跨全部直播间的范围条件：只要「这个人发的」 */
+    const scope = eq(douyinLinkMessages.userId, userId)
 
+    // 档案表按房间存，这里把同一个人的所有房间档案并成一份
     const profileRows = await db
       .select()
       .from(douyinLinkUsers)
-      .where(and(eq(douyinLinkUsers.webRid, webRid), eq(douyinLinkUsers.userId, userId)))
-      .limit(1)
-    const profile = profileRows[0]
+      .where(eq(douyinLinkUsers.userId, userId))
+    /** 两个都是正数才取小，否则取那个非零的（0 = 没记录，不该参与比较） */
+    const minPositive = (a: number, b: number): number => (a > 0 && b > 0 ? Math.min(a, b) : Math.max(a, b))
+    /** 跨房间合并后的档案口径（只保留画像要用到的字段） */
+    interface ProfileTotals {
+      chat: number
+      enter: number
+      likes: number
+      follows: number
+      gift: number
+      diamonds: number
+      firstSeen: number
+      lastSeen: number
+      honorLevel: number
+      fansClubLevel: number
+    }
+    const profile =
+      profileRows.length === 0
+        ? undefined
+        : profileRows.reduce<ProfileTotals>(
+            (acc, row) => ({
+              chat: acc.chat + row.chat,
+              enter: acc.enter + row.enter,
+              likes: acc.likes + row.likes,
+              follows: acc.follows + row.follows,
+              gift: acc.gift + row.gift,
+              diamonds: acc.diamonds + row.diamonds,
+              firstSeen: minPositive(acc.firstSeen, row.firstSeen),
+              lastSeen: Math.max(acc.lastSeen, row.lastSeen),
+              honorLevel: Math.max(acc.honorLevel, row.honorLevel),
+              fansClubLevel: Math.max(acc.fansClubLevel, row.fansClubLevel)
+            }),
+            {
+              chat: 0,
+              enter: 0,
+              likes: 0,
+              follows: 0,
+              gift: 0,
+              diamonds: 0,
+              firstSeen: 0,
+              lastSeen: 0,
+              honorLevel: 0,
+              fansClubLevel: 0
+            }
+          )
 
     // 各类型的条数（礼物另给 sum(count) 作为件数）
     const kindRows = await db
@@ -1159,7 +1209,8 @@ export async function userAnalysisData(webRid: string, userId: string): Promise<
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(40)
 
-    // 送礼给本人的人（对方 → 本人）：注意这里按「收礼人 = 本人」筛，不能复用 scope（它钉的是发送者）
+    // 送礼给本人的人（对方 → 本人）：注意这里按「收礼人 = 本人」筛，
+    // 用的是跨房间条件（不带 webRid，也就不能复用上面那个 scope——它钉的是发送者）
     const inEdgeRows = await db
       .select({
         userId: douyinLinkMessages.userId,
@@ -1179,7 +1230,6 @@ export async function userAnalysisData(webRid: string, userId: string): Promise<
       )
       .where(
         and(
-          eq(douyinLinkMessages.webRid, webRid),
           eq(douyinLinkMessages.toUserId, userId),
           eq(douyinLinkMessages.kind, 'gift'),
           ne(douyinLinkMessages.userId, '')
@@ -1188,6 +1238,22 @@ export async function userAnalysisData(webRid: string, userId: string): Promise<
       .groupBy(douyinLinkMessages.userId)
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(40)
+
+    // 「互动结构」用：到访场次与每场停留（`session_id = 0` 表示没有会话信息，不计）
+    const sessionRows = await db
+      .select({
+        sessionId: douyinLinkMessages.sessionId,
+        span: sql<number>`(coalesce(max(${douyinLinkMessages.atMs}), 0) - coalesce(min(${douyinLinkMessages.atMs}), 0))::double precision`
+      })
+      .from(douyinLinkMessages)
+      .where(and(scope, ne(douyinLinkMessages.sessionId, 0)))
+      .groupBy(douyinLinkMessages.sessionId)
+
+    // 首次关注的时间（0 = 从没关注过）：用来看「多久转化成关注」
+    const followRows = await db
+      .select({ firstAt: sql<number>`coalesce(min(${douyinLinkMessages.atMs}), 0)::double precision` })
+      .from(douyinLinkMessages)
+      .where(and(scope, eq(douyinLinkMessages.kind, 'social')))
 
     const giftRows = await db
       .select({
@@ -1210,7 +1276,7 @@ export async function userAnalysisData(webRid: string, userId: string): Promise<
       .from(douyinLinkMessages)
       .where(and(scope, eq(douyinLinkMessages.kind, 'chat')))
       .orderBy(desc(douyinLinkMessages.atMs))
-      .limit(600)
+      .limit(2000)
 
     const byKind = new Map(kindRows.map((row) => [row.kind, row]))
     const countOf = (kind: string): number => byKind.get(kind)?.hits ?? 0
@@ -1271,7 +1337,10 @@ export async function userAnalysisData(webRid: string, userId: string): Promise<
         items: row.items,
         hits: row.hits,
         lastAt: row.lastAt
-      }))
+      })),
+      sessions: sessionRows.length,
+      sessionSpans: sessionRows.map((row) => Math.max(0, row.span)),
+      firstFollowAt: followRows[0]?.firstAt ?? 0
     }
   })
 }

@@ -16,10 +16,10 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
  * 与「全局分析」相对：那一页把所有房间**合**成一份报告（跨房合计 + 两张跨房榜单）；
  * 这一页反过来，把每个房间**拆开并排**，看「谁的抖币收入涨得最快 / 钱是怎么来的」这类
  * **结构性问题**——对齐用户给的 echarts 官方示例观感：
- * - **动态排序柱状图**（bar race，对照 `bar-race-country`）：时间推着走，房间按累计抖币收入
- *   赛跑、名次实时换位，右下角有一枚大号时间水印；
+ * - **直播间动态收入排序**（原 bar race）：房间按窗口内的累计抖币收入排序，**只显示最新一帧**、
+ *   不循环播放；新数据进来时柱子自己滑到新名次（换位有过渡动画），右下角一枚时间水印；
  * - **日内走势图**（对照 `intraday-breaks-1`）：每个房间一条曲线、面积填充，带竖向网格线与底部滑块；
- * - **收入排行 / 礼物均价对比**：横截面与「靠大礼 vs 靠走量」的结构。
+ * - **收入排行**：横截面，谁挣得多、占比多少（点一行切到那个直播间）。
  *
  * 数据全部来自主进程（`all-analysis` 通道 + `all` 事件推送，与全局分析同一份快照，
  * 只是多带了 `roomSeries`——每房一条分钟序列），页面只负责画。
@@ -157,9 +157,6 @@ export function MetricsPanel(props: {
             <RevenueRank rooms={rooms} total={totalDiamonds} colorOf={colorOf} t={t} palette={palette} onSelect={props.onSelectRoom} />
           )}
         </Panel>
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.giftPriceTitle')}>
-          {empty ? <EmptyHint text={emptyText} /> : <GiftPrice rooms={rooms} colorOf={colorOf} t={t} palette={palette} />}
-        </Panel>
       </div>
     </div>
   )
@@ -172,14 +169,10 @@ const RELOAD_MS = 30000
 
 /** 动态排序柱状图一次展示多少个房间（名次再往后就挤成一条线了） */
 const RACE_TOP = 8
-/** 柱状图每前进一帧的时间（ms）——太快看不清换位，太慢又等得慌 */
-const RACE_TICK_MS = 240
-/** 一整轮播放的目标时长（ms）：窗口越长每帧跳得越多，免得一轮要等好几分钟 */
-const RACE_LOOP_MS = 60000
+/** 名次换位时的过渡时长（ms）：太快看不清换位，太慢又显得卡 */
+const RACE_ANIM_MS = 400
 /** 日内走势图最多画几条线（再多就是一团毛线，剩下的在右侧排行里看） */
 const LINE_MAX = 8
-/** 礼物均价对比最多展示几个房间（同上：只挑流水头部） */
-const GIFT_PRICE_TOP = 8
 
 /** 房间配色（横向对比图共用）：挑的是亮暗主题下都成立的中间调色 */
 const SERIES_COLORS = [
@@ -206,12 +199,12 @@ function countGifts(series: RoomSeriesRow['series']): number {
 }
 
 /**
- * 动态排序柱状图（bar race）：时间往前推，房间按**累计抖币收入**赛跑。**用 ECharts 画。**
+ * 直播间收入排序（原「动态排序柱状图」）：房间按**窗口内的累计抖币收入**横向排序。**用 ECharts 画。**
  *
- * 实现要点：对照 echarts 的 `bar-race-country`——**自动循环播放、不留手动控件**。
- * 内部用 `cursor` 游标按 `RACE_TICK_MS` 逐帧推进（窗口长时每帧多推几格，一轮约 `RACE_LOOP_MS`），
- * 到末尾回到起点重来；每个 tick 只把当前这一帧的数据交给 ECharts，换位动画由 `realtimeSort` +
- * `animationDurationUpdate` 表达。
+ * 为什么不保留播放（用户 2026-10-10）：「不要循环播放，我只要最新的内容」——
+ * 所以这里**只画最后一格**（窗口里最新的那一分钟），不再有游标、不再回到起点重播。
+ * 但保留 `realtimeSort` + `animationDurationUpdate`：新数据一到，柱子会**自己滑到新名次**，
+ * 「动态」体现在换位的过渡上，而不是把历史重放一遍。
  * 房间集合固定为「窗口总抖币前 `RACE_TOP` 名」，不随中间过程增减（否则行列会跳）。
  */
 function BarRace(props: {
@@ -238,31 +231,12 @@ function BarRace(props: {
     [racers, length]
   )
 
-  const [cursor, setCursor] = useState(0)
-  /** 每帧推进几格：窗口越长跳得越多，让一整轮大致落在 `RACE_LOOP_MS` 左右 */
-  const step = useMemo(
-    () => Math.max(1, Math.round(length / (RACE_LOOP_MS / RACE_TICK_MS))),
-    [length]
-  )
-  // 长度变了（换区间 / 新的一分钟进来）就把游标夹回有效范围，别停在越界位置
-  useEffect(() => {
-    setCursor((current) => Math.min(current, Math.max(0, length - 1)))
-  }, [length])
-
-  // 自动循环播放（对照 bar-race-country：官方示例没有手动控件，进页面就跑）：
-  // 每 RACE_TICK_MS 推进 step 格，到末尾回到起点重来
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setCursor((current) => (current + step >= length - 1 ? 0 : current + step))
-    }, RACE_TICK_MS)
-    return () => window.clearInterval(timer)
-  }, [step, length])
-
-  const at = Math.min(cursor, length - 1)
+  /** 只画最后一格：窗口里最新的那一分钟 */
+  const at = Math.max(0, length - 1)
   /** 当前这一格的时刻标签（用第一条序列的分钟起点；各房分桶口径一致） */
   const atLabel = racers[0]?.series[at]?.minute ?? 0
 
-  /** 当前帧：房间按累计值降序（并列时按固定房间顺序，避免同分时来回抖） */
+  /** 这一帧：房间按累计值降序（并列时按固定房间顺序，避免同分时来回抖） */
   const option: ChartOption = useMemo(() => {
     const ordered = racers
       .map((room, index) => ({ room, value: cumulative[index][at] ?? 0 }))
@@ -280,7 +254,7 @@ function BarRace(props: {
         axisTick: { show: false },
         axisLabel: { color: palette.axis, fontSize: 10, width: 96, overflow: 'truncate' },
         animationDuration: 300,
-        animationDurationUpdate: RACE_TICK_MS
+        animationDurationUpdate: RACE_ANIM_MS
       },
       series: [
         {
@@ -352,6 +326,28 @@ function IntradayChart(props: {
   const labels = series[0]?.series.map((point) => clock(point.minute)) ?? []
   /** 竖向网格线 / 标签的稀疏步长（约 8 格；分钟级数据逐格画会糊成一片） */
   const step = Math.max(1, Math.round(labels.length / 8))
+
+  /**
+   * 记住用户拖出来的区间（百分比）。
+   *
+   * 有这个 ref 是因为：每分钟都有一格新数据进来 → `option` 整个重建 → 走 EChart 的
+   * `setOption(option, { notMerge: true })` 整体替换，dataZoom 会被**重置回全选**，
+   * 于是用户刚拖好的可见范围时不时被弹回去（用户 2026-10-10 反馈的正是这个）。
+   * 现在把 `datazoom` 事件的 start/end 存下来，重建 option 时原样写回去，范围就不再丢。
+   */
+  const zoomRef = useRef<{ start: number; end: number } | null>(null)
+  const zoom = zoomRef.current ?? undefined
+  const events = useMemo(
+    () => ({
+      datazoom: (params: unknown): void => {
+        const raw = params as { start?: number; end?: number }
+        if (typeof raw.start === 'number' && typeof raw.end === 'number') {
+          zoomRef.current = { start: raw.start, end: raw.end }
+        }
+      }
+    }),
+    []
+  )
   const option: ChartOption = {
     animation: false,
     grid: { left: 46, right: 10, top: 8, bottom: 42 },
@@ -391,13 +387,15 @@ function IntradayChart(props: {
         return `${head}<div style="border-top:1px solid ${palette.split};padding-top:4px">${body}</div>`
       }
     },
-    // 底部滑块（对照 intraday-breaks-1）：滚轮 / 拖动看局部时段
+    // 底部滑块（对照 intraday-breaks-1）：滚轮 / 拖动看局部时段。
+    // `...zoom`：把用户拖过的区间带回去，否则每次重建 option 都会被重置（见上面的 zoomRef）
     dataZoom: [
-      { type: 'inside', throttle: 60 },
+      { type: 'inside', throttle: 60, ...zoom },
       {
         type: 'slider',
         height: 16,
         bottom: 2,
+        ...zoom,
         borderColor: palette.split,
         backgroundColor: 'transparent',
         fillerColor: palette.soft,
@@ -459,7 +457,7 @@ function IntradayChart(props: {
   }
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} />
+      <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} onEvents={events} />
       <span className="shrink-0 text-[10px] opacity-50">
         {t('douyin-link.page.metrics.intradayHint', { count: LINE_MAX })}
       </span>
@@ -514,94 +512,6 @@ function RevenueRank(props: {
           )
         })}
       </div>
-    </div>
-  )
-}
-
-/**
- * 礼物均价对比：每个直播间「**平均每件礼物值多少抖币**」（= 抖币合计 ÷ 礼物件数），横条按均价降序。
- *
- * 与上面的「抖币收入排行」互补——排行回答「谁挣得多」，这张图回答「钱是怎么来的」：
- * 均价高 = 靠少数大礼（大哥型），均价低 = 靠走量（薄利多销）。**用 ECharts 画。**
- */
-function GiftPrice(props: {
-  rooms: RoomSeriesRow[]
-  colorOf: Map<string, string>
-  t: Translate
-  palette: PluginPalette
-}): React.JSX.Element {
-  const { rooms, colorOf, palette, t } = props
-  const { token } = theme.useToken()
-  const rows = useMemo(
-    () =>
-      rooms
-        .slice(0, GIFT_PRICE_TOP)
-        .map((room) => {
-          const diamonds = sumSeries(room.series)
-          const gifts = countGifts(room.series)
-          return { room, diamonds, gifts, avg: gifts > 0 ? Math.round(diamonds / gifts) : 0 }
-        })
-        .sort((a, b) => b.avg - a.avg),
-    [rooms]
-  )
-  const option: ChartOption = {
-    animation: false,
-    grid: { left: 4, right: 44, top: 4, bottom: 4, containLabel: true },
-    tooltip: {
-      trigger: 'item',
-      backgroundColor: token.colorBgElevated,
-      borderColor: palette.split,
-      borderWidth: 1,
-      padding: [6, 8],
-      textStyle: { color: palette.text, fontSize: 10 },
-      extraCssText: `border-radius:8px;box-shadow:${token.boxShadowSecondary}`,
-      formatter: (params: unknown): string => {
-        const index = (params as { dataIndex?: number }).dataIndex ?? -1
-        const row = rows[index]
-        if (!row) return ''
-        const line = (label: string, value: string): string =>
-          `<div style="display:flex;justify-content:space-between;gap:12px"><span>${label}</span><span style="flex-shrink:0">${value}</span></div>`
-        return (
-          `<div style="font-weight:500;margin-bottom:4px">${roomLabel(row.room)}</div>` +
-          line(t('douyin-link.page.metrics.giftPriceAvg'), formatNumber(row.avg)) +
-          line(t('douyin-link.page.metrics.giftPriceCount'), formatNumber(row.gifts))
-        )
-      }
-    },
-    xAxis: { type: 'value', show: false },
-    yAxis: {
-      type: 'category',
-      inverse: true,
-      data: rows.map((row) => roomLabel(row.room)),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: palette.axis, fontSize: 10, width: 72, overflow: 'truncate' }
-    },
-    series: [
-      {
-        type: 'bar' as const,
-        barWidth: 10,
-        data: rows.map((row) => ({
-          value: row.avg,
-          itemStyle: {
-            color: colorOf.get(row.room.webRid) ?? palette.accent,
-            borderRadius: [0, 3, 3, 0]
-          }
-        })),
-        label: {
-          show: true,
-          position: 'right',
-          color: palette.text,
-          fontSize: 10,
-          formatter: (params: unknown): string => formatNumber((params as { value?: number }).value ?? 0)
-        }
-      }
-    ]
-  }
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1">
-      <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} />
-      <span className="shrink-0 text-[10px] opacity-50">{t('douyin-link.page.metrics.giftPriceHint')}</span>
     </div>
   )
 }

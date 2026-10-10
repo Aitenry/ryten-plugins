@@ -35,6 +35,8 @@ export function AllRoomsPanel(props: {
   onSelectRoom: (webRid: string) => void
   /** 点礼物榜的一行 → 打开这个人的跨房礼物历史 */
   onOpenGifts: (target: { userId: string; name: string; direction: 'sent' | 'received' }) => void
+  /** 点礼物榜里的**名字** → 打开这个人的用户档案（跨房间的档案） */
+  onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
@@ -144,6 +146,7 @@ export function AllRoomsPanel(props: {
             t={t}
             palette={palette}
             onOpen={props.onOpenGifts}
+            onOpenUser={props.onOpenUser}
           />
         </Panel>
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.allGiftSentBoard')}>
@@ -153,6 +156,7 @@ export function AllRoomsPanel(props: {
             t={t}
             palette={palette}
             onOpen={props.onOpenGifts}
+            onOpenUser={props.onOpenUser}
           />
         </Panel>
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.allGiftTypesBoard')}>

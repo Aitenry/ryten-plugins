@@ -1,5 +1,6 @@
 import type {
   UserAnalysis,
+  UserAnalysisBehavior,
   UserAnalysisChat,
   UserAnalysisFacts,
   UserAnalysisGifting,
@@ -9,6 +10,7 @@ import type {
   UserAnalysisScore
 } from '../../shared/types'
 import { analyzeChat, type ChatTextSignals } from './text'
+import type { EmotionKey } from './lexicon'
 
 /**
  * 用户画像的**纯算法**模块（无 DB / 无 electron 依赖，方便单测与复用）。
@@ -49,7 +51,7 @@ export interface UserAnalysisEdge {
   lastAt: number
 }
 
-/** 打分所需的**输入契约**（由 mapper 聚合产出；定义在此，mapper 反向 import，避免循环依赖） */
+/** 打分所需的**输入契约**（由 mapper 跨**全部直播间**聚合产出；定义在此，mapper 反向 import，避免循环依赖） */
 export interface UserAnalysisData {
   /** 弹幕条数 */
   chat: number
@@ -101,6 +103,12 @@ export interface UserAnalysisData {
   outEdges: UserAnalysisEdge[]
   /** 对方 → 本人的送礼边 */
   inEdges: UserAnalysisEdge[]
+  /** 到访场次（有会话信息的那几场；`session_id = 0` 的不算） */
+  sessions: number
+  /** 每场的停留时长（ms） */
+  sessionSpans: number[]
+  /** 首次关注的时间（ms；0 = 从来没关注过） */
+  firstFollowAt: number
 }
 
 /** 互动太少就不出画像（样本不够时「画像」只是噪声） */
@@ -409,7 +417,13 @@ function buildMotivations(s: Signals): UserAnalysisScore[] {
 
 /* ------------------------------------------------------------------------------- 标签 */
 
-function buildTags(data: UserAnalysisData, s: Signals, f: UserAnalysisFacts, c: ChatTextSignals): string[] {
+function buildTags(
+  data: UserAnalysisData,
+  s: Signals,
+  f: UserAnalysisFacts,
+  c: ChatTextSignals,
+  b: UserAnalysisBehavior
+): string[] {
   const tags: string[] = []
   if (f.monetary >= 10000) tags.push('bigSpender')
   else if (data.gift > 0) tags.push('giver')
@@ -422,6 +436,8 @@ function buildTags(data: UserAnalysisData, s: Signals, f: UserAnalysisFacts, c: 
   if (c.questionRate >= 0.3) tags.push('inquisitive')
   if (data.likes >= 100) tags.push('liker')
   if (data.follows >= 3) tags.push('follower')
+  if (b.sessions >= 3) tags.push('regularVisitor')
+  if ((b.kinds.find((item) => item.key === 'like')?.score ?? 0) >= 50) tags.push('cheerSquad')
   if (s.activity < 0.2) tags.push('silent')
   if (f.activeDays >= 7) tags.push('regular')
   if (data.honorLevel >= 15) tags.push('highHonor')
@@ -444,9 +460,11 @@ function buildInsights(
   s: Signals,
   motivationTop: string,
   g: UserAnalysisGifting,
-  net: UserAnalysisNetwork
+  net: UserAnalysisNetwork,
+  b: UserAnalysisBehavior
 ): UserAnalysisInsight[] {
   const list: UserAnalysisInsight[] = []
+  const shareOf = (key: string): number => b.kinds.find((item) => item.key === key)?.score ?? 0
 
   // 1 价值（RFM 的 Monetary）
   if (f.monetary <= 0) list.push({ key: 'spendNone', params: {} })
@@ -459,7 +477,19 @@ function buildInsights(
   else if (f.activeDays >= 10 || f.spanDays >= 30) list.push({ key: 'relationDeep', params: { days: f.activeDays, span: Math.round(f.spanDays) } })
   else list.push({ key: 'relationReturning', params: { days: f.activeDays } })
 
-  // 3 送礼习惯与「青睐谁」
+  // 3 互动结构（全量五类互动：选一条最有说明力的形态）
+  if (shareOf('member') >= 55 && shareOf('chat') <= 10) list.push({ key: 'behaviorLurker', params: {} })
+  else if (shareOf('like') >= 50) list.push({ key: 'behaviorCheer', params: { n: shareOf('like') } })
+  else if (b.kinds.filter((item) => item.score >= 12).length >= 3) list.push({ key: 'behaviorAllRound', params: {} })
+  if (b.sessions >= 3) {
+    if (b.avgStayMinutes < 3) list.push({ key: 'behaviorShortStay', params: { n: b.sessions } })
+    else if (b.avgStayMinutes >= 30) list.push({ key: 'behaviorLongStay', params: { n: b.avgStayMinutes } })
+    else list.push({ key: 'behaviorRegular', params: { n: b.sessions } })
+  }
+  if (b.followDays >= 0 && b.followDays <= 1) list.push({ key: 'behaviorFollowQuick', params: {} })
+  else if (b.followDays >= 7) list.push({ key: 'behaviorFollowSlow', params: { days: b.followDays } })
+
+  // 4 送礼习惯与「青睐谁」
   if (f.monetary > 0 || g.giftDays > 0) {
     if (g.topRecipientName && (g.topRecipientShare >= 50 || g.recipients <= 2)) {
       list.push({ key: 'giftingFocus', params: { name: g.topRecipientName, share: g.topRecipientShare } })
@@ -477,17 +507,17 @@ function buildInsights(
     if (net.inTotal > 0) list.push({ key: 'giftingInbound', params: { coins: net.inTotal } })
   }
 
-  // 4 主导动机（SDT）
+  // 5 主导动机（SDT）
   if (motivationTop) list.push({ key: `motivation${pascal(motivationTop)}`, params: {} })
 
-  // 5 活跃节律
+  // 6 活跃节律
   if (f.peakHour >= 0) {
     if (f.peakHour >= 22 || f.peakHour < 6) list.push({ key: 'rhythmNight', params: { hour: f.peakHour } })
     else if (f.peakHour < 12) list.push({ key: 'rhythmDay', params: { hour: f.peakHour } })
     else list.push({ key: 'rhythmEvening', params: { hour: f.peakHour } })
   }
 
-  // 6 弹幕表达风格（样本足够才下结论）
+  // 7 弹幕表达风格（样本足够才下结论）
   if (c.sampleCount >= 8) {
     if (c.mentionRate >= 0.4) list.push({ key: 'chatMention', params: { n: Math.round(c.mentionRate * 100) } })
     if (c.avgLength >= 6) list.push({ key: 'chatVerbose', params: { n: Math.round(c.avgLength) } })
@@ -497,14 +527,14 @@ function buildInsights(
     if (c.arousal >= 0.6) list.push({ key: 'chatHype', params: { n: Math.round(c.arousal * 100) } })
   }
 
-  // 7 情绪
+  // 8 情绪
   if (f.sentiment >= 30) list.push({ key: 'moodPositive', params: { pos: f.positive } })
   else if (f.sentiment <= -30) list.push({ key: 'moodNegative', params: { neg: f.negative } })
 
   // 情绪唤起度（效价 × 唤起度 = 情绪状态）
   if (c.sampleCount >= 8 && c.arousal < 0.25 && s.valence >= 0) list.push({ key: 'calmPositive', params: {} })
 
-  return list.slice(0, 8)
+  return list.slice(0, 10)
 }
 
 /* --------------------------------------------------------------------------- 送礼 / 关系网 */
@@ -566,7 +596,62 @@ function buildGifting(data: UserAnalysisData, d: Derived, network: UserAnalysisN
   }
 }
 
+/* ------------------------------------------------------------------------- 互动结构（全量） */
+
+/** 五类互动（机器键沿用 `douyin-link.kinds.*`，界面直接复用那套文案） */
+const BEHAVIOR_KINDS = ['chat', 'member', 'like', 'social', 'gift'] as const
+
+/**
+ * 互动结构：把**五类互动**全量摊开，回答「他是靠什么在参与」——
+ * 只进场不说话的围观者、只点赞的气氛组、反复打卡的熟客，光看弹幕数是看不出来的。
+ * 顺带给出到访场次、停留时长与「多久转化成关注」。
+ */
+function buildBehavior(data: UserAnalysisData, d: Derived): UserAnalysisBehavior {
+  const counts: Record<string, number> = {
+    chat: Math.max(0, data.chat),
+    member: Math.max(0, data.enter),
+    like: Math.max(0, data.likes),
+    social: Math.max(0, data.follows),
+    gift: Math.max(0, data.gift)
+  }
+  const total = BEHAVIOR_KINDS.reduce((acc, key) => acc + counts[key], 0)
+  const kinds: UserAnalysisScore[] = BEHAVIOR_KINDS.map((key) => ({
+    key,
+    score: total > 0 ? Math.round((counts[key] / total) * 100) : 0
+  })).sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
+
+  const spans = data.sessionSpans.filter((span) => span > 0)
+  const avgSpan = spans.length > 0 ? spans.reduce((acc, span) => acc + span, 0) / spans.length : 0
+  const maxSpan = spans.length > 0 ? Math.max(...spans) : 0
+  const sessions = Math.max(0, Math.round(data.sessions))
+
+  return {
+    sessions,
+    avgStayMinutes: Math.round((avgSpan / 60000) * 10) / 10,
+    maxStayMinutes: Math.round(maxSpan / 60000),
+    kinds,
+    topKind: kinds[0]?.key ?? '',
+    perSession: sessions > 0 ? Math.round((d.interactions / sessions) * 10) / 10 : 0,
+    followDays:
+      data.firstFollowAt > 0 && data.firstSeen > 0
+        ? Math.max(0, Math.round(((data.firstFollowAt - data.firstSeen) / 86400000) * 10) / 10)
+        : -1
+  }
+}
+
 /* ------------------------------------------------------------------------------- 弹幕 DTO */
+
+/** 7 大类情感的固定展示顺序（对齐大连理工《情感词汇本体》的编号） */
+const EMOTION_ORDER: EmotionKey[] = ['joy', 'like', 'anger', 'sorrow', 'fear', 'disgust', 'surprise']
+
+/** 把各类情感的累计强度折成百分比构成 */
+function buildEmotions(intensity: Record<EmotionKey, number>): UserAnalysisScore[] {
+  const total = EMOTION_ORDER.reduce((acc, key) => acc + Math.max(0, intensity[key] ?? 0), 0)
+  return EMOTION_ORDER.map((key) => ({
+    key,
+    score: total > 0 ? Math.round((Math.max(0, intensity[key] ?? 0) / total) * 100) : 0
+  }))
+}
 
 function buildChat(c: ChatTextSignals): UserAnalysisChat {
   const total = c.topicCounts.reduce((acc, item) => acc + item.count, 0)
@@ -584,6 +669,7 @@ function buildChat(c: ChatTextSignals): UserAnalysisChat {
     repeatRate: Math.round(c.repeatRate * 100),
     valence: Math.round(c.valence * 100),
     arousal: Math.round(c.arousal * 100),
+    emotions: buildEmotions(c.emotionIntensity),
     topics,
     keywords: c.keywords
   }
@@ -621,6 +707,7 @@ export function buildUserAnalysis(data: UserAnalysisData, now: number): UserAnal
   const personality = buildPersonality(s)
   const motivations = buildMotivations(s)
   const chat = buildChat(d.chat)
+  const behavior = buildBehavior(data, d)
   const network = buildNetwork(data)
   const gifting = buildGifting(data, d, network)
 
@@ -648,10 +735,11 @@ export function buildUserAnalysis(data: UserAnalysisData, now: number): UserAnal
     motivations,
     motivationTop,
     chat,
+    behavior,
     gifting,
     network,
-    tags: hasData ? buildTags(data, s, facts, d.chat) : [],
-    insights: hasData ? buildInsights(facts, d.chat, s, motivationTop, gifting, network) : [],
+    tags: hasData ? buildTags(data, s, facts, d.chat, behavior) : [],
+    insights: hasData ? buildInsights(facts, d.chat, s, motivationTop, gifting, network, behavior) : [],
     facts
   }
 }

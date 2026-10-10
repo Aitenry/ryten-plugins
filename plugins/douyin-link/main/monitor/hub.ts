@@ -2024,9 +2024,12 @@ export class AnalyzerHub {
    *
    * 全程**不经过大模型、不需要人工**：同一份数据必然得到同一份结论
    * （方法论与口径见 `main/analysis/portrait.ts`）。
+   *
+   * **跨全部直播间**（不接收 webRid）：画像回答的是「这个人在这个平台什么样」，
+   * 同一个房间的相关性只体现在消息本身，不需要按房间切片。
    */
-  async userAnalysis(webRid: string, userId: string): Promise<UserAnalysis> {
-    const data = await store.userAnalysisData(webRid, userId)
+  async userAnalysis(userId: string): Promise<UserAnalysis> {
+    const data = await store.userAnalysisData(userId)
     return buildUserAnalysis(data, Date.now())
   }
 

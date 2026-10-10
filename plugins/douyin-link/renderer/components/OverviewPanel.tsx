@@ -52,6 +52,8 @@ export function OverviewPanel(props: {
    * 参数就是榜上那一行（`userId` / 昵称 / 方向：`sent` = 他送的、`received` = 他收到的）。
    */
   onOpenGifts: (target: { userId: string; name: string; direction: 'sent' | 'received' }) => void
+  /** 点礼物榜里的**名字** → 打开这个人的用户档案 */
+  onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
@@ -221,6 +223,7 @@ export function OverviewPanel(props: {
             t={t}
             palette={palette}
             onOpen={props.onOpenGifts}
+            onOpenUser={props.onOpenUser}
           />
         </Panel>
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.giftSentBoard')}>
@@ -230,6 +233,7 @@ export function OverviewPanel(props: {
             t={t}
             palette={palette}
             onOpen={props.onOpenGifts}
+            onOpenUser={props.onOpenUser}
           />
         </Panel>
         {/*
@@ -478,9 +482,15 @@ function KindBars(props: {
 }
 
 /**
- * 礼物榜（收礼 / 送礼共用一张）：**一行一个人**——名字 · 件数 · 抖币，点一行看他的礼物历史。
+ * 礼物榜（收礼 / 送礼共用一张）：**一行一个人**——名字 · 件数 · 抖币。
  *
- * 两个口径的差别只有三点：收礼榜的行带麦位号（只列麦上的人）、空态文案、点开的历史方向。
+ * 两个点击目标（用户 2026-10-10：「里面的所有名称点击后可查看其信息，即用户档案」）：
+ * - 点**名字** → 打开这个人的用户档案（`onOpenUser`）；
+ * - 点这一行的**其它地方** → 看他的礼物历史（`onOpen`，原行为不变）。
+ * 名字是嵌在行按钮里的 `<span>`（不是第二层 `<button>`，嵌套按钮是非法 HTML），
+ * 各自的 `onClick` 里 `stopPropagation` 把两件事分开。
+ *
+ * 收礼榜的行带麦位号（只列麦上的人）、空态文案、点开的历史方向——两个口径只差这三点。
  * 抖币拿不到（官方没给价）的行显示「价值未知」，不写成 0。
  */
 export function GiftRankBoard(props: {
@@ -489,6 +499,8 @@ export function GiftRankBoard(props: {
   t: Translate
   palette: PluginPalette
   onOpen: (target: { userId: string; name: string; direction: 'sent' | 'received' }) => void
+  /** 点名字 → 打开用户档案 */
+  onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   const { rows, direction, t, palette } = props
   if (rows.length === 0) {
@@ -518,7 +530,14 @@ export function GiftRankBoard(props: {
             >
               {/* 名字前面**不带「N号」**（用户 2026-10-08：「移除前面的x号的内容」）：
                   榜单按抖币排、也不再只列麦上的人，那个前缀只会误导；麦位去「在线观众」看 */}
-              <span className="min-w-0 flex-1 truncate" title={row.name || row.userId}>
+              <span
+                className="min-w-0 flex-1 truncate hover:underline"
+                title={t('douyin-link.page.giftNameHint')}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  if (row.userId) props.onOpenUser(row.userId)
+                }}
+              >
                 {row.name || row.userId}
               </span>
               <span

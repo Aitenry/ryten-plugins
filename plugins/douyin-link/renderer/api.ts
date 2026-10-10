@@ -28,6 +28,7 @@ import type {
   StoredMessage,
   SummaryPush,
   UserAnalysis,
+  UserAnalysisBehavior,
   UserAnalysisChat,
   UserAnalysisFacts,
   UserAnalysisGifting,
@@ -287,6 +288,7 @@ export function normalizeUserAnalysis(value: unknown): UserAnalysis {
     repeatRate: asCount(chatRaw.repeatRate),
     valence: asCount(chatRaw.valence),
     arousal: asCount(chatRaw.arousal),
+    emotions: scores(chatRaw.emotions),
     topics: scores(chatRaw.topics),
     keywords: asList<unknown>(chatRaw.keywords).filter((word): word is string => typeof word === 'string')
   }
@@ -323,6 +325,16 @@ export function normalizeUserAnalysis(value: unknown): UserAnalysis {
     outTotal: asCount(networkRaw.outTotal),
     inTotal: asCount(networkRaw.inTotal)
   }
+  const behaviorRaw = isRecord(raw.behavior) ? raw.behavior : {}
+  const behavior: UserAnalysisBehavior = {
+    sessions: asCount(behaviorRaw.sessions),
+    avgStayMinutes: asCount(behaviorRaw.avgStayMinutes),
+    maxStayMinutes: asCount(behaviorRaw.maxStayMinutes),
+    kinds: scores(behaviorRaw.kinds),
+    topKind: asText(behaviorRaw.topKind),
+    perSession: asCount(behaviorRaw.perSession),
+    followDays: asCount(behaviorRaw.followDays)
+  }
   return {
     hasData: raw.hasData === true,
     archetype: asText(raw.archetype) || 'balanced',
@@ -334,6 +346,7 @@ export function normalizeUserAnalysis(value: unknown): UserAnalysis {
     motivations: scores(raw.motivations),
     motivationTop: asText(raw.motivationTop),
     chat,
+    behavior,
     gifting,
     network,
     tags: asList<unknown>(raw.tags).filter((tag): tag is string => typeof tag === 'string'),
@@ -508,9 +521,12 @@ export const api = {
   /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
   userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>
     asList<GiftBreakdownRow>(await invoke(`${PREFIX}user-gifts`, webRid, userId)),
-  /** 「分析用户」：按库里的数据用确定性规则生成画像（**不依赖大模型**；文案由界面本地化） */
-  userAnalysis: async (webRid: string, userId: string): Promise<UserAnalysis | null> => {
-    const raw = await invoke(`${PREFIX}user-analysis`, webRid, userId)
+  /**
+   * 「分析用户」：**跨全部直播间**的画像（只传 userId）。
+   * 主进程按人在全库聚合，再跑确定性规则算法，不依赖大模型；文案由界面本地化。
+   */
+  userAnalysis: async (userId: string): Promise<UserAnalysis | null> => {
+    const raw = await invoke(`${PREFIX}user-analysis`, userId)
     return isRecord(raw) ? normalizeUserAnalysis(raw) : null
   },
   /**

@@ -210,33 +210,60 @@ export function HoverRow(props: {
  *
  * 用法：`<Modal {...formModalProps} open={...}>`；纯展示、字段很少的弹窗用 `createModalProps`
  * （只收 top，不需要内部滚动）。**每个 Modal 至少展开其中一个。**
+ *
+ * 骨架单独抽成 `MODAL_CHROME`：两栏变体（`splitModalProps`）要在同一份骨架上去改 `body`，
+ * 而 antd 的 `ModalProps['styles']` 是「对象 | 函数 | undefined」的联合类型，直接展开过不了类型检查。
  */
+const MODAL_CHROME: Record<'container' | 'header' | 'body' | 'footer', React.CSSProperties> = {
+  container: {
+    display: 'flex',
+    flexDirection: 'column',
+    maxHeight: 'calc(100vh - 72px)',
+    minHeight: 0
+  },
+  header: { flexShrink: 0 },
+  body: {
+    flex: 1,
+    minHeight: 0,
+    overflow: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    scrollbarWidth: 'thin',
+    scrollbarColor: 'rgba(128, 128, 128, 0.35) transparent',
+    overscrollBehavior: 'contain'
+  },
+  footer: { flexShrink: 0 }
+}
+
 export const formModalProps: Pick<ModalProps, 'style' | 'styles'> = {
   style: { top: 24, paddingBottom: 24 },
-  styles: {
-    container: {
-      display: 'flex',
-      flexDirection: 'column',
-      maxHeight: 'calc(100vh - 72px)',
-      minHeight: 0
-    },
-    header: { flexShrink: 0 },
-    body: {
-      flex: 1,
-      minHeight: 0,
-      overflow: 'auto',
-      display: 'flex',
-      flexDirection: 'column',
-      scrollbarWidth: 'thin',
-      scrollbarColor: 'rgba(128, 128, 128, 0.35) transparent',
-      overscrollBehavior: 'contain'
-    },
-    footer: { flexShrink: 0 }
-  }
+  styles: MODAL_CHROME
 }
 
 /** 内容恒定的短弹窗（确认框、说明框）：只把 top 收下来，其它交给 antd */
 export const createModalProps: Pick<ModalProps, 'style'> = { style: { top: 24 } }
+
+/**
+ * **两栏弹窗**的正文样式：在 `formModalProps` 的基础上只改一处——把正文从列方向翻成行方向。
+ *
+ * 为什么用「改正文方向」而不是在页面里再包一层 div：正文本身就是 flex 容器（见上），
+ * 换成行方向后，正文的**直接子节点**就是左右两栏，天然 `align-items: stretch` 等高，
+ * 各自 `min-height: 0` + `overflow: auto` 就能各自滚——不需要给中间层写任何高度预算。
+ *
+ * `gap` 在这里是**列间距**；`overflow: hidden` 是为了把滚动完全交给两栏
+ * （否则正文自己也会冒一条，就成了「滚动条套滚动条」）。
+ *
+ * 用法：`<Modal {...splitModalProps} footer={null}>`，正文里直接放
+ * `<div data-rb-scroll="" className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">…</div>`
+ * 与可选右栏（固定宽度 + 同样 `data-rb-scroll`）。**别忘在同一棵树里渲染一次 `<ScrollStyle />`。**
+ */
+export const splitModalProps: Pick<ModalProps, 'style' | 'styles'> = {
+  style: formModalProps.style,
+  styles: {
+    ...MODAL_CHROME,
+    body: { ...MODAL_CHROME.body, flexDirection: 'row', gap: 12, overflow: 'hidden' }
+  }
+}
 
 /**
  * antd 6 Tabs 撑满高度的正确写法（**两个坑都在这里**）：

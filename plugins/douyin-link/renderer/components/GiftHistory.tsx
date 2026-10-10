@@ -95,11 +95,8 @@ export function GiftHistoryModal(props: {
       open={Boolean(props.userId)}
       title={t('douyin-link.page.giftHistoryTitle')}
       onCancel={props.onClose}
-      footer={
-        <div className="flex justify-end">
-          <Button onClick={props.onClose}>{t('douyin-link.users.close')}</Button>
-        </div>
-      }
+      /* 没有页脚：底部那个「关闭」跟右上角的 × 是同一件事，去掉后正文多出一行高度 */
+      footer={null}
     >
       <div className="flex flex-col gap-2">
         <ScrollStyle />

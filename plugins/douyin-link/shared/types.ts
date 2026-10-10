@@ -729,6 +729,11 @@ export interface UserAnalysisChat {
   valence: number
   /** 情绪唤起度（0 平静 ~ 100 激动） */
   arousal: number
+  /**
+   * 7 大类情感的构成（机器键 + 百分比，固定顺序：乐 / 好 / 怒 / 哀 / 惧 / 恶 / 惊）。
+   * 分类体系对齐大连理工大学《情感词汇本体》；全部为 0 表示这段弹幕里没有命中任何情感词。
+   */
+  emotions: UserAnalysisScore[]
   /** 内容主题占比（机器键 + 百分比打分，按占比降序，最多 6 项） */
   topics: UserAnalysisScore[]
   /** 高频关键词（最多 8 个，纯展示；无数据为空数组） */
@@ -793,7 +798,34 @@ export interface UserAnalysisNetwork {
 }
 
 /**
+ * 互动结构：把**非弹幕**的数据（进场 / 点赞 / 关注）也纳入画像——
+ * 光看弹幕会漏掉「只看不说」「疯狂点赞」「反复打卡」这些典型观众。
+ */
+export interface UserAnalysisBehavior {
+  /** 到访场次（有会话信息的那几场） */
+  sessions: number
+  /** 平均单场停留（分钟，保留 1 位） */
+  avgStayMinutes: number
+  /** 单场最长停留（分钟） */
+  maxStayMinutes: number
+  /**
+   * 互动构成（机器键 + 占比，按占比降序）。
+   * 机器键复用 `douyin-link.kinds.*` 那一套：`chat` 弹幕 / `member` 进场 / `like` 点赞 / `social` 关注 / `gift` 礼物。
+   */
+  kinds: UserAnalysisScore[]
+  /** 主导互动方式（机器键 = `kinds` 的第一项） */
+  topKind: string
+  /** 平均每场的互动条数（含弹幕/进场/点赞/关注/礼物） */
+  perSession: number
+  /** 从首次出现到首次关注的天数（`-1` = 从没关注过） */
+  followDays: number
+}
+
+/**
  * 「分析用户」的用户画像结果。
+ *
+ * **范围：跨全部直播间**（用户 2026-10-10：「只需要跨房间进行构建画像，即这个人在这个平台的画像」）——
+ * 只按 `user_id` 在全库聚合，跟「当前房间」无关；换个房间看同一个人，画像不变。
  *
  * 方法论（**确定性规则，不依赖大模型**，见 `main/analysis/portrait.ts`）：
  * - 价值分层用经典的 **RFM**（Recency / Frequency / Monetary）；
@@ -801,7 +833,8 @@ export interface UserAnalysisNetwork {
  * - 人格侧写用 **大五人格模型（Big Five / OCEAN）**：由弹幕与行为做**行为侧写**（behavioral proxy），
  *   只表示「从数据里看到的行为倾向」，不是临床人格判定；
  * - 动机结构借 **自我决定论（SDT）** 的基本心理需求：社交连接 / 身份认同 / 内容欣赏 / 习惯陪伴；
- * - 弹幕文本用**词典法情感分析 + 语用主题分类**（情绪效价与唤起度、内容主题、语言特征）；
+ * - 弹幕文本用**词典法情感分析 + 语用主题分类**（情绪效价与唤起度、7 大类情感构成、内容主题、语言特征）；
+ * - **互动结构**把五类互动（弹幕 / 进场 / 点赞 / 关注 / 礼物）全量纳入：构成占比、到访场次、停留时长、关注转化；
  * - 送礼习惯把礼物流水按**时段 / 种类 / 对象**摊开（频率、单笔峰值、礼物与对象的集中度）；
  * - 人物关系网是**以本人为中心的一跳图**（本人送出的对象 + 送礼给本人的人），用于看「青睐谁」。
  * 所有分值都是「现有数据 → 归一化 → 加权」的纯函数结果，同一份数据同一天必然同一份结论。
@@ -827,6 +860,8 @@ export interface UserAnalysis {
   motivationTop: string
   /** 弹幕文本分析 */
   chat: UserAnalysisChat
+  /** 互动结构（全量互动类型：弹幕 / 进场 / 点赞 / 关注 / 礼物） */
+  behavior: UserAnalysisBehavior
   /** 送礼习惯 */
   gifting: UserAnalysisGifting
   /** 人物关系网（一跳） */
