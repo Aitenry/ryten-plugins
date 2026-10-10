@@ -28,6 +28,7 @@ import {
   type QualityKey,
   type RoomCompareRow,
   type RoomRuntime,
+  type RoomSeriesRow,
   type RoomSummary,
   type RoomTick,
   type SummaryPush,
@@ -147,6 +148,11 @@ const ROOM_REFRESH_MS = 5 * 60 * 1000
 const IDLE_REFRESH_MS = 30 * 60 * 1000
 /** 「在线观众」一次最多合成多少行（面板画不下更多，也免得查询无限膨胀） */
 const PRESENCE_ROWS_CAP = 400
+/**
+ * 数据大屏「指标」页签：每房分钟序列最多推多少个房间（按窗口抖币降序取）。
+ * 每房最多 240 个点，24 房就是约 5.8k 个点——够画横向对比，又不至于把负载顶起来。
+ */
+const ROOM_SERIES_CAP = 24
 /**
  * 「只有 id 的人」按 id 去抖音补资料（在线观众里的成员名单只给 id）：
  * 单次最多查多少个 / 并发多少 / 同一个 id 失败后的冷却。
@@ -1702,6 +1708,54 @@ export class AnalyzerHub {
     const firstAt = rawSeries.length > 0 ? rawSeries[0].minute * 60000 : 0
     const lastAt = rawSeries.length > 0 ? rawSeries[rawSeries.length - 1].minute * 60000 + 59999 : 0
 
+    /**
+     * 每个直播间各自的分钟序列（数据大屏「指标」页签）：与上面的全局趋势**同一套分桶口径**
+     * （同一个 `startMinute` / `endMinute` / `step`），只是保留房间维度，渲染层才能画
+     * 「动态排序柱状图 / 日内走势 / 按小时分布」这类**房间之间横向比**的图。
+     *
+     * 只收「窗口内有过礼物」的房间——没礼物的房间在这几张图上是空的，留进去只是白占位、白推；
+     * 再按窗口抖币降序取前 `ROOM_SERIES_CAP` 个，避免房间特别多时负载无量级地涨。
+     */
+    const perRoomMinutes = await store.minuteSeriesPerRoom(startMinute, endMinute)
+    const roomSeries: RoomSeriesRow[] = []
+    for (const state of this.states.values()) {
+      const rows = perRoomMinutes.get(state.webRid)
+      if (!rows || rows.length === 0) continue
+      const bucketMap = new Map<number, { diamonds: number; gift: number; chat: number }>()
+      for (const row of rows) {
+        const key = startMinute + Math.floor((row.minute - startMinute) / step) * step
+        const bucket = bucketMap.get(key)
+        if (!bucket) bucketMap.set(key, { diamonds: row.diamonds, gift: row.gift, chat: row.chat })
+        else {
+          bucket.diamonds += row.diamonds
+          bucket.gift += row.gift
+          bucket.chat += row.chat
+        }
+      }
+      let total = 0
+      let hasGift = false
+      const series: RoomSeriesRow['series'] = []
+      for (let minute = startMinute; minute <= endMinute; minute += step) {
+        const bucket = bucketMap.get(minute)
+        const diamonds = bucket?.diamonds ?? 0
+        const gift = bucket?.gift ?? 0
+        if (diamonds > 0 || gift > 0) hasGift = true
+        total += diamonds
+        series.push({ minute: minute * 60000, diamonds, gift, chat: bucket?.chat ?? 0 })
+      }
+      if (!hasGift) continue
+      roomSeries.push({
+        webRid: state.webRid,
+        title: state.info?.title || state.title,
+        anchor: state.info?.anchor || state.anchor,
+        status: state.status,
+        phase: state.phase,
+        series
+      })
+    }
+    roomSeries.sort((a, b) => sumDiamonds(b) - sumDiamonds(a))
+    if (roomSeries.length > ROOM_SERIES_CAP) roomSeries.length = ROOM_SERIES_CAP
+
     // 榜单/礼物榜跨房合并（seat 在全局没有意义，恒 0）
     const sent = (await store.giftRankByPersonAll('sender', fromMs, toMs, 50)).map((row) => ({ ...row, seat: 0 }))
     const received = (await store.giftRankByPersonAll('recipient', fromMs, toMs, 50)).map((row) => ({
@@ -1732,7 +1786,8 @@ export class AnalyzerHub {
       sent,
       received,
       gifts,
-      perRoom
+      perRoom,
+      roomSeries
     }
   }
 
@@ -2297,6 +2352,11 @@ export const FAILURE_CODES = [
 
 /** 让出事件循环一拍（PGlite 与宿主同进程，不让步就会把别人的流式输出挤停） */
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/** 一条房间分钟序列的抖币合计（数据大屏「指标」页签按它给房间排序、取前 N） */
+function sumDiamonds(row: RoomSeriesRow): number {
+  return row.series.reduce((total, point) => total + point.diamonds, 0)
+}
 
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message.slice(0, 160)

@@ -4,7 +4,7 @@ import { RiVolumeUpLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { AllRoomsAnalysis, GiftBreakdownRow, RoomCompareRow } from '../../shared/types'
 import api, { normalizeAllRoomsAnalysis } from '../api'
-import { ChartBox, EmptyHint, FitTable, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
+import { ChartBox, EmptyHint, FitTable, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
 import { GiftRankBoard, TrendChart, formatNumber } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -230,7 +230,7 @@ function FlowTable(props: {
             ellipsis: true,
             render: (_value, row) => (
               <span className="flex min-w-0 items-center gap-1">
-                <span className="min-w-0 truncate">{row.title || row.webRid}</span>
+                <span className="min-w-0 truncate">{roomLabel(row)}</span>
                 {row.audio ? (
                   <span className="shrink-0" style={{ color: palette.accent }}>
                     <RiVolumeUpLine size={12} />

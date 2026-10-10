@@ -6,7 +6,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime, StoredMessage } from '../../shared/types'
 import api from '../api'
 import { kindColor, giftRecipientText } from './DanmakuFeed'
-import { ScrollStyle, usePluginPalette } from './ui'
+import { ScrollStyle, roomLabel, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -104,8 +104,11 @@ export function UserHistory(props: {
     if (page > 0 && page >= pages) setPage(pages - 1)
   }, [page, pages])
 
-  const roomLabel = (webRid: string): string =>
-    props.rooms?.find((room) => room.webRid === webRid)?.title || webRid
+  /** 房间号 → 展示名（`名字 · id`：同名直播间只有 id 分得清，见 ui 的 roomLabel） */
+  const labelForRoom = (webRid: string): string => {
+    const room = props.rooms?.find((entry) => entry.webRid === webRid)
+    return room ? roomLabel(room) : webRid
+  }
 
   /** 房间下拉的可选项：全部房间 + 已知的房间（当前房间不在清单里也补上，避免下拉显示成裸 id） */
   const roomOptions: Array<{ value: string; label: string }> = [
@@ -115,7 +118,7 @@ export function UserHistory(props: {
   if (props.webRid && !known.some((room) => room.webRid === props.webRid)) {
     roomOptions.push({ value: props.webRid, label: props.webRid })
   }
-  for (const room of known) roomOptions.push({ value: room.webRid, label: room.title || room.webRid })
+  for (const room of known) roomOptions.push({ value: room.webRid, label: roomLabel(room) })
 
   return (
     <div className="flex flex-col gap-1">
@@ -191,7 +194,7 @@ export function UserHistory(props: {
             >
               <span className="shrink-0 opacity-60">{stamp(row.at)}</span>
               {roomSel === '' ? (
-                <span className="shrink-0 max-w-[92px] truncate opacity-50">{roomLabel(row.webRid)}</span>
+                <span className="shrink-0 max-w-[92px] truncate opacity-50">{labelForRoom(row.webRid)}</span>
               ) : null}
               {kindScope === 'any' ? (
                 <span

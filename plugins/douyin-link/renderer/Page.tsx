@@ -18,6 +18,7 @@ import { isAnonymousId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { AllRoomsPanel } from './components/AllRoomsPanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
+import { MetricsPanel } from './components/MetricsPanel'
 import { OverviewPanel } from './components/OverviewPanel'
 import { PresencePanel } from './components/PresencePanel'
 import {
@@ -27,6 +28,7 @@ import {
   PillTabBar,
   PillTabsBody,
   formModalProps,
+  roomLabel,
   usePluginPalette
 } from './components/ui'
 import type { PillTabItem, PluginPalette } from './components/ui'
@@ -40,12 +42,12 @@ import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
-type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'all'
+type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'all' | 'metrics'
 /** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合 + 检索） */
 type ViewMode = 'room' | 'dashboard'
 /** 各模式下合法的页签（切模式时用它把停在别处的 tab 收回来） */
 const ROOM_TABS: TabKey[] = ['overview', 'live', 'presence', 'users']
-const DASHBOARD_TABS: TabKey[] = ['all', 'search']
+const DASHBOARD_TABS: TabKey[] = ['all', 'metrics', 'search']
 const DEFAULT_ROOM_TAB: TabKey = 'overview'
 const DEFAULT_DASHBOARD_TAB: TabKey = 'all'
 /**
@@ -567,7 +569,7 @@ export default function Page(): React.JSX.Element {
       const room = rooms.find((entry) => entry.webRid === webRid)
       Modal.confirm({
         ...formModalProps,
-        title: t('douyin-link.page.removeConfirmTitle', { room: room?.title || webRid }),
+        title: t('douyin-link.page.removeConfirmTitle', { room: room ? roomLabel(room) : webRid }),
         content: purge ? t('douyin-link.page.removeConfirmData') : t('douyin-link.page.removeConfirmKeep'),
         okText: t('douyin-link.page.remove'),
         okButtonProps: { danger: true },
@@ -741,6 +743,17 @@ export default function Page(): React.JSX.Element {
             onSelectRoom={openRoom}
             onOpenGifts={(target) => setOpenGifts(target)}
           />
+        </Pane>
+      )
+    },
+    {
+      // 「指标」：把每个直播间**拆开并排**，看「谁的抖币收入涨得快 / 什么时段最集中」
+      // （动态排序柱状图、日内走势、收入排行、按小时分布）——与「全局分析」的「合起来看」互补。
+      key: 'metrics',
+      label: t('douyin-link.page.tabMetrics'),
+      children: (
+        <Pane>
+          <MetricsPanel range={dashboardRange} onSelectRoom={openRoom} />
         </Pane>
       )
     },

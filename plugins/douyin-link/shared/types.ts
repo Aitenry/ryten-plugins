@@ -514,6 +514,24 @@ export interface SummaryPush {
 }
 
 /**
+ * **单个直播间**在窗口内的分钟序列（数据大屏「指标」页签的原始素材）。
+ *
+ * 与 `AllRoomsAnalysis.series`（跨房**合计**的一条曲线）互补：这一份是**每房一条**，
+ * 所以能画「动态排序柱状图 / 日内走势 / 按小时分布」这类**房间之间横向比**的细节图。
+ * 主进程按与全局趋势同一套分桶口径（补齐缺口、按跨度合并成最多 240 个点）算好再推，
+ * 渲染层只负责画——`minute` 是该桶起点的 ms epoch。
+ */
+export interface RoomSeriesRow {
+  webRid: string
+  title: string
+  anchor: string
+  status: 'live' | 'ended' | 'unknown'
+  phase: MonitorPhase
+  /** 窗口内的分钟序列（至少一个桶有礼物才会被收进来，空房间不占位） */
+  series: Array<{ minute: number; diamonds: number; gift: number; chat: number }>
+}
+
+/**
  * **跨直播间**的聚合分析（「数据大屏模式」的全局分析页签）。
  *
  * 与 `RoomSummary`（单房间）相对：这里的所有口径都是**所有直播间合起来**的——
@@ -551,6 +569,11 @@ export interface AllRoomsAnalysis {
   gifts: GiftBreakdownRow[]
   /** 每个直播间的流水横截面（口径同对比页签） */
   perRoom: RoomCompareRow[]
+  /**
+   * 每个直播间在窗口内的**分钟序列**（数据大屏「指标」页签：动态排序柱状图 / 日内走势 /
+   * 按小时分布都从它算）。只含窗口内有过礼物的房间，其余不占位。
+   */
+  roomSeries: RoomSeriesRow[]
 }
 
 /** 主进程推送的全局分析快照（数据大屏的实时更新；形状同 `SummaryPush`） */

@@ -10,7 +10,7 @@ import {
 } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
-import { FitList, HOVER_BG, Panel, usePluginPalette } from './ui'
+import { FitList, HOVER_BG, Panel, roomLabel, usePluginPalette } from './ui'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -157,9 +157,10 @@ function RoomRow(props: {
 }): React.JSX.Element {
   const { room, palette, t } = props
   const phase = phaseMeta(t, room, palette)
-  // 标题 = 主播名 + 直播间标题：只有直播间标题根本认不出是哪个直播间（用户反馈）
-  const label = room.title || room.note || room.webRid
-  const title = room.anchor ? `${room.anchor} · ${label}` : label
+  // 主标题 = **直播间名 · 房间号**（用户 2026-10-10：标题会撞车，只有房间号分得清是哪一个）
+  const title = roomLabel(room)
+  // 次行 = 主播 / 备注 / 相位 / 速率 / 库里累计（房间号已经在主标题里，不再重复）
+  const meta = [room.anchor, room.note].filter(Boolean).join(' · ')
 
   return (
     <div
@@ -178,9 +179,12 @@ function RoomRow(props: {
         style={{ width: 7, height: 7, backgroundColor: phase.color }}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className="min-w-0 truncate text-xs font-medium">{title}</span>
+        <span className="min-w-0 truncate text-xs font-medium" title={title}>
+          {title}
+        </span>
         <span className="min-w-0 truncate text-[10px] opacity-60">
-          {room.webRid} · {phase.text} · {t('douyin-link.page.rate', { rate: room.rate })} ·{' '}
+          {meta ? `${meta} · ` : ''}
+          {phase.text} · {t('douyin-link.page.rate', { rate: room.rate })} ·{' '}
           {t('douyin-link.page.storedCount', { count: room.stored.messages })}
         </span>
       </div>

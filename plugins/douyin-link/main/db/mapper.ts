@@ -1213,6 +1213,45 @@ export async function minuteSeriesAll(fromMinute: number, toMinute: number): Pro
   })
 }
 
+/**
+ * 窗口内**每个直播间**各自的分钟序列（数据大屏「指标」页签：动态排序柱状图 / 日内走势 / 按小时分布）。
+ *
+ * 与 `minuteSeriesAll`（把各房**同一分钟**相加成一条全局曲线）相对：这里**保留 web_rid**，
+ * 渲染层才能画「房间之间横向比」的图。`(web_rid, minute)` 是表的主键，每行天然唯一，
+ * 直接按 (web_rid, minute) 排序取回即可，不需要再聚合。
+ */
+export async function minuteSeriesPerRoom(
+  fromMinute: number,
+  toMinute: number
+): Promise<Map<string, MinuteRow[]>> {
+  await schemaReady
+  return withOrm('douyin-link.minuteSeriesPerRoom', async (db) => {
+    const rows = await db
+      .select()
+      .from(douyinLinkMinutes)
+      .where(and(gte(douyinLinkMinutes.minute, fromMinute), lte(douyinLinkMinutes.minute, toMinute)))
+      .orderBy(asc(douyinLinkMinutes.webRid), asc(douyinLinkMinutes.minute))
+    const out = new Map<string, MinuteRow[]>()
+    for (const row of rows) {
+      const entry: MinuteRow = {
+        minute: row.minute,
+        chat: row.chat,
+        member: row.member,
+        likes: row.likes,
+        social: row.social,
+        gift: row.gift,
+        diamonds: row.diamonds,
+        messages: row.messages,
+        users: row.users
+      }
+      const list = out.get(row.webRid)
+      if (list) list.push(entry)
+      else out.set(row.webRid, [entry])
+    }
+    return out
+  })
+}
+
 /** 窗口内跨直播间**去重**的活跃用户数（数据大屏的「活跃用户」KPI） */
 export async function activeUsersAll(fromMs: number, toMs: number): Promise<number> {
   await schemaReady
