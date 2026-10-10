@@ -5,7 +5,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type { AllRoomsAnalysis, GiftBreakdownRow, RoomCompareRow } from '../../shared/types'
 import api, { normalizeAllRoomsAnalysis } from '../api'
 import { ChartBox, EmptyHint, FitTable, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
-import { GiftRankBoard, TrendChart, formatNumber, windowLabel } from './OverviewPanel'
+import { GiftRankBoard, TrendChart, formatNumber } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -29,7 +29,8 @@ const RELOAD_MS = 30000
  * 数据全部来自主进程（`all-analysis` 通道 + `all` 事件推送），页面只负责画。
  */
 export function AllRoomsPanel(props: {
-  minutes: number
+  /** 数据大屏的时间区间（用户在头部选的，默认「今天」） */
+  range: { from: number; to: number }
   /** 点流水表的一行 → 切到那个直播间（由 Page 切回单房间模式） */
   onSelectRoom: (webRid: string) => void
   /** 点礼物榜的一行 → 打开这个人的跨房礼物历史 */
@@ -40,9 +41,10 @@ export function AllRoomsPanel(props: {
   const palette = usePluginPalette()
   const [analysis, setAnalysis] = useState<AllRoomsAnalysis | null>(null)
   const [loading, setLoading] = useState(false)
-  /** 归一化要用到当前窗口（推送来得比 props 更新晚一拍，用 ref 兜住） */
-  const minutesRef = useRef(props.minutes)
-  minutesRef.current = props.minutes
+  /** 区间换算出的分钟数：给主进程当兜底窗口、也给推送结果的归一化用 */
+  const minutes = Math.max(1, Math.round((props.range.to - props.range.from) / 60000))
+  const minutesRef = useRef(minutes)
+  minutesRef.current = minutes
 
   /** 实时更新：订阅主进程的全局分析推送；卸载时撤销登记（没人看就不再算跨房聚合） */
   useEffect(() => {
@@ -55,13 +57,13 @@ export function AllRoomsPanel(props: {
     }
   }, [])
 
-  /** 首次 / 换窗口时查一次（`allAnalysis` 顺带登记这个窗口），并留一个低频兜底轮询 */
+  /** 首次 / 换区间时查一次（`allAnalysis` 顺带登记这个区间），并留一个低频兜底轮询 */
   useEffect(() => {
     let alive = true
     const load = (): void => {
       setLoading(true)
       void api
-        .allAnalysis(props.minutes)
+        .allAnalysis(minutes, props.range)
         .then((next) => {
           if (alive) setAnalysis(next)
         })
@@ -76,7 +78,8 @@ export function AllRoomsPanel(props: {
       alive = false
       window.clearInterval(timer)
     }
-  }, [props.minutes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.range.from, props.range.to])
 
   const emptyText = loading ? t('douyin-link.page.loading') : t('douyin-link.page.noData')
 
@@ -85,7 +88,7 @@ export function AllRoomsPanel(props: {
       <div className="col-span-8 flex min-h-0 flex-col gap-3">
         <Panel
           className="shrink-0"
-          title={t('douyin-link.page.allKpiTitle', { window: windowLabel(t, props.minutes) })}
+          title={t('douyin-link.page.allKpiTitle', { window: rangeText(props.range) })}
         >
           <div className="grid grid-cols-3 grid-rows-3 gap-2">
             <Kpi
@@ -158,6 +161,18 @@ export function AllRoomsPanel(props: {
       </div>
     </div>
   )
+}
+
+/** 时间区间的可读文本：同一天只写这一天，跨天写 `起 → 止`（本地日期） */
+function rangeText(range: { from: number; to: number }): string {
+  const day = (at: number): string => {
+    const date = new Date(at)
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  }
+  const from = day(range.from)
+  const to = day(range.to)
+  return from === to ? from : `${from} → ${to}`
 }
 
 /** KPI 小方块（与概览页同款：label 灰、数字加粗、可选提示/强调色） */

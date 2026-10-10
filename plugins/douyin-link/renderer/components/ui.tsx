@@ -533,6 +533,13 @@ export function FitTable<T extends object>(props: {
   table: TableProps<T>
   /** 只用于初始估算；真实行高在运行时量出来 */
   rowHeight?: number
+  /**
+   * 量出「这个容器一次能放下几行」时回调（`rows` = 容量，`hasPager` = 是否放得下分页器）。
+   *
+   * 服务端分页的调用方（如用户榜）用它当**每页条数**：一页正好铺满容器，
+   * 既不会因为写死每页 50 条而撑破面板，也仍然能翻到第 300 名之后。
+   */
+  onCapacity?: (rows: number, hasPager: boolean) => void
 }): React.JSX.Element {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const [boxHeight, setBoxHeight] = useState(0)
@@ -574,6 +581,7 @@ export function FitTable<T extends object>(props: {
     // 连「表头 + 一行」都放不下：不画表格（画了必被裁），交给调用方给的兜底提示
     if (available < headRef.current + rowRef.current) {
       setTooSmall(true)
+      props.onCapacity?.(1, false)
       return
     }
     setTooSmall(false)
@@ -582,6 +590,7 @@ export function FitTable<T extends object>(props: {
     const capacity = withPager >= 1 ? withPager : withoutPager
     setPager(withPager >= 1)
     setRows(Math.max(1, Math.min(capacity, Math.max(1, dataLength))))
+    props.onCapacity?.(Math.max(1, capacity), withPager >= 1)
   }, [dataLength])
 
   // 高度变了就重算；再补两次延时重算，接住「晚于 effect 才到位」的布局

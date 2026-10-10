@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Modal, Segmented, Tag } from 'antd'
+import { Button, DatePicker, Modal, Segmented, Tag } from 'antd'
+import dayjs, { type Dayjs } from 'dayjs'
 import { RiDeleteBin6Line, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
@@ -36,7 +37,7 @@ import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
 import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
-import { duration, formatNumber, stamp, WINDOWS, windowLabel } from './components/OverviewPanel'
+import { duration, formatNumber, stamp } from './components/OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 type TabKey = 'overview' | 'live' | 'presence' | 'users' | 'search' | 'all'
@@ -47,6 +48,22 @@ const ROOM_TABS: TabKey[] = ['overview', 'live', 'presence', 'users']
 const DASHBOARD_TABS: TabKey[] = ['all', 'search']
 const DEFAULT_ROOM_TAB: TabKey = 'overview'
 const DEFAULT_DASHBOARD_TAB: TabKey = 'all'
+/**
+ * 概览页签的**兜底窗口**（分钟）。概览正常都带 `effectiveRange`（今天 / 选中的那一天），
+ * 这个值只在拿不到时间范围时才用得上（见 OverviewPanel 的 `minutes`）。
+ */
+const OVERVIEW_MINUTES = 60
+
+/**
+ * 「直播间 / 数据大屏」切换时的淡入动画关键帧。
+ *
+ * 关键帧写在 `<style>` 里（内联样式没法定义 `@keyframes`），用内联 `animation` 引用它——
+ * 不引入任何类名（插件页的样式覆盖检查按类名比对，这样最干净）。
+ * 主体用 `key={mode}` 触发重放，见下面渲染里的说明。
+ */
+const MODE_SWITCH_CSS = `
+@keyframes rb-mode-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+`
 
 /**
  * 实时列表里一次往库里翻多少条 / 内存里最多挂多少条。
@@ -102,14 +119,27 @@ export default function Page(): React.JSX.Element {
   const [tab, setTab] = useState<TabKey>('overview')
   /** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合）；切换按钮在左栏「全部停止」旁 */
   const [mode, setMode] = useState<ViewMode>('room')
-  const [minutes, setMinutes] = useState(60)
+  /**
+   * 数据大屏的时间区间（用户自己选的一段，默认「今天」）。
+   *
+   * 用户 2026-10-10 的要求：「数据大屏里面的时间区间要改成选择时间区间的，默认是当天」——
+   * 原来的「最近 15 分钟 / 1 小时 / …」预设换成一个**日期区间选择器**，默认本地自然日的
+   * 今天（00:00 → 24:00）。今天且右端是「今天 24:00」时，主进程的全局分析推送不会被当成
+   * 历史区间跳过，所以大屏仍然是实时更新的。
+   */
+  const [dashRange, setDashRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().startOf('day'), dayjs().endOf('day')])
   const [busy, setBusy] = useState(false)
   const [openUser, setOpenUser] = useState('')
   /**
-   * 时间范围（概览看的是哪一段）：`null` = 最近 `minutes` 分钟的预设。
+   * 时间范围（概览看的是哪一段）：`null` = 用「这一天」的默认整段（今天 = 00:00 → 现在）。
    * 两个入口都往这里写：概览的时间进度条、左侧「每日记录」点某一天。
    */
   const [range, setRange] = useState<{ from: number; to: number } | null>(null)
+  /** 数据大屏实际查询用的区间（ms）：由上面的日期选择器换算而来 */
+  const dashboardRange = useMemo(
+    () => ({ from: dashRange[0].valueOf(), to: dashRange[1].valueOf() }),
+    [dashRange]
+  )
   /**
    * 「现在」的粗粒度时钟（每 5 秒一跳）。
    *
@@ -384,9 +414,9 @@ export default function Page(): React.JSX.Element {
   /** 切到某个房间时把它的「最近弹幕」与「用户表」拉一次；弹幕再补一段**库里的**历史 */
   const loadRoomData = useCallback(
     async (webRid: string): Promise<void> => {
-      const [recent, userRows, stored] = await Promise.all([
+      const [recent, userPage, stored] = await Promise.all([
         api.roomRecent(webRid, Math.max(50, maxItems)),
-        api.usersList(webRid, 'recent', '', 300),
+        api.usersList(webRid, 'recent', '', { limit: 300 }),
         /**
          * 内存里只有最近 `maxItems` 条，**库里的才是全部**：这里把库里的最近一段也拉进来，
          * 不然切个房间/重启一次，之前收的礼物就从列表上「消失」了（用户 2026-10-08 反馈
@@ -403,7 +433,7 @@ export default function Page(): React.JSX.Element {
       setUsersByRoom((previous) => {
         const map = new Map(previous)
         const table = new Map<string, UserProfile>()
-        for (const row of userRows) {
+        for (const row of userPage.rows) {
           table.set(row.userId, {
             id: row.userId,
             displayId: row.displayId,
@@ -607,7 +637,7 @@ export default function Page(): React.JSX.Element {
         <Pane>
           <OverviewPanel
             room={active}
-            minutes={minutes}
+            minutes={OVERVIEW_MINUTES}
             range={effectiveRange}
             onRange={changeRange}
             bounds={dayBounds}
@@ -688,7 +718,7 @@ export default function Page(): React.JSX.Element {
       label: t('douyin-link.page.tabUsers'),
       children: (
         <Pane>
-          <UsersPanel room={active} reloadKey={usersReloadKey} onOpenUser={setOpenUser} />
+          <UsersPanel room={active} onOpenUser={setOpenUser} />
         </Pane>
       )
     }
@@ -707,7 +737,7 @@ export default function Page(): React.JSX.Element {
       children: (
         <Pane>
           <AllRoomsPanel
-            minutes={minutes}
+            range={dashboardRange}
             onSelectRoom={openRoom}
             onOpenGifts={(target) => setOpenGifts(target)}
           />
@@ -728,114 +758,116 @@ export default function Page(): React.JSX.Element {
   /** 当前模式下的页签（胶囊条与容器共用） */
   const activeTabItems = mode === 'room' ? roomTabItems : dashboardTabItems
 
-  /**
-   * 数据大屏的礼物历史范围：**跟随全局窗口**（最近 `minutes` 分钟；「全部」= 不限范围）。
-   * 不能复用 `effectiveRange`——它绑的是「分析中的房间」那一天，跟跨房榜单的窗口对不上。
-   */
-  const dashboardGiftRange = minutes > 0 ? { from: Date.now() - minutes * 60000, to: Date.now() } : null
-
   return (
     /* 页头整条去掉了：标题与「数据库：… / 声音状态」都由宿主界面和下面的面板给出了，
        这里不再重复一行。PageShell 的 header 省略即可（顶栏高度随之收掉）。 */
     <PageShell>
-      <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
-        {/* 数据大屏不显示房间侧边栏（大屏就是要把空间让给聚合内容）；模式切换跟着挪到右侧头部 */}
-        {mode === 'room' ? (
-          <div className="col-span-3 flex min-h-0 flex-col gap-3">
-            <RoomRail
-              rooms={rooms}
-              activeRoom={activeRoom}
-              busy={busy}
-              mode={mode}
-              onMode={changeMode}
-              onAdd={(input) => void addRoom(input)}
-              onSelect={selectRoom}
-              onToggleMonitor={toggleMonitor}
-              onMonitorAll={monitorAll}
-              onRefresh={refreshRoom}
-              onRemove={removeRoom}
-              onClearMessages={clearRoomMessages}
-            />
-            {addFailure ? <FailureLine failure={addFailure} /> : null}
-            {/* 「每日记录」是某个房间的当天记录：选中了房间才出现 */}
-            {activeRoom ? (
-              <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
-            ) : null}
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {/*
+         * 顶部工具条：**两个模式共用同一条**。
+         *
+         * 为什么（用户 2026-10-10：「直播间与数据大屏的切换不够丝滑，因为两者的位置不一致」）：
+         * 原来模式切换在直播间模式里住在左栏、切到大屏又跑到右侧头部——位置来回跳。
+         * 现在做成同一条里的 tab（最左），并**替换掉两边原来各自的左标题**（房间名 / 「数据大屏」），
+         * 内容页签条也固定在这一条里，所以切换时控件原地不动、不再跳位。
+         * 右侧只放跟当前模式相关的控件：直播间 = 本场数字 + 相位；大屏 = 时间区间。
+         */}
+        <Panel className="shrink-0">
+          <div className="flex flex-col gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <Segmented
+                size="small"
+                value={mode}
+                onChange={(value) => changeMode(value as ViewMode)}
+                options={[
+                  { value: 'room', label: t('douyin-link.page.modeRoom') },
+                  { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
+                ]}
+              />
+              <div className="ml-auto flex min-w-0 items-center gap-2">
+                {mode === 'room' ? (
+                  <>
+                    {sessionLine ? (
+                      /* 数字长了就截断（原生 title 兜住全文），不能把右侧控件挤没了 */
+                      <span
+                        className="truncate text-xs opacity-60"
+                        style={{ maxWidth: 'min(560px, 52vw)' }}
+                        title={sessionLine}
+                      >
+                        {sessionLine}
+                      </span>
+                    ) : null}
+                    {phaseTag}
+                  </>
+                ) : (
+                  <>
+                    <span className="truncate text-xs opacity-60">{t('douyin-link.page.dashboardHint')}</span>
+                    {/* 时间区间：自己选一段（默认「今天」）——见 dashRange 的注释 */}
+                    <DatePicker.RangePicker
+                      size="small"
+                      allowClear={false}
+                      value={dashRange}
+                      onChange={(next) => {
+                        if (next && next[0] && next[1]) setDashRange([next[0], next[1]])
+                      }}
+                      placeholder={[t('douyin-link.page.rangeFrom'), t('douyin-link.page.rangeTo')]}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
+            <PillTabBar items={activeTabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />
           </div>
-        ) : null}
+        </Panel>
 
+        {/*
+         * 主体：直播间 = 左栏房间清单 + 右栏详情；数据大屏 = 全宽。
+         * `key={mode}` 让切换时**重放一次淡入动画**（模式一变内容本来就整体替换，所以不会额外丢状态）。
+         */}
         <div
-          className={
-            mode === 'room' ? 'col-span-9 flex min-h-0 flex-col gap-3' : 'col-span-12 flex min-h-0 flex-col gap-3'
-          }
+          key={mode}
+          className="grid min-h-0 flex-1 grid-cols-12 grid-rows-1 gap-3"
+          style={{ animation: 'rb-mode-in .18s ease' }}
         >
           {mode === 'room' ? (
-            <Panel
-              className="shrink-0"
-              title={active ? active.title || active.webRid : t('douyin-link.page.noActive')}
-              extra={
-                <div className="flex min-w-0 items-center gap-2">
-                  {sessionLine ? (
-                    /* 数字长了就截断（原生 title 兜住全文），不能把房间名挤没了 */
-                    <span
-                      className="truncate text-xs font-normal opacity-60"
-                      style={{ maxWidth: 'min(560px, 52vw)' }}
-                      title={sessionLine}
-                    >
-                      {sessionLine}
-                    </span>
-                  ) : null}
-                  {phaseTag}
-                </div>
-              }
-            >
-              <RoomHeader
-                room={active}
-                t={t}
-                tabBar={<PillTabBar items={activeTabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />}
+            <div className="col-span-3 flex min-h-0 flex-col gap-3">
+              <RoomRail
+                rooms={rooms}
+                activeRoom={activeRoom}
+                busy={busy}
+                onAdd={(input) => void addRoom(input)}
+                onSelect={selectRoom}
+                onToggleMonitor={toggleMonitor}
+                onMonitorAll={monitorAll}
+                onRefresh={refreshRoom}
+                onRemove={removeRoom}
+                onClearMessages={clearRoomMessages}
               />
-            </Panel>
-          ) : (
-            /* 数据大屏头部：模式切换（此处没有侧边栏，切换按钮必须留在这里）+ 全局窗口 + 胶囊页签条 */
-            <Panel
-              className="shrink-0"
-              title={t('douyin-link.page.dashboardTitle')}
-              extra={
-                <div className="flex items-center gap-2">
-                  <Segmented
-                    size="small"
-                    value={mode}
-                    onChange={(value) => changeMode(value as ViewMode)}
-                    options={[
-                      { value: 'room', label: t('douyin-link.page.modeRoom') },
-                      { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
-                    ]}
-                  />
-                  <Segmented
-                    size="small"
-                    value={minutes}
-                    onChange={(value) => setMinutes(Number(value))}
-                    options={WINDOWS.map((window) => ({ value: window, label: windowLabel(t, window) }))}
-                  />
-                </div>
-              }
-            >
-              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="text-xs opacity-60">{t('douyin-link.page.dashboardHint')}</span>
-                <div className="ml-auto flex min-w-0 shrink-0 items-center">
-                  <PillTabBar
-                    items={activeTabItems}
-                    activeKey={tab}
-                    onChange={(key) => setTab(key as TabKey)}
-                  />
-                </div>
-              </div>
-            </Panel>
-          )}
+              {addFailure ? <FailureLine failure={addFailure} /> : null}
+              {/* 「每日记录」是某个房间的当天记录：选中了房间才出现 */}
+              {activeRoom ? (
+                <DayRail days={days} selected={daySel} loading={daysLoading} onPick={pickDay} />
+              ) : null}
+            </div>
+          ) : null}
 
-          <PillTabsBody activeKey={tab} onChange={(key) => setTab(key as TabKey)} items={activeTabItems} />
+          <div
+            className={
+              mode === 'room' ? 'col-span-9 flex min-h-0 flex-col gap-3' : 'col-span-12 flex min-h-0 flex-col gap-3'
+            }
+          >
+            {mode === 'room' ? (
+              <Panel className="shrink-0">
+                <RoomHeader room={active} t={t} />
+              </Panel>
+            ) : null}
+            <PillTabsBody activeKey={tab} onChange={(key) => setTab(key as TabKey)} items={activeTabItems} />
+          </div>
         </div>
       </div>
+
+      {/* 模式切换动画的关键帧（见 MODE_SWITCH_CSS） */}
+      <style>{MODE_SWITCH_CSS}</style>
 
       {openUser && activeRoom ? (
         <UserProfileModal
@@ -854,7 +886,7 @@ export default function Page(): React.JSX.Element {
           userId={openGifts.userId}
           name={openGifts.name}
           direction={openGifts.direction}
-          range={mode === 'room' ? effectiveRange : dashboardGiftRange}
+          range={mode === 'room' ? effectiveRange : dashboardRange}
           onClose={() => setOpenGifts(null)}
         />
       ) : null}
@@ -863,30 +895,20 @@ export default function Page(): React.JSX.Element {
 }
 
 /**
- * 房间头：**只有信息行 + 页签条**。
+ * 房间头：**只有这个房间的信息行**。
  *
- * 用户 2026-10-08 的要求：「移除播放音频内容，以及监控开关，移除上面图片的内容」——
- * 原来那一条工具行（监控开关 / 播放 / 清晰度 / 音量 / 刷新信息）整条去掉了：
- * - 监控开关在**左侧房间行**上（每个房间一个）+「全部监控/全部停止」，这里重复一个没有意义；
- * - 播放音频（含清晰度、音量）整体下线：这个插件是**采集分析**用的，不出声；
- * - 刷新信息在房间行的「⋯」菜单里（`RoomRail` 的 refresh 项），功能没丢、只是不再有第二个入口。
+ * 页面头部原来还有「房间名」标题与本场数字，现在**都挪到了顶部的共用工具条**
+ * （见渲染里那段说明：为了让「直播间 / 数据大屏」切换时控件不跳位）——
+ * 房间名由左栏的选中态表达，这里只留主播 / 在线 / 状态 / 房间号 / 库里累计与速率。
+ *
+ * 历史（用户 2026-10-08）：「移除播放音频内容，以及监控开关，移除上面图片的内容」——
+ * 那条工具行（监控开关 / 播放 / 清晰度 / 音量 / 刷新）整条去掉了：开关在左栏房间行上，
+ * 音频与播放整体下线（这是采集分析用的，不出声），刷新在房间行的「⋯」菜单里。
  */
-function RoomHeader(props: {
-  room: RoomRuntime | null
-  t: Translate
-  /** 页签的胶囊条：挂在最后一行（「条/分 · 本场 N 人 · 本场 N 条」）的右端；不传就不渲染 */
-  tabBar?: React.ReactNode
-}): React.JSX.Element {
+function RoomHeader(props: { room: RoomRuntime | null; t: Translate }): React.JSX.Element {
   const { room, t } = props
   if (!room) {
-    /* 没有选中房间时这一行也要在：**胶囊页签不能跟着一起消失**——检索 / 对比这两个页签
-       不需要房间也能看，所以这里退化成「一句空态 + 右端的胶囊条」。 */
-    return (
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="text-xs opacity-50">{t('douyin-link.page.emptyRooms')}</span>
-        {props.tabBar ? <div className="ml-auto flex min-w-0 shrink-0 items-center">{props.tabBar}</div> : null}
-      </div>
-    )
+    return <span className="text-xs opacity-50">{t('douyin-link.page.emptyRooms')}</span>
   }
   return (
     <div className="flex min-w-0 flex-col gap-2">
@@ -915,18 +937,13 @@ function RoomHeader(props: {
         </span>
       </div>
 
-      {/* 最后一行：速率 / 本场人数 / 本场条数，**右端挂胶囊页签**
-          （用户要求：「0 条/分 · 本场 N 人 · 本场 N 条 这个内容的右边放胶囊 tab」）。 */}
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] opacity-60">
-          <span>
-            {t('douyin-link.page.rate', { rate: room.rate })} ·{' '}
-            {t('douyin-link.page.sessionUsers', { count: room.sessionUsers })} ·{' '}
-            {t('douyin-link.page.sessionReceived', { count: room.received })}
-          </span>
-          {room.failure ? <FailureLine failure={room.failure} /> : null}
-        </div>
-        {props.tabBar ? <div className="ml-auto flex min-w-0 shrink-0 items-center">{props.tabBar}</div> : null}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] opacity-60">
+        <span>
+          {t('douyin-link.page.rate', { rate: room.rate })} ·{' '}
+          {t('douyin-link.page.sessionUsers', { count: room.sessionUsers })} ·{' '}
+          {t('douyin-link.page.sessionReceived', { count: room.received })}
+        </span>
+        {room.failure ? <FailureLine failure={room.failure} /> : null}
       </div>
     </div>
   )

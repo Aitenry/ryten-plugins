@@ -106,6 +106,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       kinds: 'Kind breakdown',
       topChat: 'Top chatters',
       range: 'Time range',
+      rangeFrom: 'Start date',
+      rangeTo: 'End date',
       window15: '15 min',
       window60: '1 hour',
       window6h: '6 hours',
@@ -132,6 +134,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       usersTitle: 'Users ({{count}})',
       usersButton: 'Users {{count}}',
       clearUsers: 'Clear user records',
+      usersRefresh: 'Refresh',
       searchUsersPlaceholder: 'Search nickname / Douyin id / user id',
       sortRecent: 'Most recent',
       sortChat: 'Most chat',
@@ -172,7 +175,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
         'This room is not monitored yet: turn on its "monitor" switch and the mic seats (who is on mic), room members and users active this session show up here.',
       presenceNotMonitored: 'not monitored',
       presenceHint:
-        'On mic comes from the chat-room mic sync (in seat order); members is the room member list the room API returns (up to 30); session = users who chatted / joined / liked while monitoring \u2014 **mic seats and session data need monitoring running**. A user we have never seen is shown by user id, because we do not make names up.',
+        'On mic comes from the chat-room mic sync (in seat order); members is the room member list the room API returns (up to 30); session = users who chatted / joined / liked while monitoring \u2014 mic seats and session data need monitoring running. Id-only users are looked up on Douyin by id for a nickname/avatar; only those that cannot be found stay shown as a user id.',
       presenceVoice: 'Voice chat room',
       presenceNoVoice: 'Regular live room',
       colPresenceUser: 'User',
@@ -272,7 +275,9 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       historyAllRooms: 'All rooms',
       historyChat: 'Chat only',
       historyAny: 'All kinds',
-      historyEmpty: 'No stored messages from this user yet (monitor for a while, or switch the scope to "All rooms")',
+      historyFrom: 'Start date',
+      historyTo: 'End date',
+      historyEmpty: 'No stored messages from this user yet (monitor for a while, or change room / date range)',
       historyRefresh: 'Query again',
       /* Real-profile reveal (shows up for every user with an id in the profile dialog) */
       revealSecret: 'Look up this user’s real Douyin profile by id',
@@ -322,7 +327,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
     },
     settingsPage: {
       intro:
-        'All networking and data live in the main process: danmaku comes from the main process connecting **directly in pure Node** to the Douyin push websocket (built-in offline signature + heartbeat + ACK, **no browser and no polling needed**), and audio is pulled by the main process (the host CSP forbids renderer requests to external hosts) — **only the focused room plays audio**, the others just listen. Rooms, messages, user stats and per-minute aggregates are stored in the database, so nothing is lost when the app closes.',
+        'All networking and data live in the main process: danmaku comes from the main process connecting directly in pure Node to the Douyin push websocket (built-in offline signature + heartbeat + ACK, no browser and no polling needed), and audio is pulled by the main process (the host CSP forbids renderer requests to external hosts) — only the focused room plays audio, the others just listen. Rooms, messages, user stats and per-minute aggregates are stored in the database, so nothing is lost when the app closes.',
       qualityLabel: 'Pull quality',
       qualityHint: 'Audio only; lower is lighter (the audio track is identical across qualities)',
       concurrencyLabel: 'Rooms monitored at once',
@@ -336,7 +341,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       autoScrollLabel: 'Auto-scroll to the newest message',
       cookieLabel: 'Logged-in cookie',
       cookieHint:
-        'Douyin **only pushes gift messages to logged-in sessions**; an anonymous session gets no gifts in regular rooms (chat-room gifts work because they arrive as song requests). Paste the full **Douyin web Cookie** here and the realtime channel will send it, so gifts also arrive in regular rooms. Empty = anonymous. The cookie is stored only in the local database and never shipped with the plugin; do not share it.',
+        'Douyin only pushes gift messages to logged-in sessions; an anonymous session gets no gifts in regular rooms (chat-room gifts work because they arrive as song requests). Paste the full Douyin web Cookie here and the realtime channel will send it, so gifts also arrive in regular rooms. Empty = anonymous. The cookie is stored only in the local database and never shipped with the plugin; do not share it.',
       cookiePlaceholder: 'e.g. ttwid=…; passport_csrf_token=…; sessionid=…',
       retentionLabel: 'Message retention',
       retentionHint:
@@ -344,7 +349,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       cleanupNow: 'Clean up now',
       importExportLabel: 'Data backup (import / export)',
       importExportHint:
-        'Export packs every room\u2019s records into one ZIP \u2014 each JSON inside is one room\u2019s live data for one day (message stream, minute buckets, that day\u2019s sessions). Import reads a ZIP back and merges with **de-duplication**: re-importing the same archive adds nothing new.',
+        'Export packs every room\u2019s records into one ZIP \u2014 each JSON inside is one room\u2019s live data for one day (message stream, minute buckets, that day\u2019s sessions). Import reads a ZIP back and merges with de-duplication: re-importing the same archive adds nothing new.',
       exportButton: 'Export data',
       importButton: 'Import data',
       exportDone: 'Exported {{rooms}} rooms and {{days}} days of records ({{messages}} messages)',

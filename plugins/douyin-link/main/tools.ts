@@ -32,7 +32,7 @@ export function createToolContribution(): {
       name: LIVE_TOOL_NAME,
       label: '抖音直播分析器',
       description: desc.zh,
-      icon: 'RiLiveLine',
+      icon: 'RiTiktokFill',
       color: '#8b5cf6'
     },
     build: () =>
@@ -146,12 +146,14 @@ export function createToolContribution(): {
 
           if (action === 'users') {
             const limit = clampLimit(input.limit, 20)
-            const rows = await analyzerHub.listUsers(
+            const page = await analyzerHub.listUsers(
               room.webRid,
               input.sort === 'chat' || input.sort === 'gift' ? input.sort : 'recent',
               String(input.keyword ?? ''),
-              limit
+              limit,
+              0
             )
+            const rows = page.rows
             if (rows.length === 0) return t.usersEmpty
             const lines = [mainFormat(t.usersHeader, { room: roomLabel(room), count: rows.length })]
             for (const row of rows) {

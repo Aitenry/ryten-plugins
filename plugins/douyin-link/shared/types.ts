@@ -596,6 +596,18 @@ export interface GiftBreakdownRow {
   users: number
 }
 
+/**
+ * 用户榜的一页（服务端分页）。
+ *
+ * 为什么要有它：用户榜以前固定只取前 300 条，超出的人**永远翻不到**。
+ * 改成「一页一页查」之后，`total` 让界面知道总人数与页数（见 `UsersPanel`）。
+ */
+export interface UserRankPage {
+  rows: UserRankRow[]
+  /** 命中总人数（用于「共 N 人」与翻页） */
+  total: number
+}
+
 /** 榜单 / 用户列表的一行（= 用户档案的「库口径」，统计是跨会话累计的） */export interface UserRankRow {
   userId: string
   nickname: string

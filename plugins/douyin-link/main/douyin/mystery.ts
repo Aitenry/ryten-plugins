@@ -2,7 +2,7 @@ import { net } from 'electron'
 import logger from 'electron-log'
 import { avatarCache } from '../avatar'
 import { withTimeout } from '../util/deadline'
-import type { MysteryProfile, MysteryReveal } from '../../shared/types'
+import type { MysteryReveal } from '../../shared/types'
 
 /**
  * 「神秘人」还原：抖音匿名送礼 / 发言时只给一个占位名（空串或「匿名」），
@@ -52,10 +52,39 @@ async function getCookie(): Promise<string> {
 }
 
 /**
- * 还原某个用户 id 的真实资料。**按 id 直查**，不需要这个人先在我们库里露过面——
- * 这正是旧版「脱马甲」（只能靠我们自己数据里的同名 id 反推）做不到的地方。
+ * 抖音返回的**原始资料字段**（不下载头像）：昵称/抖音号/secUid/性别/地区/粉丝数等。
+ *
+ * 为什么要单独抽出来：这个接口现在有两个用法——
+ * - 用户档案弹窗的「查看真实资料」（`revealMysteryProfile`，要头像 data URL）；
+ * - 在线观众里只有 id 的人**批量补昵称/头像**（`hub.enrichUnknownUsers`，要的是可入库的静态字段）。
+ * 后者不能拿 data URL 落库，所以底层先给原始字段，data URL 只在上层按需下载。
  */
-export async function revealMysteryProfile(userId: string): Promise<MysteryReveal> {
+export interface RawUserProfile {
+  userId: string
+  nickname: string
+  displayId: string
+  secUid: string
+  signature: string
+  gender: number
+  region: string
+  follower: number
+  following: number
+  awemeCount: number
+  totalFavorited: number
+  verified: string
+  /** 头像 CDN 的 https 地址（拿不到空串；渲染层 CSP 不许外链，要用时再下载成 data URL） */
+  avatarUrl: string
+}
+
+/** 资料查询结果：成功给原始资料，失败给一个可翻译的失败码 */
+export type ProfileFetch =
+  | { ok: true; profile: RawUserProfile }
+  | { ok: false; code: 'badInput' | 'network' | 'notFound' | 'badResponse'; detail?: string }
+
+/**
+ * 还原某个用户 id 的真实资料（**原始字段**，不下载头像）。**按 id 直查**，不需要这个人先露过面。
+ */
+export async function fetchUserProfile(userId: string): Promise<ProfileFetch> {
   const id = String(userId ?? '').trim()
   if (!/^\d{4,}$/.test(id)) return { ok: false, code: 'badInput' }
 
@@ -63,7 +92,7 @@ export async function revealMysteryProfile(userId: string): Promise<MysteryRevea
   try {
     cookie = await getCookie()
   } catch (error) {
-    logger.warn('[douyin-link] 神秘人还原：取 cookie 失败:', describe(error))
+    logger.warn('[douyin-link] 查用户资料：取 cookie 失败:', describe(error))
     return { ok: false, code: 'network', detail: describe(error) }
   }
   if (!cookie) return { ok: false, code: 'network', detail: 'no cookie' }
@@ -81,7 +110,7 @@ export async function revealMysteryProfile(userId: string): Promise<MysteryRevea
   try {
     body = await fetchJson(`${PROFILE_PATH}?${query}`, cookie)
   } catch (error) {
-    logger.warn('[douyin-link] 神秘人还原：请求资料失败:', describe(error))
+    logger.warn('[douyin-link] 查用户资料：请求失败:', describe(error))
     return { ok: false, code: 'network', detail: describe(error) }
   }
 
@@ -94,10 +123,35 @@ export async function revealMysteryProfile(userId: string): Promise<MysteryRevea
 
   const user = json.user
   if (!user || !user.nickname) return { ok: false, code: 'notFound' }
+  return { ok: true, profile: toRaw(id, user) }
+}
 
-  const avatarUrl = pickAvatar(user)
-  const avatar = avatarUrl ? await avatarCache.dataUrl(avatarUrl) : ''
-  return { ok: true, profile: toProfile(id, user, avatar) }
+/**
+ * 还原某个用户 id 的真实资料（弹窗用）：在原始字段之上把头**下载成 data URL**。
+ */
+export async function revealMysteryProfile(userId: string): Promise<MysteryReveal> {
+  const result = await fetchUserProfile(userId)
+  if (!result.ok) return result
+  const raw = result.profile
+  const avatar = raw.avatarUrl ? await avatarCache.dataUrl(raw.avatarUrl) : ''
+  return {
+    ok: true,
+    profile: {
+      userId: raw.userId,
+      nickname: raw.nickname,
+      displayId: raw.displayId,
+      secUid: raw.secUid,
+      signature: raw.signature,
+      gender: raw.gender,
+      region: raw.region,
+      follower: raw.follower,
+      following: raw.following,
+      awemeCount: raw.awemeCount,
+      totalFavorited: raw.totalFavorited,
+      verified: raw.verified,
+      avatar
+    }
+  }
 }
 
 /** 先走 Node 的 fetch，再回落 Chromium 网络栈（与 `avatar.ts` 同款两手准备） */
@@ -135,7 +189,7 @@ function pickAvatar(user: ProfileUser): string {
   return ''
 }
 
-function toProfile(id: string, user: ProfileUser, avatar: string): MysteryProfile {
+function toRaw(id: string, user: ProfileUser): RawUserProfile {
   const region = text(user.ip_location) || text(user.city) || [text(user.province), text(user.country)].filter(Boolean).join(' ')
   return {
     userId: id,
@@ -150,7 +204,7 @@ function toProfile(id: string, user: ProfileUser, avatar: string): MysteryProfil
     awemeCount: count(user.aweme_count),
     totalFavorited: count(user.total_favorited),
     verified: text(user.custom_verify) || text(user.enterprise_verify_reason),
-    avatar
+    avatarUrl: pickAvatar(user)
   }
 }
 

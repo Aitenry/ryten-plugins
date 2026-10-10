@@ -28,6 +28,7 @@ import type {
   SummaryPush,
   UserBatch,
   UserProfile,
+  UserRankPage,
   UserRankRow
 } from '../shared/types'
 
@@ -307,7 +308,7 @@ export const api = {
   userMessages: async (
     webRid: string,
     userId: string,
-    options: { kind?: DanmakuKind | ''; limit?: number; offset?: number } = {}
+    options: { kind?: DanmakuKind | ''; limit?: number; offset?: number; from?: number; to?: number } = {}
   ): Promise<MessagePage> => {
     if (!userId) return { rows: [], total: 0 }
     return normalizeMessagePage(
@@ -316,7 +317,9 @@ export const api = {
         userId,
         kind: options.kind ?? '',
         limit: options.limit ?? 50,
-        offset: options.offset ?? 0
+        offset: options.offset ?? 0,
+        ...(options.from ? { from: options.from } : {}),
+        ...(options.to ? { to: options.to } : {})
       })
     )
   },
@@ -360,8 +363,19 @@ export const api = {
     webRid: string,
     sort: 'recent' | 'chat' | 'gift' = 'recent',
     keyword = '',
-    limit = 200
-  ): Promise<UserRankRow[]> => asList<UserRankRow>(await invoke(`${PREFIX}users-list`, webRid, sort, keyword, limit)),
+    options: { limit?: number; offset?: number } = {}
+  ): Promise<UserRankPage> => {
+    const raw = await invoke(
+      `${PREFIX}users-list`,
+      webRid,
+      sort,
+      keyword,
+      options.limit ?? 200,
+      options.offset ?? 0
+    )
+    const record = isRecord(raw) ? raw : {}
+    return { rows: asList<UserRankRow>(record.rows), total: asCount(record.total) }
+  },
   /**
    * 在线观众（麦上 + 房间成员 + 本场活跃，见 shared/types 的 PresenceRow）。
    *

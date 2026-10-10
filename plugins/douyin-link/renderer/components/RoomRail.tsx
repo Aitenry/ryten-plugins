@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Dropdown, Input, Segmented, Switch } from 'antd'
+import { Button, Dropdown, Input, Switch } from 'antd'
 import { RiAddLine, RiDeleteBin6Line, RiMoreLine, RiRefreshLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
@@ -47,9 +47,6 @@ export function RoomRail(props: {
   rooms: RoomRuntime[]
   activeRoom: string
   busy: boolean
-  /** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合） */
-  mode: 'room' | 'dashboard'
-  onMode: (mode: 'room' | 'dashboard') => void
   onAdd: (input: string) => void
   onSelect: (webRid: string) => void
   onToggleMonitor: (webRid: string, on: boolean) => void
@@ -86,26 +83,14 @@ export function RoomRail(props: {
       className="min-h-0 flex-1"
       title={t('douyin-link.page.rooms', { count: props.rooms.length })}
       extra={
-        <div className="flex items-center gap-2">
-          {/* 模式切换：直播间（单房间页签）↔ 数据大屏（跨房间聚合）；放在「全部停止」旁边 */}
-          <Segmented
-            size="small"
-            value={props.mode}
-            onChange={(value) => props.onMode(value as 'room' | 'dashboard')}
-            options={[
-              { value: 'room', label: t('douyin-link.page.modeRoom') },
-              { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
-            ]}
-          />
-          <Button
-            size="small"
-            type="text"
-            loading={props.busy}
-            onClick={() => props.onMonitorAll(!monitoring)}
-          >
-            {monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
-          </Button>
-        </div>
+        <Button
+          size="small"
+          type="text"
+          loading={props.busy}
+          onClick={() => props.onMonitorAll(!monitoring)}
+        >
+          {monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
+        </Button>
       }
     >
       <div className="flex min-h-0 flex-1 flex-col gap-2">

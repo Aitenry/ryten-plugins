@@ -33,7 +33,7 @@ import {
   type SummaryPush,
   type UserInfo,
   type UserProfile,
-  type UserRankRow,
+  type UserRankPage,
   type UserStats,
   type UserBatch
 } from '../../shared/types'
@@ -44,7 +44,7 @@ import { DirectPushCapture } from '../douyin/push-capture'
 import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
 import { mergeCookieHeaders } from '../douyin/cookie'
 import type { RoomResolveResult } from '../douyin/room'
-import { revealMysteryProfile } from '../douyin/mystery'
+import { fetchUserProfile, revealMysteryProfile } from '../douyin/mystery'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
 import { since, withTimeout } from '../util/deadline'
@@ -147,6 +147,14 @@ const ROOM_REFRESH_MS = 5 * 60 * 1000
 const IDLE_REFRESH_MS = 30 * 60 * 1000
 /** 「在线观众」一次最多合成多少行（面板画不下更多，也免得查询无限膨胀） */
 const PRESENCE_ROWS_CAP = 400
+/**
+ * 「只有 id 的人」按 id 去抖音补资料（在线观众里的成员名单只给 id）：
+ * 单次最多查多少个 / 并发多少 / 同一个 id 失败后的冷却。
+ * 三重约束是为了别把这个接口打爆（用户的诉求是「明明可以获取」，不是「无限抓」）。
+ */
+const ENRICH_BUDGET = 20
+const ENRICH_CONCURRENCY = 2
+const ENRICH_FAIL_COOLDOWN_MS = 10 * 60 * 1000
 /** 保留期清理的节流 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
 
@@ -297,6 +305,10 @@ export class AnalyzerHub {
   private allPushing = false
   private storeCache = { at: 0, data: new Map<string, store.RoomStore>() }
   private dbCache = { at: 0, data: null as DbStats | null }
+  /** 「只有 id 的人」补资料的缓存：成功本进程永久记着，失败按冷却重试（见 enrichUnknownUsers） */
+  private enrichCache = new Map<string, { at: number; ok: boolean }>()
+  /** 正在补资料的房间：避免 presence 每 5 秒叠一批请求 */
+  private enriching = new Set<string>()
   private started = false
 
   /* ------------------------------------------------------------ 生命周期 */
@@ -1573,10 +1585,23 @@ export class AnalyzerHub {
    */
   async allRoomsAnalysis(windowMinutes = 60, range?: { from: number; to: number }): Promise<AllRoomsAnalysis> {
     const requested = Math.round(windowMinutes)
-    const all = !range && !(requested > 0)
-    const minutes = all ? 0 : Math.min(Math.max(5, requested), 1440)
     const toMs = range ? Math.max(1, Math.round(range.to)) : Date.now()
-    const fromMs = range ? Math.max(0, Math.round(range.from)) : all ? 0 : toMs - minutes * 60000
+    const fromMs = range
+      ? Math.max(0, Math.round(range.from))
+      : requested > 0
+        ? toMs - Math.min(Math.max(5, requested), 1440) * 60000
+        : 0
+    const all = !range && !(requested > 0)
+    /**
+     * 窗口分钟数：**给了区间就按区间算**（数据大屏现在是日期区间，跨天也对），
+     * 否则按请求的预设窗口。它同时是平均速率的分母与「活跃分钟 / 窗口分钟」的分母，
+     * 所以不能再用请求里那个可能为 0 的 `windowMinutes` 兜（否则一整天的区间会被当成 5 分钟）。
+     */
+    const minutes = all
+      ? 0
+      : range
+        ? Math.max(1, Math.round((toMs - fromMs) / 60000))
+        : Math.min(Math.max(5, requested), 1440)
 
     // 每房间横截面（口径同 compare）+ 活跃分钟；内存态的房间清单补全标题 / 相位 / 声音
     const aggregates = await store.windowAggregates(fromMs, toMs)
@@ -1641,7 +1666,12 @@ export class AnalyzerHub {
      * `all` 模式下起点取库里最早一条的分钟（`databaseStats` 有 15s 缓存，不会每次都查）。
      */
     const startMinute = all ? minuteOf((await this.databaseStats()).firstMessageAt || toMs) : minuteOf(fromMs)
-    const endMinute = minuteOf(toMs)
+    /**
+     * 趋势的右端**不越过「现在」**：数据大屏默认的区间是「今天 00:00 → 24:00」（右端在未来，
+     * 这样主进程的实时推送不会被当成历史区间跳过），但趋势图不该在「现在」之后画一条 0 值的长尾。
+     * 历史区间（右端在过去）不受影响，`min` 取到的就是它自己。
+     */
+    const endMinute = Math.min(minuteOf(toMs), minuteOf(Date.now()))
     const rawSeries = await store.minuteSeriesAll(startMinute, endMinute)
     const step = Math.max(1, Math.ceil((endMinute - startMinute + 1) / 240))
     const buckets = new Map<number, (typeof rawSeries)[number]>()
@@ -1760,7 +1790,7 @@ export class AnalyzerHub {
         gift: row?.gift ?? 0
       })
     }
-    const topChat = await store.listUsers(webRid, 'chat', '', 10)
+    const topChat = await store.chatRankByPerson(webRid, fromMs, toMs, 10)
     // 礼物榜：窗口内按礼物名聚合（「送了什么、值多少」在界面上只有这里+实时列表能看到）
     const gifts = await store.giftBreakdown(webRid, fromMs, toMs)
     /**
@@ -1854,8 +1884,14 @@ export class AnalyzerHub {
     return store.queryMessages(query)
   }
 
-  async listUsers(webRid: string, sort: store.UserSort, keyword: string, limit: number): Promise<UserRankRow[]> {
-    return store.listUsers(webRid, sort, keyword, limit)
+  async listUsers(
+    webRid: string,
+    sort: store.UserSort,
+    keyword: string,
+    limit: number,
+    offset: number
+  ): Promise<UserRankPage> {
+    return store.listUsersPage(webRid, sort, keyword, limit, offset)
   }
 
   /** 某个人送过的礼物（用户榜悬停时按需查；只查库，不进内存） */
@@ -1975,14 +2011,18 @@ export class AnalyzerHub {
     const stored = await store.getUsers(webRid, [...ids])
     const blank: UserStats = { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 }
     const rows: PresenceRow[] = []
+    /** 昵称查不到的 id：一会儿按 id 去抖音补资料（见 enrichUnknownUsers） */
+    const unknown: string[] = []
     for (const id of ids) {
       const session = recorder.profile(id)
       const anchor = id === anchorId ? state.anchorUser : null
       const row = stored.get(id)
       const stats = row?.stats ?? blank
+      const nickname = session?.nickname || row?.nickname || anchor?.nickname || ''
+      if (!nickname) unknown.push(id)
       rows.push({
         userId: id,
-        nickname: session?.nickname || row?.nickname || anchor?.nickname || '',
+        nickname,
         displayId: session?.displayId || row?.displayId || anchor?.displayId || '',
         avatar: session?.avatar || row?.avatar || anchor?.avatar || '',
         gender: session?.gender || row?.gender || anchor?.gender || 0,
@@ -2000,6 +2040,8 @@ export class AnalyzerHub {
         storedFirstSeen: row?.firstSeen ?? 0
       })
     }
+    // 有「只有 id 的人」就顺手在后台按 id 补资料（fire-and-forget，不拖慢这次返回）
+    if (unknown.length > 0) this.enrichUnknownUsers(webRid, unknown)
     rows.sort((a, b) => {
       // 麦上优先（按麦位序），然后主播，再按本场最近出现
       if (a.seat !== b.seat) return (a.seat || 999) - (b.seat || 999)
@@ -2017,6 +2059,79 @@ export class AnalyzerHub {
       hasInfo: Boolean(state.info),
       updatedAt: Date.now()
     }
+  }
+
+  /**
+   * 补齐「只有 id 的人」的昵称/头像：按 id 去抖音查真实资料并落库（`fetchUserProfile`）。
+   *
+   * 为什么要做（用户 2026-10-10：「解决用户信息丢失，明明可以获取的」）：在线观众的「成员」
+   * 来自接口的 `admin_user_ids_str`，**只有 id**；这些人若从没在本房间发过言/进过场，库里就没昵称，
+   * 界面只能显示一串数字——但按 id 是**可以**查回真实资料的（弹窗的「查看真实资料」就是这条）。
+   *
+   * 三重收敛（别把这个接口打爆）：单次 ≤ `ENRICH_BUDGET` 个、并发 `ENRICH_CONCURRENCY`、
+   * 失败冷却 `ENRICH_FAIL_COOLDOWN_MS`；同一房间同一时刻只跑一批。
+   * 全程 fire-and-forget：查完落库并作废缓存，下一轮 5 秒轮询就能看到昵称/头像。
+   */
+  private enrichUnknownUsers(webRid: string, ids: string[]): void {
+    if (!webRid || this.enriching.has(webRid)) return
+    const now = Date.now()
+    const targets = ids.filter((id) => {
+      const cached = this.enrichCache.get(id)
+      if (!cached) return true
+      // 成功过就不必再查；失败要过了冷却才重试（避免对查不到的人反复打接口）
+      return !cached.ok && now - cached.at >= ENRICH_FAIL_COOLDOWN_MS
+    })
+    if (targets.length === 0) return
+    const budget = targets.slice(0, ENRICH_BUDGET)
+    this.enriching.add(webRid)
+    void (async () => {
+      const found: store.UserStaticRow[] = []
+      let cursor = 0
+      const worker = async (): Promise<void> => {
+        while (cursor < budget.length) {
+          const id = budget[cursor]
+          cursor += 1
+          try {
+            const result = await fetchUserProfile(id)
+            if (result.ok) {
+              const p = result.profile
+              found.push({
+                userId: p.userId,
+                displayId: p.displayId,
+                nickname: p.nickname,
+                gender: p.gender,
+                signature: p.signature,
+                city: p.region,
+                avatar: p.avatarUrl,
+                following: p.following,
+                follower: p.follower,
+                secUid: p.secUid
+              })
+              this.enrichCache.set(id, { at: Date.now(), ok: true })
+            } else {
+              this.enrichCache.set(id, { at: Date.now(), ok: false })
+            }
+          } catch {
+            this.enrichCache.set(id, { at: Date.now(), ok: false })
+          }
+        }
+      }
+      try {
+        await Promise.all(
+          Array.from({ length: Math.min(ENRICH_CONCURRENCY, budget.length) }, () => worker())
+        )
+        if (found.length > 0) {
+          await store.upsertUserStatic(webRid, found)
+          // 补出来的是**新行**：作废「库里累计量」缓存，让房间列表的「用户 N」跟着更新
+          this.storeCache.at = 0
+          logger.info(`[douyin-link] ${webRid} 按 id 补齐了 ${found.length} 个用户的资料`)
+        }
+      } catch (error) {
+        logger.warn(`[douyin-link] ${webRid} 补齐用户资料失败:`, describe(error))
+      } finally {
+        this.enriching.delete(webRid)
+      }
+    })()
   }
 
   /**

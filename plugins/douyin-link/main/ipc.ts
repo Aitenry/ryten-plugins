@@ -163,13 +163,14 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
       hub.dayRecords(String(webRid ?? ''), typeof limit === 'number' ? limit : 90),
     'plugin:douyin-link:rooms-compare': (minutes?: number) =>
       hub.compare(typeof minutes === 'number' ? minutes : 60),
-    'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number) =>
+    'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number, offset?: number) =>
       hub.listUsers(
         String(webRid ?? ''),
         // 排序白名单（gift = 刷礼物榜，按抖币排）
         sort === 'chat' || sort === 'gift' ? sort : 'recent',
         String(keyword ?? ''),
-        typeof limit === 'number' ? limit : 200
+        typeof limit === 'number' ? limit : 200,
+        typeof offset === 'number' ? offset : 0
       ),
     'plugin:douyin-link:user-get': (webRid?: string, userId?: string) =>
       hub.userProfile(String(webRid ?? ''), String(userId ?? '')),

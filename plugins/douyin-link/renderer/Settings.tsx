@@ -178,8 +178,9 @@ export default function Settings(): React.JSX.Element {
 
         <Row label={t('douyin-link.settingsPage.cookieLabel')} hint={t('douyin-link.settingsPage.cookieHint')}>
           <Input.TextArea
-            rows={2}
-            style={{ width: 420 }}
+            size="small"
+            autoSize={{ minRows: 2, maxRows: 5 }}
+            style={{ width: 420, fontSize: 12, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
             placeholder={t('douyin-link.settingsPage.cookiePlaceholder')}
             value={cookieDraft}
             onChange={(event) => setCookieDraft(event.target.value)}
@@ -250,18 +251,25 @@ export default function Settings(): React.JSX.Element {
   )
 }
 
+/**
+ * 一行一个字段：**标签在左、控件在右**（照 WORKSHOP 6.6），说明文字放在**整行的下方**。
+ *
+ * 为什么说明不放标签那一列（用户 2026-10-10：设置里那个输入框「好丑」时的根因）：
+ * 说明往往很长（如 Cookie 那条），挤在标签列里只能窄窄地折成好多行，还会把右侧控件顶到
+ * 容器外、显得又挤又乱。放到整行下方就能用满宽度、只占两三行，标签与控件那一行始终清爽。
+ */
 function Row(props: { label: string; hint?: string; children: React.ReactNode }): React.JSX.Element {
   return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex min-w-0 flex-col">
-        <span>{props.label}</span>
-        {props.hint ? (
-          <span className="text-xs" style={{ opacity: 0.6 }}>
-            {props.hint}
-          </span>
-        ) : null}
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-4">
+        <span className="min-w-0 truncate">{props.label}</span>
+        <div className="shrink-0">{props.children}</div>
       </div>
-      <div className="shrink-0">{props.children}</div>
+      {props.hint ? (
+        <span className="text-xs leading-5" style={{ opacity: 0.6 }}>
+          {props.hint}
+        </span>
+      ) : null}
     </div>
   )
 }

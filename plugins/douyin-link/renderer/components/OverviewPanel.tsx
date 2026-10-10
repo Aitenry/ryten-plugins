@@ -599,11 +599,12 @@ function RankList(props: {
     <div className="flex min-h-0 flex-1 flex-col">
       <ScrollStyle />
       <div data-rb-scroll="" className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
-        {props.rows.map((row, index) => {
+        {props.rows.map((row) => {
           const value = row.stats.chat
           return (
             <div key={row.userId} className="flex min-w-0 items-center gap-2 text-[10px]">
-              <span className="w-4 shrink-0 text-right opacity-50">{index + 1}</span>
+              {/* 名字前面**不带序号**（用户 2026-10-10：「发言榜不需要序号显示」）——
+                  与收礼物榜/送礼物榜同一口径，榜单靠条形长度与数字表达排名 */}
               <span className="min-w-0 flex-1 truncate">{row.nickname || row.userId}</span>
               <span
                 className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full"

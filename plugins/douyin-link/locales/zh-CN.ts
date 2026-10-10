@@ -111,6 +111,8 @@ export const DouyinLinkZhCN = {
       kinds: '类型分布',
       topChat: '发言榜',
       range: '时间范围',
+      rangeFrom: '开始日期',
+      rangeTo: '结束日期',
       window15: '15 分钟',
       window60: '1 小时',
       window6h: '6 小时',
@@ -138,6 +140,7 @@ export const DouyinLinkZhCN = {
       usersTitle: '用户榜（{{count}} 人）',
       usersButton: '用户 {{count}}',
       clearUsers: '清空用户记录',
+      usersRefresh: '刷新',
       searchUsersPlaceholder: '搜昵称 / 抖音号 / 用户 id',
       sortRecent: '最近出现',
       sortChat: '发言最多',
@@ -184,7 +187,7 @@ export const DouyinLinkZhCN = {
         '这个房间还没开始监控：先打开它的「监控」开关，麦位（谁在麦上）、房间成员与本场活跃的人就会出现在这里。',
       presenceNotMonitored: '未监控',
       presenceHint:
-        '麦上来自聊天室的麦位同步（按麦位序）；成员是直播间接口给出的房间成员名单（最多 30 位）；本场 = 这次监控里发言/进场/点赞过的人——**麦位与本场要有监控才拿得到**。只有 id 的人我们还没见过他的昵称，显示为用户号。',
+        '麦上来自聊天室的麦位同步（按麦位序）；成员是直播间接口给出的房间成员名单（最多 30 位）；本场 = 这次监控里发言/进场/点赞过的人——麦位与本场要有监控才拿得到。只有 id 的人会自动按 id 去抖音补昵称/头像，查不到的才显示为用户号。',
       presenceVoice: '语音聊天室',
       presenceNoVoice: '普通直播间',
       colPresenceUser: '用户',
@@ -282,7 +285,9 @@ export const DouyinLinkZhCN = {
       historyAllRooms: '全部房间',
       historyChat: '只看弹幕',
       historyAny: '全部互动',
-      historyEmpty: '库里还没有这个人的消息（先监控一会儿，或把范围切到「全部房间」）',
+      historyFrom: '开始日期',
+      historyTo: '结束日期',
+      historyEmpty: '库里还没有这个人的消息（先监控一会儿，或换个房间 / 时间区间）',
       historyRefresh: '重新查一次',
       /* 真实资料还原（用户档案弹窗里，对所有有 id 的人都出现） */
       revealSecret: '按用户 id 查一下这个人在抖音上的真实资料',
@@ -331,7 +336,7 @@ export const DouyinLinkZhCN = {
     },
     settingsPage: {
       intro:
-        '所有网络与数据都在主进程：弹幕由**主进程纯 Node 直连**抖音推送 websocket（自带离线签名 + 心跳 + ACK，**不需要任何浏览器、也不需要轮询**），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——**同一时间只有分析中的那个直播间出声**，其它房间只监听弹幕。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
+        '所有网络与数据都在主进程：弹幕由主进程纯 Node 直连抖音推送 websocket（自带离线签名 + 心跳 + ACK，不需要任何浏览器、也不需要轮询），音频由主进程拉流（宿主 CSP 不许渲染层请求外部地址）——同一时间只有分析中的那个直播间出声，其它房间只监听弹幕。房间清单、消息、用户统计与分钟聚合都存进数据库，关掉应用也不会丢。',
       qualityLabel: '拉流档位',
       qualityHint: '只放声音，档位越低越省流量（实测各档音频轨一致）',
       concurrencyLabel: '同时监控的房间数',
@@ -345,7 +350,7 @@ export const DouyinLinkZhCN = {
       autoScrollLabel: '弹幕列表自动跟随最新',
       cookieLabel: '登录态 Cookie',
       cookieHint:
-        '抖音**只向已登录会话推送礼物消息**：匿名会话能收到弹幕/进场/点赞，但**收不到礼物**（所以聊天室的礼物以前只能靠点歌那条专线）。**只要你在直播间里看得到礼物、插件里却没有**，就是这个原因——把**抖音网页版的 Cookie** 整行贴进来即可。留空 = 匿名。Cookie 只存在本机数据库、不随插件分发，请勿分享给他人。',
+        '抖音只向已登录会话推送礼物消息：匿名会话能收到弹幕/进场/点赞，但收不到礼物（所以聊天室的礼物以前只能靠点歌那条专线）。只要你在直播间里看得到礼物、插件里却没有，就是这个原因——把抖音网页版的 Cookie 整行贴进来即可。留空 = 匿名。Cookie 只存在本机数据库、不随插件分发，请勿分享给他人。',
       cookiePlaceholder: '例如：ttwid=…; passport_csrf_token=…; sessionid=…',
 
       retentionLabel: '消息保留',
@@ -354,7 +359,7 @@ export const DouyinLinkZhCN = {
       cleanupNow: '立即清理',
       importExportLabel: '数据备份（导入 / 导出）',
       importExportHint:
-        '导出：把全部直播间的记录打包成一个 ZIP——里面每个 JSON 就是某个房间某一天的直播数据（消息流水、分钟聚合、当天会话）。导入：读回一个 ZIP 并**去重**合并，重复导入同一份包不会多出任何一条。',
+        '导出：把全部直播间的记录打包成一个 ZIP——里面每个 JSON 就是某个房间某一天的直播数据（消息流水、分钟聚合、当天会话）。导入：读回一个 ZIP 并去重合并，重复导入同一份包不会多出任何一条。',
       exportButton: '导出数据',
       importButton: '导入数据',
       exportDone: '已导出 {{rooms}} 个直播间、{{days}} 天的记录（{{messages}} 条消息）',

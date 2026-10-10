@@ -22,7 +22,7 @@ export const douyinLinkManifest: PluginManifest = {
    */
   inject: ['route', 'menu', 'settingsSection', 'i18n'],
   routes: [{ path: '/douyin-link' }],
-  menu: { key: 'douyin-link', labelKey: 'douyin-link.menu.title', icon: 'RiLiveLine', order: 60 }
+  menu: { key: 'douyin-link', labelKey: 'douyin-link.menu.title', icon: 'RiTiktokFill', order: 60 }
 }
 
 export default douyinLinkManifest

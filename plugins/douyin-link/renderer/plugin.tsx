@@ -1,4 +1,4 @@
-import { RiLiveLine, RiSettings4Line } from '@remixicon/react'
+import { RiSettings4Line, RiTiktokFill } from '@remixicon/react'
 import { DouyinLinkLocales } from '../locales'
 import manifest from '../manifest'
 import type { Plugin } from '../types/plugin'
@@ -29,7 +29,7 @@ const plugin: Plugin = {
       // 菜单键必须与路由路径一致：点击菜单就是 navigate('/' + key)
       key: 'douyin-link',
       labelKey: 'douyin-link.menu.title',
-      icon: <RiLiveLine size={16} />,
+      icon: <RiTiktokFill size={16} />,
       order: 60
     })
     ctx.use('settingsSection').register({

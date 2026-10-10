@@ -512,13 +512,19 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
 
 export type UserSort = 'recent' | 'chat' | 'gift'
 
-/** 某个房间的用户榜（`keyword` 匹配昵称/抖音号/id） */
-export async function listUsers(
+/**
+ * 某个房间的用户榜（`keyword` 匹配昵称/抖音号/id），**服务端分页**。
+ *
+ * 为什么带 `total` 与 `offset`：以前固定 `limit` 取前 N 条，超出的人界面永远翻不到
+ * （用户 2026-10-10 反馈「不能固定 300」）。现在由界面按页查，`total` 决定页数。
+ */
+export async function listUsersPage(
   webRid: string,
   sort: UserSort = 'recent',
   keyword = '',
-  limit = 200
-): Promise<UserRankRow[]> {
+  limit = 200,
+  offset = 0
+): Promise<{ rows: UserRankRow[]; total: number }> {
   await schemaReady
   return withOrm('douyin-link.listUsers', async (db) => {
     const filters = [eq(douyinLinkUsers.webRid, webRid)]
@@ -544,13 +550,133 @@ export async function listUsers(
           sort === 'gift'
           ? [desc(douyinLinkUsers.diamonds), desc(douyinLinkUsers.gift), desc(douyinLinkUsers.lastSeen)]
           : [desc(douyinLinkUsers.lastSeen)]
+    const where = and(...filters)
+    const totals = await db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(douyinLinkUsers)
+      .where(where)
     const rows = await db
       .select()
       .from(douyinLinkUsers)
-      .where(and(...filters))
+      .where(where)
       .orderBy(...order)
       .limit(Math.min(Math.max(1, limit), 1000))
-    return rows.map(toRankRow)
+      .offset(Math.max(0, Math.round(offset)))
+    return { rows: rows.map(toRankRow), total: totals[0]?.value ?? 0 }
+  })
+}
+
+/**
+ * 概览「发言榜」：**窗口内**发言最多的人（用户 2026-10-10：「发言榜要按照当天的来排」）。
+ *
+ * 与 `listUsersPage('chat')` 的区别：那个用用户表里的**跨会话累计** `chat`，
+ * 这里是直接在**消息流水**里按 `kind = 'chat'` 数这一段的条数——所以「今天」就是今天，
+ * 与概览其余部分（KPI/趋势/礼物榜）的时间范围口径一致。
+ * 静态信息从用户表 left join 取（没有就空），形状对齐 `UserRankRow`。
+ */
+export async function chatRankByPerson(
+  webRid: string,
+  fromMs: number,
+  toMs: number,
+  limit = 10
+): Promise<UserRankRow[]> {
+  if (!webRid) return []
+  await schemaReady
+  return withOrm('douyin-link.chatRankByPerson', async (db) => {
+    const rows = await db
+      .select({
+        userId: douyinLinkMessages.userId,
+        /** 昵称优先用消息里记的那份，再退回用户表（同礼物榜的回退逻辑） */
+        name: sql<string>`coalesce(nullif(max(${douyinLinkMessages.userName}), ''), max(${douyinLinkUsers.nickname}), '')`,
+        chat: sql<number>`count(*)::int`,
+        lastAt: sql<number>`max(${douyinLinkMessages.atMs})::double precision`
+      })
+      .from(douyinLinkMessages)
+      .leftJoin(
+        douyinLinkUsers,
+        and(
+          eq(douyinLinkUsers.webRid, douyinLinkMessages.webRid),
+          eq(douyinLinkUsers.userId, douyinLinkMessages.userId)
+        )
+      )
+      .where(
+        and(
+          eq(douyinLinkMessages.webRid, webRid),
+          eq(douyinLinkMessages.kind, 'chat'),
+          ne(douyinLinkMessages.userId, ''),
+          gte(douyinLinkMessages.atMs, fromMs),
+          lte(douyinLinkMessages.atMs, toMs)
+        )
+      )
+      .groupBy(douyinLinkMessages.userId)
+      .orderBy(desc(sql`count(*)`), desc(sql`max(${douyinLinkMessages.atMs})`))
+      .limit(Math.min(Math.max(1, limit), 100))
+    return rows.map((row) => ({
+      userId: row.userId,
+      nickname: row.name ?? '',
+      displayId: '',
+      avatar: '',
+      gender: 0,
+      signature: '',
+      city: '',
+      badges: [],
+      secUid: '',
+      following: 0,
+      follower: 0,
+      honorLevel: 0,
+      fansClubLevel: 0,
+      stats: { ...EMPTY_STATS(), chat: row.chat },
+      firstSeen: 0,
+      lastSeen: row.lastAt
+    }))
+  })
+}
+
+/**
+ * 只补用户档案的**静态字段**（昵称/头像/等级…），**不动统计与时间**。
+ *
+ * 用在哪：在线观众里「只有 id 的人」（接口的成员名单只给 id）——按 id 去抖音查回真实资料后
+ * 落库，下一轮就能显示昵称与头像（见 `hub.enrichUnknownUsers`）。
+ * 刻意不复用 `upsertUserDeltas`：那个会累加统计、还会写 first/lastSeen，
+ * 一个新补出来的人不该在榜上装成「刚出现过」。
+ */
+export interface UserStaticRow {
+  userId: string
+  displayId: string
+  nickname: string
+  gender: number
+  signature: string
+  city: string
+  avatar: string
+  following: number
+  follower: number
+  secUid: string
+}
+
+export async function upsertUserStatic(webRid: string, rows: UserStaticRow[]): Promise<void> {
+  if (!webRid || rows.length === 0) return
+  await schemaReady
+  await withOrm('douyin-link.upsertUserStatic', async (db) => {
+    for (let index = 0; index < rows.length; index += MSG_CHUNK) {
+      const chunk = rows.slice(index, index + MSG_CHUNK)
+      await db
+        .insert(douyinLinkUsers)
+        .values(chunk.map((row) => ({ webRid, ...row })))
+        .onConflictDoUpdate({
+          target: [douyinLinkUsers.webRid, douyinLinkUsers.userId],
+          set: {
+            displayId: keepNonEmpty('display_id'),
+            nickname: keepNonEmpty('nickname'),
+            signature: keepNonEmpty('signature'),
+            city: keepNonEmpty('city'),
+            avatar: keepNonEmpty('avatar'),
+            secUid: keepNonEmpty('sec_uid'),
+            gender: greatest('gender'),
+            following: greatest('following'),
+            follower: greatest('follower')
+          }
+        })
+    }
   })
 }
 
