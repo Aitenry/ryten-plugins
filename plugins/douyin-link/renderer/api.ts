@@ -22,6 +22,7 @@ import type {
   PresenceSnapshot,
   RoomCompareRow,
   RoomRuntime,
+  RoomSeriesRow,
   RoomSummary,
   RoomTick,
   StoredMessage,
@@ -206,7 +207,8 @@ export function normalizeAllRoomsAnalysis(value: unknown, minutes: number): AllR
     sent: asList<GiftRankRow>(raw.sent),
     received: asList<GiftRankRow>(raw.received),
     gifts: asList<GiftBreakdownRow>(raw.gifts),
-    perRoom: asList<RoomCompareRow>(raw.perRoom)
+    perRoom: asList<RoomCompareRow>(raw.perRoom),
+    roomSeries: asList<RoomSeriesRow>(raw.roomSeries)
   }
 }
 

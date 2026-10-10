@@ -77,6 +77,7 @@ export const DouyinLinkZhCN = {
       tabSearch: '检索',
       tabCompare: '对比',
       tabAll: '全局分析',
+      tabMetrics: '指标',
       /* 模式切换（左栏「全部停止」旁）：直播间 / 数据大屏 */
       modeRoom: '直播间',
       modeDashboard: '数据大屏',
@@ -93,6 +94,23 @@ export const DouyinLinkZhCN = {
       allGiftTypesBoard: '礼物种类榜',
       allGiftTypesEmpty: '这个窗口里还没有礼物',
       allEmpty: '还没有数据',
+      /* 指标（数据大屏）：把每个直播间拆开并排比 */
+      metrics: {
+        kpiTitle: '抖币收入总览',
+        roomsWithGift: '有流水直播间',
+        peakHour: '高峰时段',
+        topRoom: '流水最高',
+        raceTitle: '动态排序柱状图 · 抖币收入',
+        play: '播放',
+        pause: '暂停',
+        raceAt: '当前 {{time}}',
+        intradayTitle: '日内走势图 · 每分钟抖币收入',
+        intradayHint: '每个直播间一条曲线（最多前 {{count}} 个），鼠标悬停看同一时刻各房间的流水',
+        rankTitle: '抖币收入排行',
+        rankHint: '点击切到该直播间',
+        hourlyTitle: '按小时分布',
+        empty: '这个窗口内没有礼物收入（先开始监控，或换个时间区间）'
+      },
       /* 概览 */
       kpiTitle: '关键指标（{{window}}）',
       kpiRecent: '最近 {{window}}',

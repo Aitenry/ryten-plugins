@@ -4,7 +4,7 @@ import { RiVolumeUpLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomCompareRow } from '../../shared/types'
 import api from '../api'
-import { EmptyHint, FitTable, Panel, usePluginPalette } from './ui'
+import { EmptyHint, FitTable, Panel, roomLabel, usePluginPalette } from './ui'
 import { WINDOWS, formatNumber, windowLabel } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -90,7 +90,7 @@ export function ComparePanel(props: {
                 ellipsis: true,
                 render: (_value, row) => (
                   <span className="flex min-w-0 items-center gap-1">
-                    <span className="min-w-0 truncate">{row.title || row.webRid}</span>
+                    <span className="min-w-0 truncate">{roomLabel(row)}</span>
                     {row.audio ? (
                       <span className="shrink-0" style={{ color: palette.accent }}>
                         <RiVolumeUpLine size={12} />

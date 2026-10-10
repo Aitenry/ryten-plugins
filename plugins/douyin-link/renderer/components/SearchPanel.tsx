@@ -4,7 +4,7 @@ import { RiArrowLeftLine, RiArrowRightLine, RiSearchLine } from '@remixicon/reac
 import { useTranslation } from '@host/renderer/i18n'
 import { DANMAKU_KINDS, type DanmakuKind, type RoomRuntime, type StoredMessage } from '../../shared/types'
 import api from '../api'
-import { EmptyHint, FitTable, Panel } from './ui'
+import { EmptyHint, FitTable, Panel, roomLabel } from './ui'
 import { giftRecipientText } from './DanmakuFeed'
 import { formatNumber, stamp } from './OverviewPanel'
 
@@ -71,6 +71,12 @@ export function SearchPanel(props: {
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
+  /** 房间号 → 展示名（`名字 · id`：同名直播间靠 id 区分） */
+  const labelFor = (webRid: string): string => {
+    const room = props.rooms.find((entry) => entry.webRid === webRid)
+    return room ? roomLabel(room) : webRid
+  }
+
   return (
     <Panel className="h-full" title={t('douyin-link.page.searchTitle')}>
       <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -86,7 +92,7 @@ export function SearchPanel(props: {
             }}
             options={[
               { value: '', label: t('douyin-link.page.roomAny') },
-              ...props.rooms.map((room) => ({ value: room.webRid, label: room.title || room.webRid }))
+              ...props.rooms.map((room) => ({ value: room.webRid, label: roomLabel(room) }))
             ]}
           />
           <Select
@@ -166,9 +172,7 @@ export function SearchPanel(props: {
                   width: 108,
                   ellipsis: true,
                   render: (value: string) => (
-                    <span className="min-w-0 truncate opacity-70">
-                      {props.rooms.find((room) => room.webRid === value)?.title || value}
-                    </span>
+                    <span className="min-w-0 truncate opacity-70">{labelFor(value)}</span>
                   )
                 },
                 {

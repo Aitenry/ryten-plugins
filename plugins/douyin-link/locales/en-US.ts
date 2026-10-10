@@ -73,6 +73,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       tabSearch: 'Search',
       tabCompare: 'Compare',
       tabAll: 'Global',
+      tabMetrics: 'Metrics',
       /* mode switch (next to "Stop all" in the left rail): rooms / dashboard */
       modeRoom: 'Rooms',
       modeDashboard: 'Dashboard',
@@ -89,6 +90,23 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       allGiftTypesBoard: 'Gift types',
       allGiftTypesEmpty: 'No gifts in this window',
       allEmpty: 'No data yet',
+      /* metrics (dashboard): compare rooms side by side */
+      metrics: {
+        kpiTitle: 'Coin revenue overview',
+        roomsWithGift: 'Rooms with gifts',
+        peakHour: 'Peak hour',
+        topRoom: 'Top room',
+        raceTitle: 'Bar race · coin revenue',
+        play: 'Play',
+        pause: 'Pause',
+        raceAt: 'now {{time}}',
+        intradayTitle: 'Intraday trend · coins per minute',
+        intradayHint: 'One line per room (top {{count}}), hover to compare all rooms at the same moment',
+        rankTitle: 'Coin revenue ranking',
+        rankHint: 'Click to open that room',
+        hourlyTitle: 'By hour of day',
+        empty: 'No gift revenue in this window (start monitoring, or pick another range)'
+      },
       kpiTitle: 'Key metrics ({{window}})',
       kpiRecent: 'last {{window}}',
       kpiMessages: 'Messages',

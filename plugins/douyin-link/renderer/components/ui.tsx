@@ -286,6 +286,17 @@ export interface PillTabItem {
 const PILL_BASE_CLASS = 'rounded-full px-3 py-1 text-[13px] leading-5 whitespace-nowrap transition-colors'
 
 /**
+ * 直播间展示名：**名字 + 房间号**（形如 `xxx · 123456789`）。
+ *
+ * 为什么强制带 id（用户 2026-10-10：「两个直播间标题一样，我怎么知道是哪一个」）：
+ * 直播间标题可以随时被主播改、也常常撞车（多家主播起同一个标题），只有 `webRid` 是稳定的唯一标识。
+ * 所有「选择 / 切换直播间」的地方（下拉、清单、表格行、图例）都用它，**不要再只写标题**。
+ */
+export function roomLabel(room: { title: string; webRid: string }): string {
+  return room.title ? `${room.title} · ${room.webRid}` : room.webRid
+}
+
+/**
  * 胶囊条自身的样式：**用属性选择器**（与 `SCROLLBAR_CSS` 同一个理由——不往 plugin.css 里引类名，
  * 也就不会撞上验收电池的样式覆盖检查）。
  *
