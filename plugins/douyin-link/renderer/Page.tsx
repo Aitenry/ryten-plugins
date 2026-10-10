@@ -28,6 +28,7 @@ import {
   PillTabBar,
   PillTabsBody,
   formModalProps,
+  cleanName,
   roomLabel,
   usePluginPalette
 } from './components/ui'
@@ -926,7 +927,7 @@ function RoomHeader(props: { room: RoomRuntime | null; t: Translate }): React.JS
     <div className="flex min-w-0 flex-col gap-2">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs opacity-70">
         <span className="min-w-0 truncate">
-          {t('douyin-link.page.anchor')}：{room.anchor || '-'}
+          {t('douyin-link.page.anchor')}：{cleanName(room.anchor) || '-'}
         </span>
         <span>
           {t('douyin-link.page.online')}：{room.onlineText || '-'}
@@ -939,7 +940,7 @@ function RoomHeader(props: { room: RoomRuntime | null; t: Translate }): React.JS
               : t('douyin-link.page.liveUnknown')}
         </span>
         <span>{room.webRid}</span>
-        {room.note ? <span className="min-w-0 truncate">· {room.note}</span> : null}
+        {cleanName(room.note) ? <span className="min-w-0 truncate">· {cleanName(room.note)}</span> : null}
         <span>
           {t('douyin-link.page.storedLine', {
             messages: formatNumber(room.stored.messages),

@@ -3,7 +3,9 @@ import { Button, Slider, theme } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api, { normalizeRoomSummary } from '../api'
-import { ChartBox, EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
+import { EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
+import { EChart } from './EChart'
+import type { ChartOption } from '../lib/echarts'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -189,9 +191,7 @@ export function OverviewPanel(props: {
           {!summary || summary.messages === 0 ? (
             <EmptyHint text={loading ? t('douyin-link.page.loading') : t('douyin-link.page.noData')} />
           ) : (
-            <ChartBox>
-              {(size) => <TrendChart series={summary.series} size={size} palette={palette} t={t} />}
-            </ChartBox>
+            <TrendChart series={summary.series} palette={palette} t={t} />
           )}
         </Panel>
 
@@ -307,29 +307,20 @@ const TREND_KEYS = ['chat', 'member', 'like', 'social', 'gift'] as const
 type TrendKey = (typeof TREND_KEYS)[number]
 
 /**
- * 分钟趋势：堆叠柱（弹幕/进场/点赞/关注/礼物）+ 三条网格线 + 首末时间。
+ * 分钟趋势：堆叠柱（弹幕/进场/点赞/关注/礼物）+ 三档网格线 + 首末时间。**用 ECharts 画。**
  *
  * **图例 + 悬浮信息**（用户 2026-10-08：「鼠标放上去需要显示信息，不然我怎么知道是什么东西」）：
- * - 图例常驻在图上方：五个色块配名字，不用悬停就知道哪根柱子是什么；
- * - 悬停到某根柱子上：柱子上打一条竖线、那一根提亮，旁边弹出**结构化面板**
+ * - 图例常驻（ECharts 原生 legend）：五个色块配名字，不用悬停就知道哪根柱子是什么；
+ * - 悬停到某根柱子上：`axis` tooltip 弹出**结构化面板**
  *   （标题行 = 这段时间 + 合计，发丝线，下面按系列左右对齐列数字）。
  */
 export function TrendChart(props: {
   series: RoomSummary['series']
-  size: { width: number; height: number }
   palette: PluginPalette
   t: Translate
 }): React.JSX.Element {
-  const { series, size, palette, t } = props
+  const { series, palette, t } = props
   const { token } = theme.useToken()
-  const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(null)
-  const legendHeight = 18
-  const padLeft = 34
-  const padBottom = 16
-  const padTop = 8
-  const svgHeight = Math.max(48, size.height - legendHeight)
-  const plotWidth = Math.max(10, size.width - padLeft - 8)
-  const plotHeight = Math.max(10, svgHeight - padBottom - padTop)
   // 分钟多的时候合并成桶，柱宽才看得见（最多画 60 根）
   const bucket = Math.max(1, Math.ceil(series.length / 60))
   const buckets: Array<{ at: number; chat: number; member: number; like: number; social: number; gift: number }> = []
@@ -344,17 +335,6 @@ export function TrendChart(props: {
       gift: sum(slice, 'gift')
     })
   }
-  const totals = buckets.map((item) => item.chat + item.member + item.like + item.social + item.gift)
-  const max = Math.max(1, ...totals)
-  const step = plotWidth / Math.max(1, buckets.length)
-  const barWidth = Math.max(1, step - 1)
-  const colors: Record<TrendKey, string> = {
-    chat: palette.accent,
-    member: palette.up,
-    like: palette.down,
-    social: palette.axis,
-    gift: palette.warn
-  }
   const last = buckets.length > 0 ? buckets[buckets.length - 1].at + (bucket - 1) * 60000 : 0
   const spansDays = buckets.length > 0 && new Date(buckets[0].at).toDateString() !== new Date(last).toDateString()
   /** 这一根柱子代表的时间段（合并成粗桶时要写清「从几点到几点」） */
@@ -362,160 +342,138 @@ export function TrendChart(props: {
     const head = spansDays ? stamp(at) : clock(at)
     return bucket > 1 ? `${head} → ${clock(at + (bucket - 1) * 60000)}` : head
   }
-  const hovered = hover ? buckets[hover.index] : null
-  const hoveredIndex = hover?.index ?? -1
-
-  return (
-    /* 显式尺寸 + relative：悬浮面板是 absolute，参照物必须是图表自己的盒子
-       （父容器 ChartBox 的高度是 flex 算出来的，`h-full` 会退化成 0，面板就会跑到面板外面去） */
-    <div className="relative" style={{ width: size.width, height: size.height }}>
-      {/* 图例：五个系列的名字与颜色（悬浮面板里是同一份顺序） */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px]" style={{ height: legendHeight }}>
-        {TREND_KEYS.map((key) => (
-          <span key={key} className="flex items-center gap-1" style={{ color: palette.axis }}>
-            <span className="inline-block rounded-sm" style={{ width: 8, height: 8, backgroundColor: colors[key] }} />
-            {t(`douyin-link.kinds.${key}`)}
-          </span>
-        ))}
-      </div>
-      <svg
-        width={size.width}
-        height={svgHeight}
-        role="img"
-        onMouseMove={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect()
-          const x = event.clientX - rect.left
-          const y = event.clientY - rect.top
-          const index = Math.floor((x - padLeft) / step)
-          if (index < 0 || index >= buckets.length) setHover(null)
-          else setHover({ index, x, y })
-        }}
-        onMouseLeave={() => setHover(null)}
-      >
-        {[0, 0.5, 1].map((ratio) => {
-          const y = padTop + plotHeight * ratio
-          return (
-            <g key={ratio}>
-              <line x1={padLeft} x2={size.width - 8} y1={y} y2={y} stroke={palette.split} strokeWidth={1} />
-              <text x={padLeft - 6} y={y + 3} textAnchor="end" fontSize={10} fill={palette.axis}>
-                {formatNumber(Math.round(max * (1 - ratio)))}
-              </text>
-            </g>
-          )
-        })}
-        {buckets.map((item, index) => {
-          const x = padLeft + index * step
-          let drawn = 0
-          return (
-            <g key={item.at}>
-              {TREND_KEYS.map((key) => {
-                const value = item[key]
-                if (value <= 0) return null
-                const height = (value / max) * plotHeight
-                const y = padTop + plotHeight - drawn - height
-                drawn += height
-                return (
-                  <rect
-                    key={key}
-                    x={x}
-                    y={y}
-                    width={barWidth}
-                    height={Math.max(0.6, height)}
-                    fill={colors[key]}
-                    // 悬停的那一根提亮，别让它融在一堆柱子里
-                    opacity={hoveredIndex < 0 || hoveredIndex === index ? 0.9 : 0.45}
-                    rx={1}
-                  />
-                )
-              })}
-            </g>
-          )
-        })}
-        {hover ? (
-          <line
-            x1={padLeft + hover.index * step + step / 2}
-            x2={padLeft + hover.index * step + step / 2}
-            y1={padTop}
-            y2={padTop + plotHeight}
-            stroke={palette.accent}
-            strokeWidth={1}
-            strokeDasharray="2 2"
-            opacity={0.7}
-          />
-        ) : null}
-        <text x={padLeft} y={svgHeight - 4} fontSize={10} fill={palette.axis}>
-          {clock(buckets[0]?.at ?? 0)}
-        </text>
-        <text x={size.width - 8} y={svgHeight - 4} textAnchor="end" fontSize={10} fill={palette.axis}>
-          {clock(last)}
-        </text>
-      </svg>
-      {/* 悬浮面板：标题行 + 发丝线 + 左右对齐的明细（不用一行字符串 tooltip） */}
-      {hovered && hover ? (
-        <div
-          className="pointer-events-none absolute rounded-md px-2 py-1.5 text-[10px]"
-          style={{
-            left: Math.min(Math.max(4, hover.x + 14), Math.max(4, size.width - 152)),
-            top:
-              hover.y + 14 + 104 > size.height
-                ? Math.max(2, hover.y - 104 - 8)
-                : hover.y + 14,
-            width: 148,
-            backgroundColor: token.colorBgElevated,
-            border: `1px solid ${palette.split}`,
-            boxShadow: token.boxShadowSecondary,
-            color: palette.text
-          }}
-        >
-          <div className="flex items-baseline justify-between gap-2 font-medium">
-            <span className="min-w-0 truncate">{bucketLabel(hovered.at)}</span>
-            <span style={{ color: palette.warn }}>{formatNumber(totals[hover.index])}</span>
-          </div>
-          <div className="mt-1 border-t pt-1" style={{ borderColor: palette.split }}>
-            {TREND_KEYS.map((key) => (
-              <div key={key} className="flex items-baseline justify-between gap-2">
-                <span className="flex items-center gap-1" style={{ color: palette.axis }}>
-                  <span
-                    className="inline-block rounded-sm"
-                    style={{ width: 6, height: 6, backgroundColor: colors[key] }}
-                  />
-                  {t(`douyin-link.kinds.${key}`)}
-                </span>
-                <span>{formatNumber(hovered[key])}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  )
+  const totals = buckets.map((item) => item.chat + item.member + item.like + item.social + item.gift)
+  const colors: Record<TrendKey, string> = {
+    chat: palette.accent,
+    member: palette.up,
+    like: palette.down,
+    social: palette.axis,
+    gift: palette.warn
+  }
+  const option: ChartOption = {
+    animation: false,
+    grid: { left: 36, right: 10, top: 24, bottom: 18 },
+    legend: {
+      top: 0,
+      icon: 'roundRect',
+      itemWidth: 8,
+      itemHeight: 8,
+      itemGap: 12,
+      textStyle: { color: palette.axis, fontSize: 10 }
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: palette.accent, type: 'dashed', width: 1 } },
+      backgroundColor: token.colorBgElevated,
+      borderColor: palette.split,
+      borderWidth: 1,
+      padding: [6, 8],
+      textStyle: { color: palette.text, fontSize: 10 },
+      extraCssText: `width:148px;border-radius:8px;box-shadow:${token.boxShadowSecondary}`,
+      // 结构化悬浮面板：标题行（时间段 + 合计）+ 发丝线 + 各系列左右对齐
+      formatter: (params: unknown): string => {
+        const first = (Array.isArray(params) ? params[0] : params) as { dataIndex?: number } | undefined
+        const index = first?.dataIndex ?? -1
+        const bucketItem = buckets[index]
+        if (!bucketItem) return ''
+        const head = `<div style="display:flex;justify-content:space-between;gap:8px;font-weight:500"><span>${bucketLabel(bucketItem.at)}</span><span style="color:${palette.warn}">${formatNumber(totals[index])}</span></div>`
+        const rows = TREND_KEYS.map(
+          (key) =>
+            `<div style="display:flex;justify-content:space-between;gap:8px"><span><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${colors[key]};margin-right:4px"></span>${t(`douyin-link.kinds.${key}`)}</span><span>${formatNumber(bucketItem[key])}</span></div>`
+        ).join('')
+        return `${head}<div style="margin-top:4px;border-top:1px solid ${palette.split};padding-top:4px">${rows}</div>`
+      }
+    },
+    xAxis: {
+      type: 'category',
+      data: buckets.map((item) => bucketLabel(item.at)),
+      axisLine: { lineStyle: { color: palette.split } },
+      axisTick: { show: false },
+      axisLabel: { color: palette.axis, fontSize: 10, hideOverlap: true }
+    },
+    yAxis: {
+      type: 'value',
+      splitNumber: 3,
+      splitLine: { lineStyle: { color: palette.split } },
+      axisLabel: { color: palette.axis, fontSize: 10 }
+    },
+    series: TREND_KEYS.map((key) => ({
+      name: t(`douyin-link.kinds.${key}`),
+      type: 'bar' as const,
+      stack: 'total',
+      barMaxWidth: 16,
+      itemStyle: { color: colors[key] },
+      data: buckets.map((item) => item[key])
+    }))
+  }
+  return <EChart option={option} themeKey={palette.dark ? 'dark' : 'light'} />
 }
 
+/** 消息类型分布：横向条形（ECharts），右侧标注「数量 · 占比」 */
 function KindBars(props: {
   kinds: Array<{ kind: string; count: number }>
   t: Translate
   palette: PluginPalette
 }): React.JSX.Element {
-  const max = Math.max(1, ...props.kinds.map((entry) => entry.count))
-  const total = props.kinds.reduce((sum, entry) => sum + entry.count, 0) || 1
+  const { kinds, t, palette } = props
+  const { token } = theme.useToken()
+  const total = kinds.reduce((sum, entry) => sum + entry.count, 0) || 1
+  // ECharts 的类目轴自下而上，倒序后「数量最多的类型」显示在最上方
+  const rows = [...kinds].reverse()
+  const option: ChartOption = {
+    animation: false,
+    grid: { left: 4, right: 72, top: 4, bottom: 4, containLabel: true },
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: token.colorBgElevated,
+      borderColor: palette.split,
+      borderWidth: 1,
+      padding: [4, 8],
+      textStyle: { color: palette.text, fontSize: 10 },
+      extraCssText: `border-radius:8px;box-shadow:${token.boxShadowSecondary}`,
+      formatter: (params: unknown): string => {
+        const item = params as { name?: string; value?: number }
+        const value = item.value ?? 0
+        return `${item.name ?? ''}：${formatNumber(value)} · ${Math.round((value / total) * 100)}%`
+      }
+    },
+    xAxis: { type: 'value', show: false },
+    yAxis: {
+      type: 'category',
+      data: rows.map((entry) => t(`douyin-link.kinds.${entry.kind}`)),
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: palette.axis, fontSize: 10 }
+    },
+    series: [
+      {
+        type: 'bar' as const,
+        barWidth: 8,
+        showBackground: true,
+        backgroundStyle: { color: palette.track, borderRadius: 999 },
+        itemStyle: { color: palette.accent, borderRadius: 999 },
+        label: {
+          show: true,
+          position: 'right',
+          color: palette.text,
+          fontSize: 10,
+          formatter: (params: unknown): string => {
+            const value = (params as { value?: number }).value ?? 0
+            return `${formatNumber(value)} · ${Math.round((value / total) * 100)}%`
+          }
+        },
+        data: rows.map((entry) => entry.count)
+      }
+    ]
+  }
+  // 类型数量决定高度（这个面板是自适应高度，ECharts 需要显式像素高）
   return (
-    <div className="flex flex-col gap-1.5">
-      {props.kinds.map((entry) => (
-        <div key={entry.kind} className="flex min-w-0 items-center gap-2 text-[10px]">
-          <span className="w-12 shrink-0 truncate opacity-60">{props.t(`douyin-link.kinds.${entry.kind}`)}</span>
-          <span className="h-2 min-w-0 flex-1 overflow-hidden rounded-full" style={{ backgroundColor: props.palette.track }}>
-            <span
-              className="block h-full rounded-full"
-              style={{ width: `${Math.max(2, (entry.count / max) * 100)}%`, backgroundColor: props.palette.accent }}
-            />
-          </span>
-          <span className="w-20 shrink-0 text-right">
-            {formatNumber(entry.count)}
-            <span className="opacity-50"> · {Math.round((entry.count / total) * 100)}%</span>
-          </span>
-        </div>
-      ))}
-    </div>
+    <EChart
+      option={option}
+      className="w-full"
+      style={{ height: rows.length * 24 + 8 }}
+      themeKey={palette.dark ? 'dark' : 'light'}
+    />
   )
 }
 

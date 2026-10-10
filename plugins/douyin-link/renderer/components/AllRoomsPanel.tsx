@@ -4,7 +4,7 @@ import { RiVolumeUpLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { AllRoomsAnalysis, GiftBreakdownRow, RoomCompareRow } from '../../shared/types'
 import api, { normalizeAllRoomsAnalysis } from '../api'
-import { ChartBox, EmptyHint, FitTable, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
+import { EmptyHint, FitTable, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
 import { GiftRankBoard, TrendChart, formatNumber } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -123,7 +123,7 @@ export function AllRoomsPanel(props: {
           {!analysis || analysis.messages === 0 ? (
             <EmptyHint text={emptyText} />
           ) : (
-            <ChartBox>{(size) => <TrendChart series={analysis.series} size={size} palette={palette} t={t} />}</ChartBox>
+            <TrendChart series={analysis.series} palette={palette} t={t} />
           )}
         </Panel>
 
