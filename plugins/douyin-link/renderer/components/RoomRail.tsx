@@ -1,6 +1,13 @@
 import { useState } from 'react'
 import { Button, Dropdown, Input, Switch } from 'antd'
-import { RiAddLine, RiDeleteBin6Line, RiMoreLine, RiRefreshLine } from '@remixicon/react'
+import {
+  RiAddLine,
+  RiDeleteBin6Line,
+  RiMoreLine,
+  RiPlayCircleLine,
+  RiRefreshLine,
+  RiStopCircleLine
+} from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
 import { FitList, HOVER_BG, Panel, usePluginPalette } from './ui'
@@ -89,17 +96,24 @@ export function RoomRail(props: {
             onChange={(event) => setDraft(event.target.value)}
             onPressEnter={add}
           />
-          <Button size="small" type="primary" icon={<RiAddLine size={14} />} loading={props.busy} onClick={add}>
-            {t('douyin-link.page.add')}
-          </Button>
+          <Button
+            size="small"
+            type="primary"
+            icon={<RiAddLine size={14} />}
+            loading={props.busy}
+            title={t('douyin-link.page.add')}
+            aria-label={t('douyin-link.page.add')}
+            onClick={add}
+          />
           <Button
             size="small"
             type="text"
             loading={props.busy}
+            title={monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
+            aria-label={monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
+            icon={monitoring ? <RiStopCircleLine size={16} /> : <RiPlayCircleLine size={16} />}
             onClick={() => props.onMonitorAll(!monitoring)}
-          >
-            {monitoring ? t('douyin-link.page.monitorStopAll') : t('douyin-link.page.monitorAll')}
-          </Button>
+          />
         </div>
 
         {props.rooms.length === 0 ? (

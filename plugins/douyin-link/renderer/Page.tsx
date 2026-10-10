@@ -764,59 +764,58 @@ export default function Page(): React.JSX.Element {
     <PageShell>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {/*
-         * 顶部工具条：**两个模式共用同一条**。
+         * 顶部工具条：两个模式共用同一条，且**模式切换、内容页签、右侧状态都在同一行**。
          *
-         * 为什么（用户 2026-10-10：「直播间与数据大屏的切换不够丝滑，因为两者的位置不一致」）：
-         * 原来模式切换在直播间模式里住在左栏、切到大屏又跑到右侧头部——位置来回跳。
-         * 现在做成同一条里的 tab（最左），并**替换掉两边原来各自的左标题**（房间名 / 「数据大屏」），
-         * 内容页签条也固定在这一条里，所以切换时控件原地不动、不再跳位。
-         * 右侧只放跟当前模式相关的控件：直播间 = 本场数字 + 相位；大屏 = 时间区间。
+         * 为什么（用户 2026-10-10）：「直播间与数据大屏的切换不够丝滑，因为两者的位置不一致」，
+         * 以及「下面的 tab 独立一行真丑」——所以模式切换（左）与内容页签（紧挨着）并排，
+         * 右侧只放跟当前模式相关的控件（直播间 = 本场数字 + 相位；大屏 = 时间区间）。
+         * 一行放不下时靠 `flex-wrap` 换行，不再固定占两行。
          */}
         <Panel className="shrink-0">
-          <div className="flex flex-col gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-              <Segmented
-                size="small"
-                value={mode}
-                onChange={(value) => changeMode(value as ViewMode)}
-                options={[
-                  { value: 'room', label: t('douyin-link.page.modeRoom') },
-                  { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
-                ]}
-              />
-              <div className="ml-auto flex min-w-0 items-center gap-2">
-                {mode === 'room' ? (
-                  <>
-                    {sessionLine ? (
-                      /* 数字长了就截断（原生 title 兜住全文），不能把右侧控件挤没了 */
-                      <span
-                        className="truncate text-xs opacity-60"
-                        style={{ maxWidth: 'min(560px, 52vw)' }}
-                        title={sessionLine}
-                      >
-                        {sessionLine}
-                      </span>
-                    ) : null}
-                    {phaseTag}
-                  </>
-                ) : (
-                  <>
-                    <span className="truncate text-xs opacity-60">{t('douyin-link.page.dashboardHint')}</span>
-                    {/* 时间区间：自己选一段（默认「今天」）——见 dashRange 的注释 */}
-                    <DatePicker.RangePicker
-                      size="small"
-                      allowClear={false}
-                      value={dashRange}
-                      onChange={(next) => {
-                        if (next && next[0] && next[1]) setDashRange([next[0], next[1]])
-                      }}
-                      placeholder={[t('douyin-link.page.rangeFrom'), t('douyin-link.page.rangeTo')]}
-                    />
-                  </>
-                )}
-              </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+            <Segmented
+              size="small"
+              value={mode}
+              onChange={(value) => changeMode(value as ViewMode)}
+              options={[
+                { value: 'room', label: t('douyin-link.page.modeRoom') },
+                { value: 'dashboard', label: t('douyin-link.page.modeDashboard') }
+              ]}
+            />
+            <div className="flex items-center">
+              <PillTabBar items={activeTabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />
             </div>
-            <PillTabBar items={activeTabItems} activeKey={tab} onChange={(key) => setTab(key as TabKey)} />
+            <div className="ml-auto flex min-w-0 items-center gap-2">
+              {mode === 'room' ? (
+                <>
+                  {sessionLine ? (
+                    /* 数字长了就截断（原生 title 兜住全文），不能把右侧控件挤没了 */
+                    <span
+                      className="truncate text-xs opacity-60"
+                      style={{ maxWidth: 'min(560px, 52vw)' }}
+                      title={sessionLine}
+                    >
+                      {sessionLine}
+                    </span>
+                  ) : null}
+                  {phaseTag}
+                </>
+              ) : (
+                <>
+                  <span className="truncate text-xs opacity-60">{t('douyin-link.page.dashboardHint')}</span>
+                  {/* 时间区间：自己选一段（默认「今天」）——见 dashRange 的注释 */}
+                  <DatePicker.RangePicker
+                    size="small"
+                    allowClear={false}
+                    value={dashRange}
+                    onChange={(next) => {
+                      if (next && next[0] && next[1]) setDashRange([next[0], next[1]])
+                    }}
+                    placeholder={[t('douyin-link.page.rangeFrom'), t('douyin-link.page.rangeTo')]}
+                  />
+                </>
+              )}
+            </div>
           </div>
         </Panel>
 
