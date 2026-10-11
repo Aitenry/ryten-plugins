@@ -69,9 +69,9 @@ export function anonymousMaskTail(mask: string | null | undefined): string {
 }
 
 /**
- * 一个名字是不是**信息量为零**的占位名（空串 / 「匿名」/「神秘人」/「anonymous」）。
+ * 一个名字是不是**信息量为零**的占位名（空串 / 「匿名」/「神秘人」/「anonymous」/ 打码名）。
  *
- * 与马甲名（`dou2056511` 这类）的区别：马甲名是抖音**给这个人**的名字，可以用来区分人；
+ * 与马甲名的区别：马甲名（`dou2056511`）是抖音**给这个人**的名字，可以用来区分人；
  * 占位名是抖音**给这一类人**的名字，谁看了都是它。所以只有占位名要被丢掉、去别的字段找区分度。
  */
 export function isAnonymousName(name: string | null | undefined): boolean {
@@ -79,7 +79,27 @@ export function isAnonymousName(name: string | null | undefined): boolean {
     .replace(/\s+/g, '')
     .toLowerCase()
   if (text === '') return true
+  if (isGenericMaskName(name)) return true
   return ANON_NAME_HINTS.some((hint) => text.includes(hint.toLowerCase()))
+}
+
+/**
+ * 是不是**通用打码名**（`秋***`、`M***`、`🐶***` 这种「首字 + 星号」）。
+ *
+ * 2026-10-12 真机实测（`spike/anon-live-probe.mjs`，8 个在播房间里抓到 1,300+ 条匿名帧）：
+ * 现在抖音给隐藏身份观众显示的名字**就是**这个形状——所有消息类型（弹幕 / 进场 / 点赞 / 关注 /
+ * 语音弹幕 / 麦位…）都一样，`id` 全是占位 `111111`，`sec_uid` 全空。
+ *
+ * 为什么必须单独认出来：这种名字**不是身份**（十几个人都叫 `秋***`，用户报障的「内容重复」
+ * 就是这么来的）。把它当马甲名用，等于把不同的人重新并成一份档案；
+ * 而如果完全不管，又会让这些人合成一个「未知」桶。所以调用方按**「一个房间一个未知桶」**
+ * 处理（见 `hub.identifyBatch` 的 `anonymousKeyOf`）。
+ */
+export function isGenericMaskName(name: string | null | undefined): boolean {
+  const text = String(name ?? '').trim()
+  if (!text) return false
+  /** 星号（含全角）/ 各种打点字符连续 2 个以上，且后面没有别的可见字符 */
+  return /[*＊•·∙※]{2,}$/.test(text)
 }
 
 /**
@@ -88,6 +108,16 @@ export function isAnonymousName(name: string | null | undefined): boolean {
  * 界面上的「用户 id」那一栏要的是抖音真正给的串（`111111`），不是我们的内部键。
  */
 export function rawDouyinId(id: string | null | undefined): string {
+  return baseId(id)
+}
+
+/**
+ * 合成键里那前半段（占位抖音 id）——`anon:111111#dou2056511` → `111111`，普通 id 原样。
+ *
+ * 与 `rawDouyinId` 是同一条实现，分开命名只为读起来不出戏：展示用 `rawDouyinId()`，
+ * 拼内部键（例如「一个房间一个未知桶」）用这个。
+ */
+export function anonymousBaseId(id: string | null | undefined): string {
   return baseId(id)
 }
 
@@ -106,13 +136,18 @@ const MASK_MAX = 24
 /**
  * 认人用的「马甲」：优先昵称，其次抖音号，都没有就退回等级组合。
  *
+ * **通用打码名不算马甲**（`秋***`：先看原文再清洗，否则 `cleanMask` 会把尾巴的星号剪掉、
+ * 只剩一个「秋」字，那反而成了会把十几个人并起来的假身份——2026-10-12 工装抓到的那版）。
+ *
  * 为什么等级组合要留在最后（它其实**不保证唯一**，同一场里两个人等级一模一样是常事）：
- * 总比所有匿名人共用一个 id 强——那必然把所有人并成一个人；这个只在「连名字都没有」的
- * 残缺帧上兜底，而且**不参与展示**（下面 `displayNickname` 把它挡掉了）。
+ * 总比所有匿名人共用一个 id 强；这个只在「连名字都没有」的残缺帧上兜底，
+ * 而且**不参与展示**（`displayNickname` 会把它挡掉），调用方还会把它归到「一个房间一个未知桶」。
  */
 export function anonymousMask(source: AnonymousIdentitySource): string {
   const nickname = cleanMask(source.nickname)
-  if (nickname && !isAnonymousName(nickname)) return MASK_MAX < nickname.length ? hashMasks(nickname) : nickname
+  if (nickname && !isAnonymousName(nickname) && !isGenericMaskName(source.nickname)) {
+    return MASK_MAX < nickname.length ? hashMasks(nickname) : nickname
+  }
   const displayId = String(source.displayId ?? '').trim()
   if (displayId && displayId !== ANONYMOUS_ID) return displayId
   const secUid = String(source.secUid ?? '').trim()

@@ -189,6 +189,26 @@ check('展示用真 id：普通 id 不动', anon.rawDouyinId('7300000000001'), '
 check('占位名不往界面塞（空串）', anon.displayNickname('☞      匿名  -'), '')
 check('马甲名照显', anon.displayNickname('dou2056511'), 'dou2056511')
 check('抖音号里的占位串丢掉', anon.displayDisplayId('111111'), '')
+/**
+ * **通用打码名**（真机实测的形状）：`秋***` / `M***` / `🐶***`。
+ * 这种名字抖音给**所有**隐藏身份观众都用，不是身份；认不出来就得走「一房一个未知桶」，
+ * 否则十几个人会被并成一份档案（用户报障的「内容重复」就是这个）。
+ */
+check('通用打码名被当成「认不出」', [
+  anon.isAnonymousName('秋***'),
+  anon.isAnonymousName('M***'),
+  anon.isAnonymousName('🐶***'),
+  anon.isAnonymousName('aaa***')
+], [true, true, true, true])
+check('普通名字不受影响', [anon.isAnonymousName('张三'), anon.isAnonymousName('秋秋')], [false, false])
+/**
+ * 打码名 / 空名都**不是一个可用的马甲**（认不出人）：`anonymousUserId` 这时会给等级组合，
+ * 但调用方（`hub.anonymousKeyOf`）会把它压成「一个房间一个未知桶」——见下面第 4 节。
+ */
+check('通用打码名不是一个可用的马甲（会退回等级组合，再由调用方归桶）', [
+  anon.anonymousUserId('111111', { nickname: '秋***', honorLevel: 24 }),
+  anon.anonymousUserId('111111', {})
+], ['anon:111111#lv24_fc0', ''])
 
 /* ------------------------------------------------- 真链路：hub → recorder → mapper → PGlite */
 
@@ -295,7 +315,7 @@ check(
   2
 )
 
-console.log('\n=== 4. 认不出人的匿名帧：不建档案，也不写进用户维度 ===')
+console.log('\n=== 5. 认不出人的匿名帧：进本房间的未知桶，但不建档案 ===')
 const ghostAt = startedAt + 6000
 feed(
   ROOM,
@@ -308,14 +328,15 @@ const ghostRows = (await mapper.queryMessages({ webRid: ROOM, limit: 200 })).row
   (row) => row.kind === 'chat' && row.text === '我是谁'
 )
 /**
- * 这一帧既没有名字也没有等级——认不出是谁。宁可**不记**（它会写进一条没有身份的共用行），
- * 也不能把它算到某个匿名马甲头上（那才是用户说的「内容重复」）。
+ * 连名字都没有的帧：**消息照记**（进 ROOM 自己的「匿名观众」桶，内容与条数都不丢），
+ * 但**不建档案行**——认不出是谁，建出来就是把所有人加起来的一个假人。
  */
-check('认不出人的帧不落用户维度（宁缺勿并）', ghostRows.length, 0)
+check('认不出人的帧照样记录（进本房间的未知桶）', ghostRows.length, 1)
+check('落的是本房间的未知桶', ghostRows[0]?.userId, `anon:111111#room:${ROOM}`)
 const ghostProfiles = (await mapper.listUsersPage(ROOM, 'recent', '', 200)).rows.filter(
-  (row) => row.userId === '111111'
+  (row) => row.userId === '111111' || row.userId === `anon:111111#room:${ROOM}`
 )
-check('没有为「认不出的人」建 111111 的共用档案', ghostProfiles.length, 0)
+check('没有为「认不出的人」建共用档案（111111 或未知桶都不建）', ghostProfiles.length, 0)
 
 /* ------------------------------------------- 历史数据：把旧库那种「都挤在 111111」重排一次 */
 
@@ -385,6 +406,75 @@ check('每条弹幕只算在说那句话的人头上（旧的合账被丢掉、�
 /** 三个身份加起来仍是 4 条（没有凭空多出行来） */
 check('总行数没变（拆分不复制数据）', afterRows.length, 4)
 
+console.log('\n=== 4. 通用打码名：一个房间一个「匿名观众」桶（不跨房、不建档案、条数照记） ===')
+/**
+ * 真机实测（1,300+ 条匿名帧）：抖音给隐藏身份观众显示的名字是 `秋***` 这种「首字+星号」，
+ * 十几个人可能同名 —— 它**不是身份**。
+ *
+ * 口径：同一个房间里所有认不出的匿名帧合到一个「匿名观众」条目上（条数照样记全），
+ * 但**按房间分开**（A 房的匿名观众 ≠ B 房的匿名观众），绝不跨房间并成一个人。
+ */
+const BUCKET_ROOM_A = '880000000101'
+const BUCKET_ROOM_B = '880000000102'
+const maskedItem = (name, text, at) => ({
+  id: 0,
+  kind: 'chat',
+  user: name,
+  userId: '111111',
+  text,
+  count: 0,
+  diamonds: 0,
+  toUser: '',
+  toUserId: '',
+  at
+})
+const maskedUser = (name, honorLevel) => ({
+  id: '111111',
+  displayId: '',
+  nickname: name,
+  gender: 0,
+  signature: '',
+  city: '',
+  avatar: '',
+  following: 0,
+  follower: 0,
+  honorLevel,
+  fansClubLevel: 0,
+  badges: [],
+  secUid: ''
+})
+const bucketAt = Date.now()
+feed(BUCKET_ROOM_A, [maskedItem('秋***', '甲说的话', bucketAt)], [maskedUser('秋***', 24)])
+feed(BUCKET_ROOM_A, [maskedItem('刘***', '乙说的话', bucketAt + 1)], [maskedUser('刘***', 31)])
+feed(BUCKET_ROOM_A, [maskedItem('M***', '丙说的话', bucketAt + 2)], [maskedUser('M***', 0)])
+feed(BUCKET_ROOM_B, [maskedItem('秋***', '别的房间的话', bucketAt + 3)], [maskedUser('秋***', 24)])
+await analyzerHub.flushForTest()
+await new Promise((resolve) => setTimeout(resolve, 200))
+
+const bucketRows = (await mapper.queryMessages({ webRid: BUCKET_ROOM_A, limit: 50 })).rows.filter((row) => row.text)
+const bucketIds = [...new Set(bucketRows.map((row) => row.userId))]
+console.log(`      A 房三条打码名消息落在 ${bucketIds.length} 个身份上：${bucketIds.join(' / ')}`)
+check('三条不同打码名的消息 → 同一个「未知桶」', bucketIds.length, 1)
+check('桶键带房间号（不会和别的房间的匿名观众混）', bucketIds[0]?.endsWith(`#room:${BUCKET_ROOM_A}`), true)
+check('消息一条不少（3 条全在）', bucketRows.length, 3)
+/**
+ * 这个桶**不建档案行**：认不出是谁的人，建档案只会造出一行「把所有人加起来」的假人
+ * （旧版那个 13 条弹幕的合账就是这么来的）。条数仍然算在**房间**的统计里（上面那三条断言），
+ * 只是不出现在用户榜/用户档案里。
+ */
+const bucketProfile = (await mapper.listUsersPage(BUCKET_ROOM_A, 'recent', '', 50)).rows.find(
+  (row) => row.userId === bucketIds[0]
+)
+check('未知桶不建档案行（宁可没有，也不造一个把所有人加起来的假人）', Boolean(bucketProfile), false)
+const roomTotals = await mapper.queryMessages({ webRid: BUCKET_ROOM_A, limit: 50 })
+check('房间的消息总数里这三条照记（内容不丢）', roomTotals.total >= 3, true)
+const otherRoomBucket = (await mapper.queryMessages({ webRid: BUCKET_ROOM_B, limit: 50 })).rows.filter((row) => row.text)
+check(
+  '另一个房间的同名打码名**不在**同一个桶里（按房间分开）',
+  otherRoomBucket.some((row) => row.userId === bucketIds[0]),
+  false
+)
+
 /* ------------------------------------------------ 「查看真实资料」：匿名的人也要能点（用户要求） */
 
 console.log('\n=== 6. 匿名档案的「查看真实资料」：按钮能点、判定要严 ===')
@@ -401,6 +491,21 @@ check('昵称尾段不对（另一个人）→ 不算', matchAnonymousCandidate(
 check('粉丝数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9973, 12), target), false)
 check('关注数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9974, 13), target), false)
 check('昵称不是马甲名（真名字）→ 不算', matchAnonymousCandidate(candidate('73500002056511', '张三', 9974, 12), target), false)
+
+/**
+ * **两类「匿名」不能一锅端**（2026-10-12 真机抓帧的分界，见 `main/douyin/anonymous-reveal.ts`）：
+ * - A 类 `id=111111` + 打码名 → 走「还原不了」；
+ * - B 类 `id=真实数字id` + 昵称「匿名」/「神秘人二阶」→ **id 还在**，走神秘人那条现成的链。
+ *   这里钉住「B 类不会被误判成匿名」——否则它会掉进 `revealAnonymousProfile` 而查不到。
+ */
+check('B 类（真实 id + 昵称「匿名」）不算匿名 id', [
+  anon.isAnonymousId('91906055010'),
+  anon.isAnonymousId('97987526879')
+], [false, false])
+check('A 类（占位 id / 合成键）才算匿名', [
+  anon.isAnonymousId('111111'),
+  anon.isAnonymousId('anon:111111#dou2056511')
+], [true, true])
 
 /** 正式链路：库里没有全中的候选 → 如实回 `anonymousMasked`，绝不给「猜的那个人」 */
 const masked = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111#dou2056511', ...target }, async () => [])

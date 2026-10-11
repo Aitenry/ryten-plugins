@@ -65,7 +65,17 @@ import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
-import { anonymousMaskTail, anonymousUserId, displayDisplayId, displayNickname, isAnonymousId, isAnonymousName } from '../../shared/anonymous'
+import {
+  ANON_ID_PREFIX,
+  anonymousBaseId,
+  anonymousMaskTail,
+  anonymousUserId,
+  displayDisplayId,
+  displayNickname,
+  isAnonymousId,
+  isAnonymousName,
+  isGenericMaskName
+} from '../../shared/anonymous'
 import { revealAnonymousProfile } from '../douyin/anonymous-reveal'
 import { COOKIE_MAX_LENGTH, clampCookie } from '../../shared/cookie'
 import { monthBucketRange, monthOf } from '../../shared/gift-calendar'
@@ -1359,16 +1369,18 @@ export class AnalyzerHub {
    * 名字补到了真名（这个人以前露过面）就退回他的真 id，同一帧里的 `users` 也要跟着换，
    * 否则档案会写到两个身份上。
    */
-  private identifyBatch(items: DanmakuItem[], users: UserInfo[]): { items: DanmakuItem[]; users: UserInfo[] } {
+  private identifyBatch(state: RoomState, items: DanmakuItem[], users: UserInfo[]): { items: DanmakuItem[]; users: UserInfo[] } {
     const identityOf = new Map<string, string>()
     const usersOut: UserInfo[] = []
     for (const info of users) {
       if (!info.id) continue
-      const key = anonymousUserId(info.id, info)
+      const key = this.anonymousKeyOf(state.webRid, info.id, info)
       identityOf.set(info.id, key)
-      // 连马甲都没有（残缺帧）：抖音 id 与昵称都没给出跟「这个人是谁」有关的东西，
-      // 那就不要建档案——建出来的一行会把好几个人合成一个（见文件头的说明）
-      if (!key) continue
+      /**
+       * 连马甲都没有（残缺帧 / 记不下来的通用打码名）：**认不出人**，那就不建档案——
+       * 建出来的一行会把好几个人合成一个（正是用户报障的那种「重复」）。
+       */
+      if (!this.identifiedAnonymously(info.id, info)) continue
       usersOut.push({ ...info, id: key, displayId: displayDisplayId(info.displayId) })
     }
     const seen = new Set<string>()
@@ -1378,16 +1390,14 @@ export class AnalyzerHub {
         itemsOut.push({ ...item, user: displayNickname(item.user) })
         continue
       }
-      const key = identityOf.get(item.userId) ?? anonymousUserId(item.userId, { nickname: item.user })
-      // 同上：认不出是谁的匿名帧**不写进用户维度**（消息流水照记，只是没有档案行）
-      if (!key) continue
+      const key = identityOf.get(item.userId) ?? this.anonymousKeyOf(state.webRid, item.userId, { nickname: item.user })
       itemsOut.push({ ...item, userId: key, user: displayNickname(item.user) })
       // 帧里没带 `User` 的那条（点歌 / 只有裸 id 的礼物）：身份是从 id 推出来的，
       // 这一批若没有它的档案就补一份只有昵称的，否则名字就丢了
       if (!identityOf.has(item.userId) && !seen.has(key)) {
         seen.add(key)
         const name = displayNickname(item.user)
-        if (name) {
+        if (name && this.identifiedAnonymously(item.userId, { nickname: item.user })) {
           usersOut.push({
             id: key,
             displayId: '',
@@ -1407,6 +1417,49 @@ export class AnalyzerHub {
       }
     }
     return { items: itemsOut, users: usersOut }
+  }
+
+  /**
+   * 一个「匿名帧」该记到哪把身份键上。
+   *
+   * 三种情况（2026-10-12 真机实测后定的口径，见 `spike/anon-live-probe.mjs`）：
+   * 1. **认得出马甲**（`dou2056511` 这种带数字的马甲名）→ 按马甲分开，各记各的；
+   * 2. **通用打码名 / 认不出**（`秋***`、空名）→ **一个房间一个「匿名观众」桶**：
+   *    按房间分开（绝不跨房间并成一个人），房间内合成一个「匿名观众」条目。
+   *    为什么不是「每条消息一个身份」（统计会爆成几千行）、也不是直接丢掉
+   *    （用户看到的次数就比真实发生的少）：一个房间一个未知桶是唯一既诚实又稳定的口径。
+   * 3. 普通人 → 原样。
+   */
+  private anonymousKeyOf(
+    webRid: string,
+    id: string,
+    source: {
+      nickname?: string | null
+      displayId?: string | null
+      secUid?: string | null
+      honorLevel?: number | null
+      fansClubLevel?: number | null
+    }
+  ): string {
+    const identified = anonymousUserId(id, source)
+    /** 打码名（`秋***`）：马甲名不是身份 → 归到本房间的未知桶 */
+    if (identified && !isGenericMaskName(source.nickname)) return identified
+    return `${ANON_ID_PREFIX}${anonymousBaseId(id)}#room:${webRid || 'unknown'}`
+  }
+
+  /** 这一帧**够不够**给这个人建一份档案行（认不出的人只进消息流水，不建档案） */
+  private identifiedAnonymously(
+    id: string,
+    source: {
+      nickname?: string | null
+      displayId?: string | null
+      secUid?: string | null
+      honorLevel?: number | null
+      fansClubLevel?: number | null
+    }
+  ): boolean {
+    if (!anonymousUserId(id, source)) return false
+    return !isGenericMaskName(source.nickname)
   }
 
   /**
@@ -1496,7 +1549,7 @@ export class AnalyzerHub {
      * **匿名的人在这里按马甲分开**（见 `identifyBatch`）——必须在 `ingest` 之前，
      * 因为「这个人的档案/统计/在场/分钟桶」全部按 `userId` 聚合。
      */
-    const identified = this.identifyBatch(items, users)
+    const identified = this.identifyBatch(state, items, users)
     this.noteEmptyGifts(state, identified.items)
     const touched = state.recorder.ingest(identified.items, identified.users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)

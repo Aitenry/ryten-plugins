@@ -1136,12 +1136,15 @@ export async function splitAnonymousIdentities(): Promise<number> {
   return withOrm('douyin-link.splitAnonymous', async (db) => {
     /** 名字 → 马甲（与 `shared/anonymous.ts` 的 `anonymousMask` 逐字对齐：昵称优先，其次抖音号） */
     const mask = sql<string>`trim(regexp_replace(coalesce(nullif(btrim(u.nickname), ''), nullif(btrim(u.display_id), ''), ''), '\s+', ' ', 'g'))`
-    /** 马甲是「信息量为零的占位名」（空 / 匿名 / 神秘人）→ 退回等级组合（那边同样认不出人，但不合并） */
-    const placeholder = sql`(${mask} = '' or ${mask} like '%匿名%' or ${mask} like '%神秘人%' or lower(${mask}) like '%anonymous%')`
-    /** 旧键 → 新键：`111111` → `anon:111111#dou2056511`；已经是新键的行不满足条件，跑第二遍什么都不动 */
+    /**
+     * 马甲是「信息量为零的占位名」（空 / 匿名 / 神秘人），**或者通用打码名**（`秋***`：
+     * 抖音给所有隐藏身份观众都用它，十几个人同名——当身份用就又把人并起来了）。
+     * 这两种都认不出人 → 归到**本房间的未知桶**（与运行时 `hub.anonymousKeyOf` 同一口径）。
+     */
+    const placeholder = sql`(${mask} = '' or ${mask} like '%匿名%' or ${mask} like '%神秘人%' or lower(${mask}) like '%anonymous%' or ${mask} like '%**')`
+    /** 旧键 → 新键：`111111` → `anon:111111#dou2056511`；认不出的 → `anon:111111#room:<房间>` */
     const newKey = sql<string>`${ANON_ID_PREFIX} || replace(u.user_id, ${ANON_ID_PREFIX}, '') || '#' ||
-      case when ${placeholder}
-        then 'lv' || greatest(u.honor_level, 0) || '_fc' || greatest(u.fans_club_level, 0)
+      case when ${placeholder} then 'room:' || u.web_rid
         else left(${mask}, 24)
       end`
     const unsplit = sql`(u.user_id = ${ANONYMOUS_ID} or (u.user_id like ${`${ANON_ID_PREFIX}%`} and position('#' in u.user_id) = 0))`
@@ -1149,9 +1152,15 @@ export async function splitAnonymousIdentities(): Promise<number> {
     /**
      * 消息行自己的马甲（**与 `shared/anonymous.ts` 的 `anonymousMask` 同规则**）：
      * 先归一化空白、再去掉抖音给匿名名挂的装饰（`☞`、`-`、空格），最后截到 24 字符。
+     *
+     * **通用打码名（`秋***`）不算马甲**：它是抖音给所有隐藏身份观众的「首字+星号」，
+     * 十几个人同名——当身份用就又把人并起来了。这类行留给 ② 去归「一个房间一个未知桶」。
      */
     const nameOf = sql<string>`left(btrim(ltrim(regexp_replace(btrim(m.user_name), '\s+', ' ', 'g'), '☞·-— ')), 24)`
-    const namedRow = sql`(${nameOf} <> '' and ${nameOf} not like '%匿名%' and ${nameOf} not like '%神秘人%' and lower(${nameOf}) not like '%anonymous%')`
+    const maskOfRow = sql<string>`btrim(regexp_replace(btrim(m.user_name), '\s+', ' ', 'g'))`
+    const namedRow = sql`(${nameOf} <> '' and ${nameOf} not like '%匿名%' and ${nameOf} not like '%神秘人%' and lower(${nameOf}) not like '%anonymous%' and ${maskOfRow} not like '%**')`
+    /** 通用打码名（`秋***` / `M***`）：认不出人 → ② 里归「本房间的未知桶」 */
+    const genericRow = sql`(${maskOfRow} like '%**')`
     const splitId = sql<string>`${ANON_ID_PREFIX} || replace(m.user_id, ${ANON_ID_PREFIX}, '') || '#' || ${nameOf}`
     /** 消息行上的同一个判据（`u` → `m`：这一列两处都要判） */
     const unsplitMessage = sql`(m.user_id = ${ANONYMOUS_ID} or (m.user_id like ${`${ANON_ID_PREFIX}%`} and position('#' in m.user_id) = 0))`

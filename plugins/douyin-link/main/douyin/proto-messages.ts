@@ -456,6 +456,16 @@ export function parseProtoUser(user: PbMessage | undefined): UserInfo | null {
     honorLevel,
     fansClubLevel,
     badges: badges.slice(0, 4),
+    /**
+     * **字段 46**（`sec_uid`）。
+     *
+     * ⚠️ 匿名帧里还有**字段 73**，形状也是 `MS4wLj…`（真机实测 916/923 条匿名帧都带它），
+     * 但它**不是可用的 `sec_uid`**：2026-10-12 实测——同一个资料接口、同一份登录态 cookie，
+     * 拿**真人自己的** `sec_uid` 查得到完整资料（`status_code 0`），
+     * 拿匿名帧字段 73 那个值查却是 `status_code 2 / "UserId不合法"`（**诱饵**）。
+     * 所以这里**故意不读字段 73**：写进库只会让「查看真实资料」拿着一个假 id 去撞墙。
+     * 结论与全部证据见 `main/douyin/anonymous-reveal.ts`。
+     */
     secUid: getString(user, 46, 200) ?? ''
   }
 }
