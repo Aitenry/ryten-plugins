@@ -656,17 +656,20 @@ check(
 )
 /*
  * 「横排」在 jsdom 里**量不到**（工装的 `getBoundingClientRect` 对所有元素给同一个矩形），
- * 所以这里只钉结构：两个数字是**同一个 flex 行**里的兄弟，各占一半（`flex-1`）——
- * 真正的像素版式看 `snap()` 落出来的那张快照（同目录的截图自检）。
+ * 所以这里只钉结构：两个数字是**同一个 flex 行**里的兄弟，两个都**按内容自适应宽度**
+ * （没有 `flex-1`：用户 2026-10-11 第三轮说「这个前后的空隙太大了」——各占半格居中会把
+ * 两个数推到块的两端，中间空一大截），行内只隔一个 `gap-3`。
+ * 真正的像素版式看 `snap()` 落出来的那张快照。
  */
 check(
-  '两个数字是同一个 flex 行里的兄弟、各占一半（横排结构）',
+  '两个数字是同一个 flex 行里的兄弟、都按内容自适应（不撑开）',
   [
     Boolean(sentNode?.parentElement) && sentNode?.parentElement === receivedNode?.parentElement,
     (sentNode?.parentElement?.className ?? '').includes('flex'),
+    (sentNode?.parentElement?.className ?? '').includes('gap-3'),
     [sentNode?.className.includes('flex-1'), receivedNode?.className.includes('flex-1')]
   ],
-  [true, true, [true, true]]
+  [true, true, true, [false, false]]
 )
 /*
  * 高度对齐：旁边四个块都是「一行标签 + 一行数字」，礼物那格也必须是**两行**的高度

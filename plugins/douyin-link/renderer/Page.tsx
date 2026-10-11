@@ -1869,17 +1869,24 @@ function GiftValueBlock(props: {
     >
       <span className="truncate text-[10px] opacity-60">{props.label}</span>
       {/*
-        两个数各占一半、各自居中：数字只有颜色区分送/收，不再带文字标签。
-        `leading-5` 与 `StatBlock` 的数字行**逐字一致**——两边行高相同，这一格才与旁边四个块等高
-        （用户报的「超出了高度」就是这里比旁边高出一截）。
+        两个数字**挨着放**（送出在前、收到在后），只有颜色区分送/收，不再带文字标签。
+
+        间距（用户 2026-10-11 第三轮：「这个前后的空隙太大了」）：第一版把两个数各塞进半格并居中，
+        于是「14,741」与「0」被推到块的两端、中间空一大截——像两个不相干的指标。现在两个数宽度
+        按内容自适应、彼此只隔一个 `gap-3`，整行**左对齐**（与上面的「礼物价值」标签同一条竖线）。
+        行高 `leading-5` 与 `StatBlock` 的数字行逐字一致，这一格才与旁边四个块等高。
       */}
-      <span className="flex min-w-0 flex-1 items-center tabular-nums leading-5">
-        <span data-rb-gift-sent="" className="min-w-0 flex-1 truncate text-center text-sm font-semibold" style={{ color: props.sentColor }}>
+      <span className="flex min-w-0 flex-1 items-center gap-3 tabular-nums leading-5">
+        <span
+          data-rb-gift-sent=""
+          className="min-w-0 truncate text-sm font-semibold"
+          style={{ color: props.sentColor }}
+        >
           {formatNumber(props.sent)}
         </span>
         <span
           data-rb-gift-received=""
-          className="min-w-0 flex-1 truncate text-center text-sm font-semibold"
+          className="min-w-0 truncate text-sm font-semibold"
           style={{ color: props.receivedColor }}
         >
           {formatNumber(props.received)}
