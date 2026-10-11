@@ -160,7 +160,7 @@ function localDay(at: number): string {
  * 2. **声音只跟「分析中的房间」**：主进程全局只有一个音频泵，点某个房间 = 把声音切给它，
  *    其它房间继续在后台监听弹幕（这是这一版的核心诉求）；
  * 3. 布局纪律照 WORKSHOP 第 6 节：根节点不滚（PageShell）、列布局固定 grid-cols-12、
- *    内容多了靠 FitTable/FitList 降级、配色只取 usePluginPalette()。
+ *    内容多了靠适配表格（FitTable）/ 局部细滚动条（`data-rb-scroll`）降级、配色只取 usePluginPalette()。
  */
 export default function Page(): React.JSX.Element {
   const { t: translate } = useTranslation()

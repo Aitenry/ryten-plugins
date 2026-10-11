@@ -10,7 +10,7 @@ import {
 } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomRuntime } from '../../shared/types'
-import { FitList, HOVER_BG, Panel, cleanName, roomLabel, usePluginPalette } from './ui'
+import { HOVER_BG, Panel, ScrollStyle, cleanName, roomLabel, usePluginPalette } from './ui'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
@@ -47,8 +47,12 @@ function phaseMeta(t: Translate, room: RoomRuntime, palette: ReturnType<typeof u
  * 一行 = 一个直播间：相位点、标题、房间号与速率、库里累计、监控开关、更多操作。
  * 点整行 = 把它设为「分析中的房间」（页签跟着它）。
  *
- * 列表用 `FitList`（贪心塞行 + 「还有 N 个」）而不是滚动条：插件页面不该出滚动条
- * （见 WORKSHOP 第 6 节）。房间数一般是个位数，真多了也是「先看前几个」更合理。
+ * 列表**一个房间都不藏**：放不下就在清单自己身上出一根细滚动条
+ * （`data-rb-scroll` + `<ScrollStyle />`，插件内所有可滚区域共用那一份观感）。
+ * 这是用户 2026-10-13 的要求：「这个内容不能隐藏其他直播间，出现滚动条即可，
+ * 滚动条要用优化后的滚动条」——原来用的是 `FitList`（贪心塞行 + 「还有 N 个」），
+ * 房间一多后面几个就看不见了，等于把直播间藏起来（已删掉那个原语）。
+ * 输入行固定在上方（`shrink-0`），滚的只有清单本身。
  */
 export function RoomRail(props: {
   rooms: RoomRuntime[]
@@ -119,25 +123,26 @@ export function RoomRail(props: {
         {props.rooms.length === 0 ? (
           <span className="px-1 py-3 text-xs opacity-60">{t('douyin-link.page.emptyRooms')}</span>
         ) : (
-          <FitList
-            items={ordered}
-            rowHeight={62}
-            keyOf={(room) => room.webRid}
-            moreLabel={(count) => t('douyin-link.page.moreRooms', { count })}
-            renderItem={(room) => (
-              <RoomRow
-                room={room}
-                active={room.webRid === props.activeRoom}
-                palette={palette}
-                t={t}
-                onSelect={() => props.onSelect(room.webRid)}
-                onToggleMonitor={(on) => props.onToggleMonitor(room.webRid, on)}
-                onRefresh={() => props.onRefresh(room.webRid)}
-                onRemove={(purge) => props.onRemove(room.webRid, purge)}
-                onClearMessages={() => props.onClearMessages(room.webRid)}
-              />
-            )}
-          />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ScrollStyle />
+            <div data-rb-scroll="" className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
+              {ordered.map((room) => (
+                <div key={room.webRid} className="min-w-0 shrink-0">
+                  <RoomRow
+                    room={room}
+                    active={room.webRid === props.activeRoom}
+                    palette={palette}
+                    t={t}
+                    onSelect={() => props.onSelect(room.webRid)}
+                    onToggleMonitor={(on) => props.onToggleMonitor(room.webRid, on)}
+                    onRefresh={() => props.onRefresh(room.webRid)}
+                    onRemove={(purge) => props.onRemove(room.webRid, purge)}
+                    onClearMessages={() => props.onClearMessages(room.webRid)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </Panel>

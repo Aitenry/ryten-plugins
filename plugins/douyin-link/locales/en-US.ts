@@ -17,7 +17,6 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       monitorAll: 'Monitor all',
       monitorStopAll: 'Stop all',
       emptyRooms: 'No rooms yet. Paste a link and click "Add" to start analysing.',
-      moreRooms: '{{count}} more rooms',
       noActive: 'Pick a room on the left first',
       rate: '{{rate}} msg/min',
       storedCount: '{{count}} stored',

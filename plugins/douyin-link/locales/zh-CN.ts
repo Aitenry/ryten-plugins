@@ -18,7 +18,6 @@ export const DouyinLinkZhCN = {
       monitorAll: '全部开始',
       monitorStopAll: '全部停止',
       emptyRooms: '还没有直播间。填一个链接，点「添加」开始分析。',
-      moreRooms: '还有 {{count}} 个直播间',
       noActive: '先从左边选一个直播间',
       rate: '{{rate}} 条/分',
       storedCount: '库里 {{count}} 条',

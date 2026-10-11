@@ -679,63 +679,6 @@ export function FitTable<T extends object>(props: {
 }
 
 /**
- * 自适应列表：**贪心**塞行——放不下的行一个都不画，剩下的用「还有 N 项」收尾。
- *
- * 为什么贪心而不是算行数：行距、分隔、尾行都会吃掉高度，贪心能保证
- * 「画出来的东西加起来 <= 容器高度」这个硬约束。`rowHeight` 要**略大于**真实行高，
- * 声明小了会一点点累积成裁切。
- */
-export function FitList<T>(props: {
-  items: T[]
-  rowHeight: number
-  keyOf: (item: T, index: number) => React.Key
-  renderItem: (item: T) => React.ReactNode
-  empty?: React.ReactNode
-  moreLabel?: (count: number) => string
-  className?: string
-}): React.JSX.Element {
-  const [ref, size] = useSize()
-  const gap = 6
-  const moreHeight = 18
-  const available = size.height
-  const rendered: T[] = []
-  let used = 0
-
-  for (const item of props.items) {
-    const need = (rendered.length > 0 ? gap : 0) + props.rowHeight
-    if (used + need > available) break
-    used += need
-    rendered.push(item)
-  }
-
-  let more: string | null = null
-  if (props.moreLabel && rendered.length < props.items.length) {
-    const need = (rendered.length > 0 ? gap : 0) + moreHeight
-    if (used + need <= available) {
-      more = props.moreLabel(props.items.length - rendered.length)
-    } else if (rendered.length > 0) {
-      // 回退一行，把「还有 N 项」放进来（它比少显示一行更有用）
-      rendered.pop()
-      used -= props.rowHeight + gap
-      more = props.moreLabel(props.items.length - rendered.length)
-    }
-  }
-
-  return (
-    <div ref={ref} className={'flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden ' + (props.className ?? '')}>
-      {props.items.length === 0
-        ? (props.empty ?? <span className="text-xs opacity-50">-</span>)
-        : rendered.map((item, index) => (
-            <div key={props.keyOf(item, index)} className="min-w-0 shrink-0">
-              {props.renderItem(item)}
-            </div>
-          ))}
-      {more ? <span className="shrink-0 text-xs opacity-50">{more}</span> : null}
-    </div>
-  )
-}
-
-/**
  * 图表容器：量好尺寸再把像素交给 SVG（不给 SVG 伸展，避免线条变形）。
  * 刻意**不设最小高度**——容器多矮就画多矮，图表自己降级；
  * 「最小高度」等于固定高度，会把面板和整页顶破。
