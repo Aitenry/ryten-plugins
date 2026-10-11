@@ -217,7 +217,13 @@ export function OverviewPanel(props: {
 
       <div className="col-span-4 flex min-h-0 flex-col gap-3">
         <Panel className="min-h-0 flex-1" title={t('douyin-link.page.topChat')}>
-          <RankList rows={summary?.topChat ?? []} webRid={webRid} t={t} palette={palette} />
+          <RankList
+            rows={summary?.topChat ?? []}
+            webRid={webRid}
+            t={t}
+            palette={palette}
+            onOpenUser={props.onOpenUser}
+          />
         </Panel>
         {/*
           收礼物榜 / 送礼物榜（用户 2026-10-08 的要求）：
@@ -570,6 +576,8 @@ function RankList(props: {
   webRid: string
   t: Translate
   palette: PluginPalette
+  /** 点名字 → 打开这个人的用户档案（与两张礼物榜同一个入口） */
+  onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   if (props.rows.length === 0) return <span className="text-xs opacity-50">{props.t('douyin-link.page.noData')}</span>
   const max = Math.max(1, ...props.rows.map((row) => row.stats.chat))
@@ -581,10 +589,22 @@ function RankList(props: {
         {props.rows.map((row) => {
           const value = row.stats.chat
           return (
+            /* 整行不是按钮（这一行没有「打开礼物历史」那类第二动作），
+               所以名字**自己就是**点击目标：`button` 只包住名字，条形与数字仍是纯展示。
+               用 `-mx-1 px-1` 把点击面撑到跟下面两张礼物榜一样的行内边距，视觉上仍贴左。 */
             <div key={row.userId} className="flex min-w-0 items-center gap-2 text-[10px]">
               {/* 名字前面**不带序号**（用户 2026-10-10：「发言榜不需要序号显示」）——
                   与收礼物榜/送礼物榜同一口径，榜单靠条形长度与数字表达排名 */}
-              <span className="min-w-0 flex-1 truncate">{row.nickname || row.userId}</span>
+              <button
+                type="button"
+                className="-mx-1 min-w-0 flex-1 cursor-pointer truncate px-1 text-left hover:underline"
+                title={props.t('douyin-link.page.rankNameHint')}
+                onClick={() => {
+                  if (row.userId) props.onOpenUser(row.userId)
+                }}
+              >
+                {row.nickname || row.userId}
+              </button>
               <span
                 className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full"
                 style={{ backgroundColor: props.palette.track }}

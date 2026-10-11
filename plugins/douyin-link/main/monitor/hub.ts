@@ -40,10 +40,14 @@ import {
   type UserBadge,
   type UserIdentity,
   type UserInfo,
+  type UserDetail,
   type UserProfile,
   type UserRankPage,
   type UserRankRow,
   type UserStats,
+  type UserTotalsRow,
+  type UserGiftCalendar,
+  type GiftDayRow,
   type UserBatch
 } from '../../shared/types'
 import * as store from '../db/mapper'
@@ -62,6 +66,7 @@ import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
 import { isAnonymousName } from '../../shared/anonymous'
 import { COOKIE_MAX_LENGTH, clampCookie } from '../../shared/cookie'
+import { monthBucketRange, monthOf } from '../../shared/gift-calendar'
 
 /**
  * 分析中枢：**所有网络与数据都在这里**（渲染层只是视图）。
@@ -1132,6 +1137,8 @@ export class AnalyzerHub {
       }
       state.sessionId = sessionId
       state.recorder.begin(sessionId, this.settings.maxItems)
+      // `begin()` 清掉了收礼人推断的上下文，这里立刻把已知的主播灌回去（见 recorder.setAnchor）
+      state.recorder.setAnchor(state.anchorUser)
       this.markDaysDirty(state.webRid)
       state.danmaku = { phase: 'connecting', failure: null, since: Date.now(), received: 0 }
       state.phase = 'connecting'
@@ -2376,8 +2383,27 @@ export class AnalyzerHub {
   }
 
   /**
-   * 「这个人」的全部抖音账号（画像）；没绑定时就是 `[userId]`。
+   * 档案里「送礼 / 收礼」点开后的**每日收益日历**（用户 2026-10-11：「点击后可以查看每一个月的
+   * 每一天送礼和收礼的抖币，这个内容 UI 向股票的每日收益的样式，点击后就是弹窗」）。
    *
+   * 一次把界面要的三样都回：**这个月的逐日数据**（跨全部直播间、按人的全部账号合计）、
+   * **有记录的月份清单**（界面据此判断上/下个月能不能翻）、以及回的是哪个月。
+   *
+   * `month` 是 `YYYY-MM`；不合法或没给就取**有记录的最近一个月**（退而求其次取当月），
+   * 这样从没送过礼的人点开也不会是空的月份、而是「就是没有记录」。
+   */
+  async userGiftCalendar(userId: string, month = ''): Promise<UserGiftCalendar> {
+    const ids = await this.accountIdsOf(userId)
+    if (ids.length === 0) return { month: '', months: [], days: [] }
+    const months = await store.userGiftMonths(ids)
+    const wanted = /^\d{4}-\d{2}$/.test(month) ? month : (months[0] ?? monthOf(Date.now()))
+    const { from, to } = monthBucketRange(wanted)
+    const days = await store.userGiftDays(ids, from, to)
+    return { month: wanted, months, days }
+  }
+
+  /**
+   * 「这个人」的全部抖音账号（画像）；没绑定时就是 `[userId]`。
    * 一处收口的原因：所有「按人」的查询（档案 / 画像 / 历史 / 礼物明细）都要用同一份 id 集合，
    * 各自去查一次 identity 表既慢又容易漏——实现见 `mapper.resolveAccountIds`。
    */
@@ -2389,17 +2415,25 @@ export class AnalyzerHub {
   }
 
   /**
-   * 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并）。
+   * 用户档案：库里的累计数字（**跨全部直播间**，见下）。
    *
    * **多账号（0.15.11）**：画像里的每个账号都并进来——统计累加、首见取最早、末见取最晚、
    * 等级取最高、静态字段（昵称/头像/抖音号/签名/城市）**按主账号优先**取第一个非空的。
    * 锚点仍是传进来的那个 `userId`（界面的头像/历史按它取），所以没绑定时行为与旧版逐字一致。
+   *
+   * **统计口径（2026-10-11 改）**：用户明确要求「互动统计（本房间累计）需要所有直播间统计，
+   * 并且礼物价值要改成送礼和收礼两个统计」。所以：
+   * - 发言/进场/点赞/关注/送礼次数/送礼抖币 = `userStatsAnyRoom`（按人把各房间的累计行加起来）；
+   * - **收礼抖币**同样来自它（按收礼人现算；档案表里没有这一列）；
+   * - **本场数字不再补**：`recorder` 的 delta 只是「这一个房间这一次监控」的，混进跨房合计会两套口径打架
+   *   （实时列表/用户榜仍按单房间的 `UserStats` 渲染，那是另一套，见 `shared/types` 的注释）。
+   *   本场刚出现、还没落库的人照旧能给档案——静态字段走 recorder，只是统计暂时是 0，几秒后被 flush 补上。
    */
-  async userProfile(webRid: string, userId: string): Promise<UserProfile | null> {
+  async userProfile(webRid: string, userId: string): Promise<UserDetail | null> {
     if (!userId) return null
     const ids = await this.accountIdsOf(userId)
     const ordered = [userId, ...ids.filter((id) => id !== userId)]
-    // 有当前房间就按房间取（每人一行）；没有（数据大屏模式）就跨房间各取最近的一行
+    // 静态字段：有当前房间按房间取（每人一行），没有（数据大屏模式）就跨房间各取最近的一行
     const stored = webRid ? await store.getUsers(webRid, ordered) : await store.getUsersAnyRoom(ordered)
     const sessions = new Map<string, UserProfile>()
     const state = webRid ? this.states.get(webRid) : undefined
@@ -2427,29 +2461,46 @@ export class AnalyzerHub {
         if (!mergedBadges.includes(badge)) mergedBadges.push(badge)
       }
     }
-    const stats: UserStats = { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 }
+    // 跨房间合计（含收礼抖币）：一次查库，按画像里的全部账号
+    const totals = await store.userStatsAnyRoom(ordered)
+    const stats: UserTotalsRow = {
+      userId,
+      chat: 0,
+      enter: 0,
+      like: 0,
+      follow: 0,
+      gift: 0,
+      diamonds: 0,
+      receivedDiamonds: 0
+    }
     let firstSeen = 0
     let lastSeen = 0
-    for (const { row, session } of rows) {
-      // 库里的是跨会话累计的一份；本场没有再补（本场数字只有 recorder 有）
-      if (row) {
-        stats.chat += row.stats.chat
-        stats.enter += row.stats.enter
-        stats.like += row.stats.like
-        stats.follow += row.stats.follow
-        stats.gift += row.stats.gift
-        stats.diamonds += row.stats.diamonds
-      } else if (session) {
-        stats.chat += session.stats.chat
-        stats.enter += session.stats.enter
-        stats.like += session.stats.like
-        stats.follow += session.stats.follow
-        stats.gift += session.stats.gift
-        stats.diamonds += session.stats.diamonds
+    for (const id of ordered) {
+      const hit = totals.get(id)
+      if (hit) {
+        stats.chat += hit.chat
+        stats.enter += hit.enter
+        stats.like += hit.like
+        stats.follow += hit.follow
+        stats.gift += hit.gift
+        stats.diamonds += hit.diamonds
+        stats.receivedDiamonds += hit.receivedDiamonds
       }
+    }
+    for (const { row, session } of rows) {
       const first = row?.firstSeen || session?.firstSeen || 0
       if (first > 0) firstSeen = firstSeen > 0 ? Math.min(firstSeen, first) : first
       lastSeen = Math.max(lastSeen, row?.lastSeen ?? 0, session?.lastSeen ?? 0)
+    }
+    /*
+     * 一个人都没有档案行时（`totals` 全 0、`firstSeen` 也取不到），首末出现退回本场——
+     * 否则档案弹窗上「首次出现 / 最近出现」会显示成空。
+     */
+    if (firstSeen === 0) {
+      for (const { session } of rows) {
+        const first = session?.firstSeen ?? 0
+        if (first > 0) firstSeen = firstSeen > 0 ? Math.min(firstSeen, first) : first
+      }
     }
 
     return {
@@ -2920,6 +2971,12 @@ export class AnalyzerHub {
       state.roomUserIds = merged.slice(0, 200)
     }
     if (resolved.anchorUser?.id) state.anchorUser = resolved.anchorUser
+    /**
+     * 主播资料也喂给记录器：**帧里不给收礼人的房间（个播）靠它把收礼人补上**，
+     * 否则收礼物榜整张空着（2026-10-11 报障，见 `shared/gift-recipient.ts`）。
+     * 别把 `state.anchorUser` 传进去：它可能是空的，而 recorder 只认非空的那份。
+     */
+    if (state.anchorUser) state.recorder.setAnchor(state.anchorUser)
     state.refreshedAt = Date.now()
     // 成员名单/主播资料随解析更新，而这两样都在「在线观众」表里
     this.markPresenceDirty(state.webRid)

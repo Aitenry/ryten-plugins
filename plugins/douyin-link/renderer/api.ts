@@ -14,6 +14,7 @@ import type {
   ExportResult,
   FailureInfo,
   GiftBreakdownRow,
+  GiftDayRow,
   GiftRankRow,
   IdentityAccountRow,
   ImportResult,
@@ -43,6 +44,8 @@ import type {
   UserAnalysisScore,
   UserBatch,
   UserBadge,
+  UserDetail,
+  UserGiftCalendar,
   UserIdentity,
   UserProfile,
   UserRankPage,
@@ -536,9 +539,9 @@ export const api = {
     if (!isRecord(raw)) return null
     return normalizePresence(raw, webRid)
   },
-  userGet: async (webRid: string, userId: string): Promise<UserProfile | null> => {
+  userGet: async (webRid: string, userId: string): Promise<UserDetail | null> => {
     const raw = await invoke(`${PREFIX}user-get`, webRid, userId)
-    return isRecord(raw) ? (raw as unknown as UserProfile) : null
+    return isRecord(raw) ? (raw as unknown as UserDetail) : null
   },
   /**
    * 画像（多账号）：这个人绑定的全部账号 + 画像名/主账号。
@@ -600,6 +603,28 @@ export const api = {
   userAnalysis: async (userId: string): Promise<UserAnalysis | null> => {
     const raw = await invoke(`${PREFIX}user-analysis`, userId)
     return isRecord(raw) ? normalizeUserAnalysis(raw) : null
+  },
+  /**
+   * 档案里「送礼 / 收礼」点开的**每日收益日历**：这个人一个月的逐日送礼/收礼抖币
+   * （跨全部直播间），外加有记录的月份清单与回的是哪个月。
+   *
+   * `month` 传 `YYYY-MM`；空串 = 让主进程取有记录的最近一个月（从没送过礼的人也不会看到空月份）。
+   */
+  userGiftCalendar: async (userId: string, month = ''): Promise<UserGiftCalendar> => {
+    const raw = await invoke(`${PREFIX}user-gift-calendar`, userId, month)
+    const data = isRecord(raw) ? raw : {}
+    return {
+      month: asText(data.month),
+      months: asList<string>(data.months).filter((entry): entry is string => typeof entry === 'string'),
+      days: asList<GiftDayRow>(data.days).map((row) => ({
+        day: asText((row as GiftDayRow).day),
+        bucket: asCount((row as GiftDayRow).bucket),
+        sent: asCount((row as GiftDayRow).sent),
+        received: asCount((row as GiftDayRow).received),
+        sentGifts: asCount((row as GiftDayRow).sentGifts),
+        receivedGifts: asCount((row as GiftDayRow).receivedGifts)
+      }))
+    }
   },
   /**
    * 礼物榜点一行后的礼物历史（`sent` = 他送的 / `received` = 他收到的）。

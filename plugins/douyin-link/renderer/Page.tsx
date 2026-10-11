@@ -23,6 +23,7 @@ import type {
   UserAnalysis,
   UserBadge,
   UserIdentity,
+  UserDetail,
   UserProfile
 } from '../shared/types'
 import { isAnonymousId } from '../shared/anonymous'
@@ -52,6 +53,7 @@ import { SearchPanel } from './components/SearchPanel'
 import { UserAvatar, forgetAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
+import { GiftCalendarModal } from './components/GiftCalendar'
 import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
@@ -201,6 +203,14 @@ export default function Page(): React.JSX.Element {
   const [dashRange, setDashRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().startOf('day'), dayjs().endOf('day')])
   const [busy, setBusy] = useState(false)
   const [openUser, setOpenUser] = useState('')
+  /**
+   * 「每日收益」日历（点档案「礼物价值」的送礼/收礼）：跨全部直播间，与画像同口径。
+   * `giftCalendarName` 是打开那一刻档案上的显示名（日历标题用）；`giftDay` 是日历里点中的那一天
+   * （非空就再叠一个「那一天的礼物明细」弹窗）。
+   */
+  const [giftCalendar, setGiftCalendar] = useState(false)
+  const [giftCalendarName, setGiftCalendarName] = useState('')
+  const [giftDay, setGiftDay] = useState<{ from: number; to: number } | null>(null)
   /**
    * 时间范围（概览看的是哪一段）：`null` = 用「这一天」的默认整段（今天 = 00:00 → 现在）。
    * 两个入口都往这里写：概览的时间进度条、左侧「每日记录」点某一天。
@@ -1139,6 +1149,10 @@ export default function Page(): React.JSX.Element {
           userId={openUser}
           rooms={rooms}
           onClose={() => setOpenUser('')}
+          onOpenCalendar={(name) => {
+            setGiftCalendarName(name)
+            setGiftCalendar(true)
+          }}
         />
       ) : null}
 
@@ -1152,6 +1166,30 @@ export default function Page(): React.JSX.Element {
           direction={openGifts.direction}
           range={mode === 'room' ? effectiveRange : dashboardRange}
           onClose={() => setOpenGifts(null)}
+        />
+      ) : null}
+
+      {/*
+        「每日收益」日历（点档案「礼物价值」里的送礼 / 收礼）：**跨全部直播间**，与「分析用户」
+        画像同口径，所以不跟当前房间走。点某一天再开一个礼物历史弹窗看那天明细（`giftDay`）。
+      */}
+      <GiftCalendarModal
+        userId={giftCalendar ? openUser : ''}
+        name={giftCalendarName}
+        onClose={() => {
+          setGiftCalendar(false)
+          setGiftDay(null)
+        }}
+        onPickDay={(range) => setGiftDay(range)}
+      />
+      {giftDay && openUser ? (
+        <GiftHistoryModal
+          webRid=""
+          userId={openUser}
+          name={giftCalendarName}
+          direction="sent"
+          range={giftDay}
+          onClose={() => setGiftDay(null)}
         />
       ) : null}
     </PageShell>
@@ -1230,11 +1268,19 @@ function UserProfileModal(props: {
   userId: string
   rooms: RoomRuntime[]
   onClose: () => void
+  /**
+   * 点「礼物价值」里的送礼/收礼 → 打开「每日收益」日历。
+   *
+   * 为什么由**页面**去开这个弹窗（而不是档案弹窗自己渲染）：antd 的 Modal 是 portal 到 body 的，
+   * 但组件树里再嵌一层弹窗会让「关掉日历」与「关掉档案」互相牵连（关外层顺带卸载内层、
+   * 内层的 onCancel 又冒泡到外层）。放在页面同级，两个弹窗各管各的开关。
+   */
+  onOpenCalendar: (name: string) => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
-  const [profile, setProfile] = useState<UserProfile | null>(null)
+  const [profile, setProfile] = useState<UserDetail | null>(null)
   const [loading, setLoading] = useState(false)
   /** 「查看神秘人信息」的结果（null = 还没查过；点了按钮才查） */
   const [reveal, setReveal] = useState<MysteryReveal | null>(null)
@@ -1699,16 +1745,29 @@ function UserProfileModal(props: {
 
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-medium">{t('douyin-link.users.statsTitle')}</span>
-              {/* 数字排成与概览页 KPI 同款的软底小方块：一行五格，扫一眼就有量级感 */}
-              <div className="grid grid-cols-5 gap-1.5">
+              {/*
+                四个互动数 + **礼物价值拆成送礼 / 收礼**（用户 2026-10-11：「这个互动统计（本房间累计）
+                需要所有直播间统计，并且礼物价值要改成送礼和收礼两个统计」）。
+                礼物那一格占两栏（`col-span-2`）：里面是同一张「礼物价值」卡，上下两行——送礼一行、
+                收礼一行，**双列布局**（标签在左、数字在右），所以四个块不用变高。两行都是按钮，
+                点开同一个「每日收益」日历弹窗。
+              */}
+              <div className="grid grid-cols-6 gap-1.5">
                 <StatBlock label={t('douyin-link.kinds.chat')} value={formatNumber(profile.stats.chat)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.member')} value={formatNumber(profile.stats.enter)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.like')} value={formatNumber(profile.stats.like)} palette={palette} />
                 <StatBlock label={t('douyin-link.kinds.social')} value={formatNumber(profile.stats.follow)} palette={palette} />
-                <StatBlock
+                <GiftValueBlock
                   label={t('douyin-link.page.kpiDiamonds')}
-                  value={formatNumber(profile.stats.diamonds)}
+                  sentLabel={t('douyin-link.users.statsGiftSent')}
+                  sent={profile.stats.diamonds}
+                  sentColor={palette.up}
+                  receivedLabel={t('douyin-link.users.statsGiftReceived')}
+                  received={profile.stats.receivedDiamonds}
+                  receivedColor={palette.warn}
+                  hint={t('douyin-link.users.giftCalendarOpen')}
                   palette={palette}
+                  onClick={() => props.onOpenCalendar(identityTitle)}
                 />
               </div>
               <span className="text-[10px] opacity-50">{t('douyin-link.users.statsHint')}</span>
@@ -1771,6 +1830,51 @@ function FactLine(props: { items: string[] }): React.JSX.Element {
         </Fragment>
       ))}
     </div>
+  )
+}
+
+/**
+ * 「礼物价值」那一格：**送礼 / 收礼两个统计**（用户 2026-10-11 的要求），整块可点。
+ *
+ * 版式与 `StatBlock` 同款（软底小方块 + 一行小标签），只是里面塞两行：
+ * 每行**双列布局**（标签在左、数字在右，颜色区分送/收），所以这一块高度与旁边四个块一致。
+ * 点一下开「每日收益」日历（每月每天的送礼/收礼抖币）。
+ */
+function GiftValueBlock(props: {
+  label: string
+  sentLabel: string
+  sent: number
+  sentColor: string
+  receivedLabel: string
+  received: number
+  receivedColor: string
+  /** 悬浮提示（说清点了会发生什么） */
+  hint: string
+  palette: PluginPalette
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      className="col-span-2 flex min-w-0 cursor-pointer flex-col rounded-md px-1.5 py-1 text-left"
+      style={{ backgroundColor: props.palette.soft }}
+      title={props.hint}
+      onClick={props.onClick}
+    >
+      <span className="truncate text-[10px] opacity-60">{props.label}</span>
+      <span className="flex min-w-0 items-baseline justify-between gap-1 text-[10px] leading-5">
+        <span className="shrink-0 opacity-60">{props.sentLabel}</span>
+        <span className="truncate font-semibold" style={{ color: props.sentColor }}>
+          {formatNumber(props.sent)}
+        </span>
+      </span>
+      <span className="flex min-w-0 items-baseline justify-between gap-1 text-[10px] leading-5">
+        <span className="shrink-0 opacity-60">{props.receivedLabel}</span>
+        <span className="truncate font-semibold" style={{ color: props.receivedColor }}>
+          {formatNumber(props.received)}
+        </span>
+      </span>
+    </button>
   )
 }
 

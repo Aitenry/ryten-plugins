@@ -6,6 +6,7 @@ import type {
   DayRecordRow,
   DbStats,
   GiftBreakdownRow,
+  GiftDayRow,
   GiftRankRow,
   IdentityAccountRow,
   IdentityGroup,
@@ -17,7 +18,8 @@ import type {
   StoredMessage,
   UserIdentity,
   UserRankRow,
-  UserStats
+  UserStats,
+  UserTotalsRow
 } from '../../shared/types'
 import {
   douyinLinkIdentities,
@@ -791,11 +793,207 @@ export async function enterTotalsByUser(userIds: string[]): Promise<Map<string, 
 }
 
 /**
- * **今天**（`dayStart` 之后）每个人送出的抖币合计，跨全部直播间（主进程「今日消费」账本的补种）。
+ * 一批用户的**跨房间互动合计**（不按 webRid 切；档案弹窗「互动统计」用）。
  *
- * 只统计 `kind = 'gift'` 且 `diamonds > 0` 的行；`dayStart` 由主进程按**本地自然日**算好传进来
- * （与 `dayRecords` 的分天口径一致：本地 00:00）。
+ * 与 `enterTotalsByUser` 的区别：这里把整份互动都合了。口径与数据来源：
+ * - **发言 / 进场 / 点赞 / 关注 / 送礼次数 / 送礼抖币**：`douyin_link_users` 按人把各房间的
+ *   累计行加起来（每个人的每一行本身就是那个房间的累计，见表注释）；
+ * - **收礼抖币**：`douyin_link_users` 里**没有**这一列（档案表按「这个人送出去多少」记），
+ *   所以按收礼人过滤 `douyin_link_messages` 现算——与收礼物榜同一口径（`to_user_id` 非空，
+ *   收礼人认不出来就不算，见 `shared/gift-recipient.ts`）。
+ *
+ * ⚠️ 消息流水会按保留期清理，而用户档案行不会：所以**收礼抖币可能比送礼抖币少**
+ * （用户把保留期设成非零时）。这是数据的真实情况，不拿档案表里的数去补。
  */
+export async function userStatsAnyRoom(userIds: string[]): Promise<Map<string, UserTotalsRow>> {
+  const out = new Map<string, UserTotalsRow>()
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  if (ids.length === 0) return out
+  /*
+   * 先给**每个问到的 id 都建一行 0**：档案行还没落库的人（本场刚出现、或者档案被清过）
+   * 也有「收礼抖币」可查（那个数是从消息流水现算的）。不这么做的话，调用方拿到的是
+   * `undefined`，会分不清「没这个人」和「这个人什么都没有」。
+   */
+  for (const id of ids) {
+    out.set(id, {
+      userId: id,
+      chat: 0,
+      enter: 0,
+      like: 0,
+      follow: 0,
+      gift: 0,
+      diamonds: 0,
+      receivedDiamonds: 0
+    })
+  }
+  await schemaReady
+  await withOrm('douyin-link.userStatsAnyRoom', async (db) => {
+    for (let index = 0; index < ids.length; index += MSG_CHUNK) {
+      const slice = ids.slice(index, index + MSG_CHUNK)
+      const rows = await db
+        .select({
+          userId: douyinLinkUsers.userId,
+          chat: sql<number>`coalesce(sum(${douyinLinkUsers.chat}), 0)::int`,
+          enter: sql<number>`coalesce(sum(${douyinLinkUsers.enter}), 0)::int`,
+          likes: sql<number>`coalesce(sum(${douyinLinkUsers.likes}), 0)::int`,
+          follows: sql<number>`coalesce(sum(${douyinLinkUsers.follows}), 0)::int`,
+          gift: sql<number>`coalesce(sum(${douyinLinkUsers.gift}), 0)::int`,
+          diamonds: sql<number>`coalesce(sum(${douyinLinkUsers.diamonds}), 0)::int`
+        })
+        .from(douyinLinkUsers)
+        .where(inArray(douyinLinkUsers.userId, slice))
+        .groupBy(douyinLinkUsers.userId)
+      for (const row of rows) {
+        out.set(row.userId, {
+          userId: row.userId,
+          chat: row.chat,
+          enter: row.enter,
+          like: row.likes,
+          follow: row.follows,
+          gift: row.gift,
+          diamonds: row.diamonds,
+          receivedDiamonds: 0
+        })
+      }
+      /*
+       * 收礼抖币：只认**别人送给他**的礼物。两种「自环」都要排掉：
+       * - 同行自己送自己（`user_id = to_user_id`，真发生过）；
+       * - **画像里自己名下的另一个号**送来的（`user_id` 也在 `slice` 里）——阿甲拿小号给大号刷礼物，
+       *   那不是「收到的礼」，算进去会让送礼/收礼两个数字互相灌水（与「分析用户」的关系网同一口径，
+       *   见 `userAnalysisData` 的 `selfLoopOut`）。
+       * `to_user_id` 为空的行是「认不出收礼人」，也不计。
+       */
+      const selfLoopOut = slice.length > 1 ? notInArray(douyinLinkMessages.userId, slice) : undefined
+      const received = await db
+        .select({
+          userId: douyinLinkMessages.toUserId,
+          diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+        })
+        .from(douyinLinkMessages)
+        .where(
+          and(
+            inArray(douyinLinkMessages.toUserId, slice),
+            eq(douyinLinkMessages.kind, 'gift'),
+            ne(douyinLinkMessages.toUserId, ''),
+            ne(douyinLinkMessages.userId, douyinLinkMessages.toUserId),
+            selfLoopOut
+          )
+        )
+        .groupBy(douyinLinkMessages.toUserId)
+      for (const row of received) {
+        const hit = out.get(row.userId)
+        if (hit) hit.receivedDiamonds = row.diamonds
+      }
+    }
+  })
+  return out
+}
+
+/**
+ * 某个人（含画像绑定的全部账号）的**逐日送礼 / 收礼抖币**，跨全部直播间。
+ *
+ * 给档案弹窗的「每日收益」日历用（用户 2026-10-11：「点击后可以查看每一个月的每一天送礼和
+ * 收礼的抖币，这个内容 UI 向股票的每日收益的样式」）。三条口径：
+ * - **按本地自然日**分格（与「每日记录」同一个偏移算法：`(at_ms + 偏移) / 86400000`）；
+ * - **送礼** = 他发的礼物行的抖币合计；**收礼** = 别人送给他的礼物行的抖币合计；
+ * - `days` 只回**范围内有记录**的日子，没记录的那天由界面画成空格子（不回 0 行）。
+ *
+ * `fromBucket` / `toBucket` 由调用方按本地月份算好（见 `monthBucketRange`）。
+ */
+export async function userGiftDays(
+  userIds: string[],
+  fromBucket: number,
+  toBucket: number
+): Promise<GiftDayRow[]> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  if (ids.length === 0) return []
+  await schemaReady
+  const offsetMs = -new Date().getTimezoneOffset() * 60000
+  return withOrm('douyin-link.userGiftDays', async (db) => {
+    // 时区偏移必须是字面量（GROUP BY / ORDER BY 会各渲染一次，绑定参数会被当成两个表达式）
+    const offset = sql.raw(String(Math.trunc(offsetMs)))
+    const buckets = sql`floor((${douyinLinkMessages.atMs} + ${offset}) / 86400000)`
+    const inRange = and(
+      gte(buckets, sql`${fromBucket}`),
+      lte(buckets, sql`${toBucket}`)
+    )
+    const sent = await db
+      .select({
+        bucket: sql<number>`(${buckets})::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        gifts: sql<number>`count(*)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.userId, ids), eq(douyinLinkMessages.kind, 'gift'), inRange))
+      .groupBy(buckets)
+    const received = await db
+      .select({
+        bucket: sql<number>`(${buckets})::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        gifts: sql<number>`count(*)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          inArray(douyinLinkMessages.toUserId, ids),
+          eq(douyinLinkMessages.kind, 'gift'),
+          ne(douyinLinkMessages.userId, douyinLinkMessages.toUserId),
+          inRange
+        )
+      )
+      .groupBy(buckets)
+
+    const days = new Map<number, GiftDayRow>()
+    const ensure = (bucket: number): GiftDayRow => {
+      const hit = days.get(bucket)
+      if (hit) return hit
+      const row: GiftDayRow = { day: new Date(bucket * 86400000).toISOString().slice(0, 10), bucket, sent: 0, received: 0, sentGifts: 0, receivedGifts: 0 }
+      days.set(bucket, row)
+      return row
+    }
+    for (const row of sent) {
+      const day = ensure(row.bucket)
+      day.sent = row.diamonds
+      day.sentGifts = row.gifts
+    }
+    for (const row of received) {
+      const day = ensure(row.bucket)
+      day.received = row.diamonds
+      day.receivedGifts = row.gifts
+    }
+    return [...days.values()].sort((a, b) => a.bucket - b.bucket)
+  })
+}
+
+/** 某个人有礼物记录的月份（`YYYY-MM`，按本地月份、倒序）——日历翻页的边界 */
+export async function userGiftMonths(userIds: string[]): Promise<string[]> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  if (ids.length === 0) return []
+  await schemaReady
+  const offsetMs = -new Date().getTimezoneOffset() * 60000
+  return withOrm('douyin-link.userGiftMonths', async (db) => {
+    const offset = sql.raw(String(Math.trunc(offsetMs)))
+    const dayBucket = sql`floor((${douyinLinkMessages.atMs} + ${offset}) / 86400000)`
+    const scope = and(
+      eq(douyinLinkMessages.kind, 'gift'),
+      or(
+        inArray(douyinLinkMessages.userId, ids),
+        and(inArray(douyinLinkMessages.toUserId, ids), ne(douyinLinkMessages.userId, douyinLinkMessages.toUserId))
+      )
+    )
+    const rows = await db
+      .select({
+        month: sql<string>`to_char(to_timestamp((${dayBucket})::bigint * 86400), 'YYYY-MM')`
+      })
+      .from(douyinLinkMessages)
+      .where(scope)
+      .groupBy(sql`to_char(to_timestamp((${dayBucket})::bigint * 86400), 'YYYY-MM')`)
+      .orderBy(desc(sql`to_char(to_timestamp((${dayBucket})::bigint * 86400), 'YYYY-MM')`))
+    return rows.map((row) => row.month).filter(Boolean)
+  })
+}
+
+
 export async function todayGiftTotals(dayStart: number): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   await schemaReady

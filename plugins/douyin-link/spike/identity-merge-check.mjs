@@ -296,15 +296,15 @@ async function main() {
       check(byName.some((row) => row.userId === realId), 'A：真库：按昵称也能搜到（昵称只用来显示）')
     }
     if (realId2) {
-      // 拿真实数据里消息最多的那个房间做「按房间合并」的断言（与界面在房间模式下走的是同一条路）
-      const room = (
-        await rawQuery(`select web_rid from douyin_link_messages group by web_rid order by count(*) desc limit 1`)
-      ).rows[0].web_rid
+      /*
+       * 档案统计现在是**跨全部直播间**的（用户 2026-10-11 的要求），所以期望值也是
+       * 「这两个账号在全库档案行之和」——不再是某一个房间那一行。
+       */
       const expected = Number(
         (
           await rawQuery(
             `select coalesce(sum(chat), 0)::int as value from douyin_link_users
-              where web_rid = '${room}' and user_id in ('${realId}', '${realId2}')`
+              where user_id in ('${realId}', '${realId2}')`
           )
         ).rows[0]?.value ?? 0
       )
@@ -313,13 +313,17 @@ async function main() {
       const crossRoom = await hub.userProfile('', realId)
       console.log(
         `  绑定 ${realId} + ${realId2}：画像 ${bound.identityId} · ${bound.accounts.length} 个账号 · ` +
-          `${room} 房档案弹幕 ${mergedProfile?.stats.chat ?? 0}（库里两行之和 ${expected}）· 空 webRid 也能查：${Boolean(crossRoom)}`
+          `档案弹幕 ${mergedProfile?.stats.chat ?? 0}（库里两行之和 ${expected}）· 空 webRid 也能查：${Boolean(crossRoom)}`
       )
       check(bound.accounts.length === 2, 'A：真库：两个 id 绑成一个画像')
       check(
         (mergedProfile?.stats.chat ?? -1) === expected,
-        'A：真库：档案弹幕 = 两个账号在该房间档案行之和',
+        'A：真库：档案弹幕 = 两个账号的全部档案行之和（跨房间）',
         `实际 ${mergedProfile?.stats.chat} / 期望 ${expected}`
+      )
+      check(
+        (crossRoom?.stats.chat ?? -1) === (mergedProfile?.stats.chat ?? -2),
+        'A：真库：给了房间与不给房间（大屏模式）得到同一份跨房合计'
       )
       check(Boolean(crossRoom), 'A：真库：没有当前房间（空 webRid）时档案也能查（跨房间取最近一行）')
       const back = await hub.unbindAccount(realId2, realId)
@@ -334,9 +338,18 @@ async function main() {
   const beforeAnalysis = await analysisOf(hub, A1)
   const beforeIdentity = await hub.userIdentity(A1)
   console.log('\n=== 1. 绑定前（只有阿甲自己） ===')
-  console.log(`  档案 A 房：弹幕 ${beforeProfile?.stats.chat} · 抖币 ${beforeProfile?.stats.diamonds}`)
+  console.log(`  档案：弹幕 ${beforeProfile?.stats.chat} · 送出 ${beforeProfile?.stats.diamonds} · 收到 ${beforeProfile?.stats.receivedDiamonds}`)
   console.log(`  画像：弹幕 ${beforeAnalysis.chat} · 抖币 ${beforeAnalysis.monetary} · 关系边 ${beforeAnalysis.outgoing.join(' / ') || '-'}`)
-  check(beforeProfile?.stats.chat === 3, '1：绑定前档案只算自己（A 房 3 条弹幕）', `实际 ${beforeProfile?.stats.chat}`)
+  /*
+   * 档案统计是**跨全部直播间**的（用户 2026-10-11：「互动统计（本房间累计）需要所有直播间统计」），
+   * 所以这里跟画像同口径：A 房 3 条 + B 房 2 条 = 5。
+   */
+  check(beforeProfile?.stats.chat === 5, '1：绑定前档案（跨房间）= 3 + 2 = 5', `实际 ${beforeProfile?.stats.chat}`)
+  check(
+    beforeProfile?.stats.receivedDiamonds === 0,
+    '1：绑定前没人给他送过礼 → 收礼 0',
+    `实际 ${beforeProfile?.stats.receivedDiamonds}`
+  )
   check(beforeAnalysis.chat === 5, '1：绑定前画像跨房间 = 3 + 2 = 5', `实际 ${beforeAnalysis.chat}`)
   check(beforeAnalysis.monetary === 600, '1：绑定前抖币 = 100 + 500（自环此刻还不是自环）= 600', `实际 ${beforeAnalysis.monetary}`)
   check(beforeIdentity.identityId === 0 && beforeIdentity.accounts.length === 1, '1：绑定前是「单账号画像」')
@@ -348,17 +361,36 @@ async function main() {
   const mergedAnalysis = await analysisOf(hub, A1)
   console.log('\n=== 2. 绑定阿甲 + 阿乙 ===')
   console.log(`  画像 ${identity.identityId}：${identity.accounts.map((a) => `${a.nickname}(${a.userId})`).join(' + ')}`)
-  console.log(`  档案 A 房：弹幕 ${mergedProfile?.stats.chat}（3 + 2）· 抖币 ${mergedProfile?.stats.diamonds}`)
-  console.log(`  档案 B 房：弹幕 ${mergedRoomB?.stats.chat} · 抖币 ${mergedRoomB?.stats.diamonds}（阿乙在这里送过 50）`)
+  console.log(`  档案（A 房入口）：弹幕 ${mergedProfile?.stats.chat}（3 + 2 + 2 = 7）· 送出 ${mergedProfile?.stats.diamonds} · 收到 ${mergedProfile?.stats.receivedDiamonds}`)
+  console.log(`  档案（B 房入口）：弹幕 ${mergedRoomB?.stats.chat} · 送出 ${mergedRoomB?.stats.diamonds} · 收到 ${mergedRoomB?.stats.receivedDiamonds}`)
   console.log(`  画像：弹幕 ${mergedAnalysis.chat} · 抖币 ${mergedAnalysis.monetary} · 送礼对象 ${mergedAnalysis.recipients} · 关系边 ${mergedAnalysis.outgoing.join(' / ')}`)
   check(identity.identityId > 0 && identity.accounts.length === 2, '2：绑定后画像里有 2 个账号')
   check(
     identity.accounts.map((a) => a.userId).sort().join(',') === [A1, A2].sort().join(','),
     '2：账号清单就是这两个 id（身份键是 id，不是昵称）'
   )
-  check(mergedProfile?.stats.chat === 5, '2：档案按房间合并（A 房 3 + 2 = 5）', `实际 ${mergedProfile?.stats.chat}`)
-  check(mergedProfile?.stats.diamonds === 600, '2：A 房抖币 = 100 + 500', `实际 ${mergedProfile?.stats.diamonds}`)
-  check(mergedRoomB?.stats.diamonds === 50, '2：B 房抖币 = 50（阿乙送的）', `实际 ${mergedRoomB?.stats.diamonds}`)
+  check(mergedProfile?.stats.chat === 7, '2：档案 = 两个账号跨房间（3 + 2 + 2 = 7）', `实际 ${mergedProfile?.stats.chat}`)
+  check(mergedProfile?.stats.diamonds === 650, '2：送出抖币 = 100 + 500 + 50 = 650', `实际 ${mergedProfile?.stats.diamonds}`)
+  /*
+   * 收礼 0 是**对的**：这份数据里唯一「送给这两个号」的礼物就是阿甲→阿乙那 500（画像内部的自环），
+   * 它被排掉了；给主播的 100 / 50 是**送出去**的。这条断言就是在钉「自环不算收礼」。
+   */
+  check(
+    mergedProfile?.stats.receivedDiamonds === 0,
+    '2：收到抖币 = 0（唯一的进账是画像内的自环 500，不算收礼）',
+    `实际 ${mergedProfile?.stats.receivedDiamonds}`
+  )
+  /*
+   * **换个房间打开同一个人，数字必须一样**（这是这次改动的重点）：
+   * 以前按房间切片，B 房只能看到 50；现在两个入口都是跨房合计。
+   */
+  check(
+    mergedRoomB?.stats.chat === mergedProfile?.stats.chat &&
+      mergedRoomB?.stats.diamonds === mergedProfile?.stats.diamonds &&
+      mergedRoomB?.stats.receivedDiamonds === mergedProfile?.stats.receivedDiamonds,
+    '2：从 A 房 / B 房两个入口打开，数字完全一样（跨房间合计）',
+    `A=${JSON.stringify(mergedProfile?.stats)} / B=${JSON.stringify(mergedRoomB?.stats)}`
+  )
   check(mergedAnalysis.chat === 7, '2：画像跨房间 = 3 + 2 + 2 = 7', `实际 ${mergedAnalysis.chat}`)
 
   /* 3. 自环礼物 */
@@ -385,11 +417,16 @@ async function main() {
   const renamedAnalysis = await analysisOf(hub, A1)
   const renamedIdentity = await hub.userIdentity(A1)
   console.log('\n=== 4. 把所有昵称改掉之后 ===')
-  console.log(`  档案 A 房：弹幕 ${renamedProfile?.stats.chat} · 抖币 ${renamedProfile?.stats.diamonds}`)
+  console.log(`  档案：弹幕 ${renamedProfile?.stats.chat} · 送出 ${renamedProfile?.stats.diamonds} · 收到 ${renamedProfile?.stats.receivedDiamonds}`)
   console.log(`  画像：弹幕 ${renamedAnalysis.chat} · 抖币 ${renamedAnalysis.monetary} · 关系边 ${renamedAnalysis.outgoing.join(' / ')}`)
   console.log(`  账号清单：${renamedIdentity.accounts.map((a) => a.userId).join(', ')}`)
   check(same(renamedAnalysis, mergedAnalysis), '4：改名后画像数字与关系边逐字不变（关联只走 id）', JSON.stringify(renamedAnalysis))
-  check(renamedProfile?.stats.chat === 5 && renamedProfile?.stats.diamonds === 600, '4：改名后档案数字不变')
+  check(
+    renamedProfile?.stats.chat === mergedProfile?.stats.chat &&
+      renamedProfile?.stats.diamonds === mergedProfile?.stats.diamonds &&
+      renamedProfile?.stats.receivedDiamonds === mergedProfile?.stats.receivedDiamonds,
+    '4：改名后档案数字不变（跨房间合计也一样）'
+  )
   check(
     renamedIdentity.accounts.map((a) => a.userId).sort().join(',') === [A1, A2].sort().join(','),
     '4：改名后账号清单不变（仍是两个 id）'

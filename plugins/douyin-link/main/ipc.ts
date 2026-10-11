@@ -218,6 +218,13 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 「分析用户」：按库里的数据用确定性规则算法生成用户画像（不依赖大模型）。
     // 只收 userId —— 画像是**跨全部直播间**的，与「当前房间」无关。
     'plugin:douyin-link:user-analysis': (userId?: string) => hub.userAnalysis(String(userId ?? '')),
+    /*
+     * 档案里「送礼 / 收礼」点开的**每日收益日历**（跨全部直播间，一个月一次）。
+     * 只收 userId 与月份（`YYYY-MM`，空/非法就在主进程取有记录的最近一个月）——与画像同口径，
+     * 所以不传 webRid。
+     */
+    'plugin:douyin-link:user-gift-calendar': (userId?: string, month?: string) =>
+      hub.userGiftCalendar(String(userId ?? ''), String(month ?? '')),
     // 礼物榜点一行：这个人的礼物历史（sent = 他送的 / received = 他收到的），明细分页
     // `from`/`to` 是榜单当时那段范围（前端把同一段传下来）——明细必须与榜单同一段：今天就是今天
     'plugin:douyin-link:gift-history': (

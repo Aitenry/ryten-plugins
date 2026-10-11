@@ -6,6 +6,7 @@ import type {
   UserProfile,
   UserStats
 } from '../../shared/types'
+import { resolveGiftRecipient } from '../../shared/gift-recipient'
 import type { MessageRow, MinuteDeltaRow, UserDeltaRow } from '../db/mapper'
 
 /**
@@ -32,6 +33,22 @@ const USER_CAP = 4000
 const PRESENCE_CAP = 3000
 /** 单次 flush 最多写多少行消息（剩下的留到下一轮） */
 export const FLUSH_ROWS = 200
+
+/**
+ * 记录器内部取「现在」的唯一入口。
+ *
+ * 为什么要包一层（2026-10-11 加工装时踩到的）：收礼人推断带一个**观察窗口**（见
+ * `shared/gift-recipient.ts`），而窗口是「落库那一刻 − 这一帧进来的时刻」——
+ * 工装要验的正是跨过窗口之后的行为。原来各处直接 `Date.now()`，而 `ingest` 把时刻**捕获在闭包里**，
+ * 于是「先把钟拨快、再 takeMessages」这种顺序根本验不出来（工装读到的两个时刻一样，
+ * 窗口永远不过期）。现在统一走这里，工装可以 `setNow()` 注入虚拟时钟。
+ */
+let clock: () => number = () => Date.now()
+
+/** 测试用：注入虚拟时钟（传 `null` 恢复真实时钟） */
+export function setNow(source: (() => number) | null): void {
+  clock = source ?? ((): number => Date.now())
+}
 
 const emptyCounters = (): LiveInteractions => ({
   chat: 0,
@@ -84,13 +101,30 @@ export class RoomRecorder {
    * （2026-10-11 修的 bug，真库证据见 `takeUserDeltas` 的注释）。
    */
   private pendingUsers = new Set<string>()
-  private messages: MessageRow[] = []
+  /**
+   * 待写库的消息行。礼物多带一个**推算用的时刻**（`noRecipientSince`）：
+   * 帧里没给收礼人时，收礼人要到 `takeMessages()` 才定（见那里的注释），
+   * 而「观察窗口」的起点是**这一帧进来的时刻**，所以要跟着行走。
+   */
+  private messages: Array<MessageRow & { noRecipientSince?: number }> = []
   private minutes = new Map<number, MinuteDeltaRow>()
   private minuteUsers = new Map<number, Set<string>>()
   /** 本场「在场」证据（≠ sessionUserIds：只有 id 的来源也要记，见 PresenceEntry） */
   private presence = new Map<string, PresenceEntry>()
   /** 麦位：用户 id → 麦位序号（1 起）。聊天室才有，重连后由推送刷新 */
   private micSeats = new Map<string, number>()
+  /**
+   * **收礼人推断的房间上下文**（见 `shared/gift-recipient.ts`）。
+   *
+   * 帧里不给收礼人时（个播一律不给，真库实测 4077/4077），落库前得补上，否则收礼物榜整张空着。
+   * 主播与窗内麦位表由中枢通过 `setAnchor` / `setMicUsers` 灌进来。
+   */
+  private anchorId = ''
+  private anchorName = ''
+  /** 这一场**第一次**看到没有收礼人的礼物帧的时刻（0 = 还没见过；观察窗口从它算起） */
+  private noRecipientSince = 0
+  /** 麦位表是否同步到过（判断「没有麦位」是「个播」还是「语音房还没同步」） */
+  private micSynced = false
   /**
    * 点歌单号 → 这一单**已经算进本场数字**的抖币。同一个单会推两次（先没记录、后带记录），
    * 本场礼物条数只能算一次，抖币按差额补（见 `orderContribution`）。
@@ -102,7 +136,7 @@ export class RoomRecorder {
   }
 
   /** 开始一次监控会话：本场数字清零，库里的累计不动 */
-  begin(sessionId: number, cap: number, startedAt = Date.now()): void {
+  begin(sessionId: number, cap: number, startedAt = clock()): void {
     this.sessionId = sessionId
     this.cap = Math.max(50, cap)
     this.startedAt = startedAt
@@ -118,6 +152,8 @@ export class RoomRecorder {
     this.minuteUsers.clear()
     this.presence.clear()
     this.micSeats.clear()
+    this.micSynced = false
+    this.noRecipientSince = 0
     this.orderGifts.clear()
   }
 
@@ -127,13 +163,37 @@ export class RoomRecorder {
    * 整份替换：这份同步是「当前麦位表」的全量快照，不是增量——留着旧的会让下麦的人永远在麦上。
    * 同时把这些 id 记进「在场」（他们一定在这个房间里）。
    */
-  setMicUsers(userIds: string[], at = Date.now()): void {
+  setMicUsers(userIds: string[], at = clock()): void {
+    this.micSynced = true
     this.micSeats.clear()
     userIds.forEach((id, index) => {
       if (!id) return
       if (!this.micSeats.has(id)) this.micSeats.set(id, index + 1)
       this.notePresence(id, at)
     })
+  }
+
+  /**
+   * 记下主播（收礼人推断的兜底人选，见 `shared/gift-recipient.ts`）。
+   *
+   * 由中枢在**解析到主播资料之后**调用（`applyResolved`）与**开会话时**调用——两处都得调：
+   * `begin()` 会清掉上下文（见上），而主播资料可能比会话先到。
+   *
+   * 顺带把主播写进用户档案表（只有 id + 昵称、统计全 0）：榜上的收礼人是**按 id 聚合**的，
+   * 昵称走「消息里的 `to_user_name` → 用户表的 `nickname`」这条兜底链——不写这一行，
+   * 个播的收礼物榜就会显示成一串抖音号。
+   */
+  setAnchor(user: UserInfo | null | undefined): void {
+    if (!user?.id) return
+    this.anchorId = user.id
+    this.anchorName = user.nickname || this.anchorName
+    if (this.userMap.has(user.id)) return
+    this.userMap.set(user.id, {
+      profile: { ...user, firstSeen: 0, lastSeen: 0, stats: emptyStats() },
+      delta: emptyStats()
+    })
+    // 只排这一行档案（统计全 0）；具体什么时候出队由 `takeUserDeltas` 决定
+    this.pendingUsers.add(user.id)
   }
 
   /** 麦位表（按麦位序） */
@@ -165,7 +225,7 @@ export class RoomRecorder {
 
   /** 本场速率（条/分，最近 60 秒的滑窗） */
   get rate(): number {
-    const now = Date.now()
+    const now = clock()
     this.rateMarks = this.rateMarks.filter((mark) => now - mark < RATE_WINDOW_MS)
     return this.rateMarks.length
   }
@@ -178,7 +238,7 @@ export class RoomRecorder {
    */
   ingest(items: DanmakuItem[], users: UserInfo[], cap?: number): string[] {
     if (typeof cap === 'number') this.setCap(cap)
-    const now = Date.now()
+    const now = clock()
 
     for (const info of users) {
       if (!info.id) continue
@@ -232,6 +292,7 @@ export class RoomRecorder {
       const order = this.orderContribution(item)
       this.bumpCounters(item, order)
       this.pushMinute(item, order)
+      const recipient = this.recipientHint(item, now)
       this.messages.push({
         webRid: this.webRid,
         sessionId: this.sessionId,
@@ -241,11 +302,12 @@ export class RoomRecorder {
         content: item.text,
         count: item.count,
         diamonds: item.diamonds,
-        toUserId: item.toUserId,
-        toUserName: item.toUser,
+        toUserId: recipient.toUserId,
+        toUserName: recipient.toUserName,
         orderKey: item.orderKey ?? '',
         giftRecord: item.giftRecord ?? false,
-        atMs: item.at
+        atMs: item.at,
+        ...(recipient.inferred ? { noRecipientSince: now } : {})
       })
       const user = item.userId ? this.userMap.get(item.userId) : undefined
       if (user) {
@@ -296,12 +358,38 @@ export class RoomRecorder {
 
   /* --------------------------------------------------- 落库用的增量 */
 
-  /** 取走待写的消息行（最多 FLUSH_ROWS 行，剩下的下一轮） */
+  /**
+   * 取走待写的消息行（最多 FLUSH_ROWS 行，剩下的下一轮）。
+   *
+   * **收礼人在这里才最终定**（不是 ingest 的时候）：帧里不带收礼人的房间（个播）要走
+   * 「观察窗口 → 主播」这条推断，而窗口是**按时间**算的——刚连上的头几十秒谁都不敢认。
+   * 若在 ingest 时就把空值写死，窗口内的那些礼物就永远进不了收礼物榜（工装
+   * `gift-recipient-check.mjs` 第一版就是这么抓出来的）。所以待写行只记住「帧里给没给」，
+   * 落库这一刻用**房间此刻的上下文**（可能已经知道主播 / 已经同步到麦位）算一遍。
+   */
   takeMessages(): MessageRow[] {
     if (this.messages.length === 0) return []
-    const rows = this.messages.slice(0, FLUSH_ROWS)
-    this.messages = this.messages.slice(rows.length)
-    return rows
+    const pending = this.messages.slice(0, FLUSH_ROWS)
+    this.messages = this.messages.slice(pending.length)
+    const now = clock()
+    return pending.map((row) => {
+      if (row.kind !== 'gift' || row.toUserId) return row
+      /** 这一帧进来时观察窗口的起点（`recipientHint` 记的；理论上一定有，兜底 0 = 不过期） */
+      const since = this.micSynced ? 0 : this.windowOrigin(row)
+      const resolved = resolveGiftRecipient(
+        { id: '', name: '' },
+        {
+          anchorId: this.anchorId,
+          anchorName: this.anchorName,
+          micUsers: [...this.micSeats.keys()],
+          // 麦位同步过 = 语音房：窗口不再生效（麦上没人就说明这会儿真没人收）
+          noRecipientSince: since
+        },
+        now
+      )
+      if (!resolved.toUserId) return row
+      return { ...row, toUserId: resolved.toUserId, toUserName: resolved.toUserName }
+    })
   }
 
   get pending(): number {
@@ -417,6 +505,22 @@ export class RoomRecorder {
   }
 
   /**
+   * 这一行落库时该用的**观察窗口起点**。
+   *
+   * 取「本场第一次见到无收礼人礼物帧」的时刻，和「这一帧进来时窗口已经走了多久」两者里**更早**的那个：
+   * - 只用本场起点：窗口内进来、窗口外才落库的礼物会被算成「窗外」，直接记到主播头上
+   *   （其实它们在窗口内，本该等麦位表说话）；
+   * - 只用每行自己的盖章：同一场的礼物分批进来时，后一批的章更晚，`now - 章` 被算小，
+   *   窗口永远过不去——**个播的收礼榜又会空掉**（2026-10-11 加工装时实测到的就是这个）。
+   */
+  private windowOrigin(row: { noRecipientSince?: number }): number {
+    const own = row.noRecipientSince ?? 0
+    const session = this.noRecipientSince
+    if (own > 0 && session > 0) return Math.min(own, session)
+    return own || session
+  }
+
+  /**
    * 这一条消息**该给本场数字加多少**（礼物条数 / 抖币）。
    *
    * 只有点歌那一类要特殊处理：同一个单会推两次（先一条没礼物记录的、后一条带记录的，
@@ -434,6 +538,23 @@ export class RoomRecorder {
     }
     if (item.diamonds > before) this.orderGifts.set(key, item.diamonds)
     return { count: 0, diamonds: Math.max(0, item.diamonds - before) }
+  }
+
+  /**
+   * 这一条要落库的**收礼人候选**。
+   *
+   * 非礼物恒为空；礼物帧里带了收礼人就直接用它（唯一权威，也是**唯一不在落库时重算**的一种）；
+   * 帧里没带就留空 + 标 `inferred`，等 `takeMessages()` 那一刻按房间上下文定（见那里的注释）。
+   * 观察窗口的起点也在这里记：第一次见到「没有收礼人的礼物帧」的时刻。
+   */
+  private recipientHint(
+    item: DanmakuItem,
+    now: number
+  ): { toUserId: string; toUserName: string; inferred: boolean } {
+    if (item.kind !== 'gift') return { toUserId: item.toUserId, toUserName: item.toUser, inferred: false }
+    if (item.toUserId) return { toUserId: item.toUserId, toUserName: item.toUser, inferred: false }
+    if (this.noRecipientSince === 0) this.noRecipientSince = now
+    return { toUserId: '', toUserName: '', inferred: true }
   }
 
   private bumpCounters(item: DanmakuItem, order: { count: number; diamonds: number }): void {

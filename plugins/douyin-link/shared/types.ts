@@ -107,12 +107,27 @@ export interface UserStats {
   diamonds: number
 }
 
-/** 完整档案 = 静态信息 + 出现记录 + 该房间的累计统计 */
+/** 完整档案 = 静态信息 + 出现记录 + 该房间的累计统计（实时列表 / 用户榜口径） */
 export interface UserProfile extends UserInfo {
   /** 首次出现 / 最近出现（ms） */
   firstSeen: number
   lastSeen: number
   stats: UserStats
+}
+
+/**
+ * **档案弹窗**用的那一份（与实际落库的 `UserProfile` 是两回事，别混用）。
+ *
+ * 区别只在 `stats`：这里是**跨全部直播间的互动合计**（送礼与收礼**各一个**抖币数），
+ * 而 `UserProfile.stats` 是**单个房间**的 `UserStats`——用户 2026-10-11：
+ * 「这个互动统计（本房间累计）需要所有直播间统计，并且礼物价值要改成送礼和收礼两个统计」。
+ * 之所以拆成两个类型而不是改 `UserStats`：`UserStats` 还背着一堆单房间口径的用处
+ * （实时列表行首的消费评分、用户榜的列、recorder 的本场增量），那些地方不该跟着变成跨房口径。
+ */
+export interface UserDetail extends UserInfo {
+  firstSeen: number
+  lastSeen: number
+  stats: UserTotalsRow
 }
 
 /**
@@ -637,6 +652,62 @@ export interface AllRoomsAnalysis {
 /** 主进程推送的全局分析快照（数据大屏的实时更新；形状同 `SummaryPush`） */
 export interface AllAnalysisPush {
   analysis: AllRoomsAnalysis
+}
+
+/**
+ * 一个人的**跨房间互动合计**（用户档案弹窗的「互动统计」用）。
+ *
+ * 用户 2026-10-11 要求：「这个互动统计（本房间累计）需要所有直播间统计，并且礼物价值要改成
+ * 送礼和收礼两个统计」——所以这里同时给**送出**与**收到**两个抖币数，而且都是跨全部直播间的。
+ */
+export interface UserTotalsRow {
+  userId: string
+  /** 发言条数 */
+  chat: number
+  /** 进场次数 */
+  enter: number
+  /** 点赞次数 */
+  like: number
+  /** 关注次数 */
+  follow: number
+  /** 送礼**次数** */
+  gift: number
+  /** **送出**的抖币总额 */
+  diamonds: number
+  /** **收到**的抖币总额（按收礼人现算；认不出收礼人的礼物不计） */
+  receivedDiamonds: number
+}
+
+/**
+ * 「每日收益」里的一天：这个人当天**送出**与**收到**的抖币。
+ *
+ * 只有**有记录**的日子才回（没记录的日子由界面画成空格子）。
+ */
+export interface GiftDayRow {
+  /** 本地日期 `YYYY-MM-DD` */
+  day: string
+  /** 本地日桶（`floor((at_ms + 时区偏移) / 86400000)`；界面按它排格子，不受字符串时区影响） */
+  bucket: number
+  sent: number
+  received: number
+  /** 当天的送礼件数 / 收礼件数（悬浮明细用） */
+  sentGifts: number
+  receivedGifts: number
+}
+
+/**
+ * 某个人一个月的「每日收益」+ 可翻的月份清单（档案弹窗的日历弹窗用）。
+ *
+ * 用户 2026-10-11：「点击后可以查看每一个月的每一天送礼和收礼的抖币，这个内容 UI 向股票的
+ * 每日收益的样式，点击后就是弹窗」。
+ */
+export interface UserGiftCalendar {
+  /** 这次回的是哪个月（`YYYY-MM`） */
+  month: string
+  /** 有礼物记录的月份（倒序）；界面用它判断「上一个月 / 下一个月」能不能翻 */
+  months: string[]
+  /** 这个月里有记录的那些天 */
+  days: GiftDayRow[]
 }
 
 /**
