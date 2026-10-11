@@ -102,6 +102,29 @@ const DDL: string[] = [
      updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
    )`,
   /**
+   * **画像**（0.15.11 起）：一个人可以有多个抖音账号，但画像只有一个。
+   *
+   * 两处刻意的设计：
+   * - `identity_accounts.user_id` 是**主键**：一个抖音 id 只能属于一个画像（id 才是身份，
+   *   昵称会改、会重名，所以关联一律走 id）；
+   * - 影像是**全局**的（不带 `web_rid`）：画像回答的是「这个人在这个平台什么样」，
+   *   同一个人在 A 房和 B 房是同一个人（与 `userAnalysis` 的跨房口径一致）。
+   */
+  `CREATE TABLE IF NOT EXISTS douyin_link_identities (
+     id              BIGSERIAL PRIMARY KEY,
+     name            TEXT NOT NULL DEFAULT '',
+     note            TEXT NOT NULL DEFAULT '',
+     primary_user_id TEXT NOT NULL DEFAULT '',
+     created_at      DOUBLE PRECISION NOT NULL DEFAULT 0,
+     updated_at      DOUBLE PRECISION NOT NULL DEFAULT 0
+   )`,
+  `CREATE TABLE IF NOT EXISTS douyin_link_identity_accounts (
+     user_id     TEXT PRIMARY KEY,
+     identity_id BIGINT NOT NULL,
+     added_at    DOUBLE PRECISION NOT NULL DEFAULT 0
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_douyin_link_identity_account_owner ON douyin_link_identity_accounts (identity_id)`,
+  /**
    * 礼物功能的列迁移（**幂等**，0.7.1 起）。
    *
    * 背景：0.7.0 曾把礼物整体下线，并在这里 `DROP COLUMN` 掉了这些列（含「收礼人」两列）。
@@ -138,7 +161,7 @@ export const schemaReady: Promise<void> = (async () => {
   await withOrm('douyin-link.ensureSchema', async (db) => {
     for (const statement of DDL) await db.execute(sql.raw(statement))
   })
-  logger.info('[douyin-link] 表结构已就绪（6 张 douyin_link_* 表）')
+  logger.info('[douyin-link] 表结构已就绪（8 张 douyin_link_* 表）')
 })().catch((error) => {
   logger.error('[douyin-link] 建表失败，插件将无法读写数据:', error)
   throw error
@@ -151,5 +174,8 @@ export const PURGE_TABLES = [
   'douyin_link_minutes',
   'douyin_link_sessions',
   'douyin_link_meta',
-  'douyin_link_rooms'
+  'douyin_link_rooms',
+  // 画像与账号绑定也算「这个插件的数据」：卸载时勾了删数据就一起清（不给用户留残影）
+  'douyin_link_identity_accounts',
+  'douyin_link_identities'
 ]

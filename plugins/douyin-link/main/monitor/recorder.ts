@@ -75,6 +75,15 @@ export class RoomRecorder {
   private rateMarks: number[] = []
   private userMap = new Map<string, SessionUser>()
   private touched = new Set<string>()
+  /**
+   * **待写库的用户**（出队语义，见 `takeUserDeltas`）：统计有变化、或静态字段有更新时加进来。
+   *
+   * 口径与旧版一致——**只有在本场真发过言/进过场的人**才写档案（同一帧里顺带带出来的
+   * 送礼对象那种「只有资料、没有互动」的人不写）。为什么要有这个集合：老版本靠
+   * 「扫 userMap 取前 400 个」决定写谁，结果前 400 个固定占满配额、后面出现的人永远写不进库
+   * （2026-10-11 修的 bug，真库证据见 `takeUserDeltas` 的注释）。
+   */
+  private pendingUsers = new Set<string>()
   private messages: MessageRow[] = []
   private minutes = new Map<number, MinuteDeltaRow>()
   private minuteUsers = new Map<number, Set<string>>()
@@ -102,6 +111,7 @@ export class RoomRecorder {
     this.rateMarks = []
     this.userMap.clear()
     this.touched.clear()
+    this.pendingUsers.clear()
     this.sessionUserIds.clear()
     this.messages = []
     this.minutes.clear()
@@ -198,8 +208,11 @@ export class RoomRecorder {
         badges: info.badges.length > 0 ? info.badges : existing.profile.badges,
         lastSeen: now
       }
+      const before = existing.profile
       existing.profile = merged
       this.touched.add(info.id)
+      // 静态字段真变了才排队写库（每一帧都无脑排队的话，忙房间里等于每 2 秒把同一批人重写一遍）
+      if (staticChanged(before, merged)) this.pendingUsers.add(info.id)
     }
 
     for (const item of items) {
@@ -257,6 +270,8 @@ export class RoomRecorder {
             break
         }
         this.touched.add(item.userId)
+        // 统计变了：这个人的档案行要跟着更新（累加值只有写库时才算数）
+        this.pendingUsers.add(item.userId)
       }
     }
 
@@ -307,18 +322,36 @@ export class RoomRecorder {
   }
 
   /**
-   * 取走用户增量：只有**本场真出现过**的用户才写库
-   * （静态信息可能是从别人那批里带出来的，但统计为 0 的行没必要每次都写）。
+   * 取走用户增量：**待写集合出队**，每轮最多 `limit` 个（没轮到的留到下一轮）。
+   *
+   * 为什么不是「扫一遍 userMap 取前 N 个」（2026-10-11 修的 bug，真库实测）：
+   * 旧版按 userMap 的**插入序**扫，取够 400 个就 `break`，而「本场出现过」的人
+   * （`sessionUserIds`，只在 `begin()` 里清）**永远**满足 active 条件 ——
+   * 于是前 400 个固定占满配额，**第 401 个之后出现的人一辈子写不进库**：
+   * 消息流水照写（另一条队列），档案表里没有他，档案弹窗就报「没有这个用户的档案」，
+   * 而按 id 去抖音查还能查到人（那是实时接口，与本地库无关）。
+   *
+   * 真库证据（用户库副本，2026-10-11 排查）：
+   * - 报障的那位（`108011161837` / `100400732623`）有 2 条弹幕、档案 0 行，
+   *   他在那一场里是**第 554 个**首次出现的用户；
+   * - 按「本场首次出现」排名切一刀：rank ≤ 400 的 400 人**全部**有档案行，
+   *   rank > 400 的 244 人只有 17 人有（那 17 个来自更早的会话）；
+   * - 本场人数不到 400 的会话，缺失为 0 —— 阈值吻合。
+   *
+   * 现在的口径：谁「有新东西要写」谁进 `pendingUsers`（发过言/进过场 → 统计变化；
+   * 这一帧带来了更全的静态字段 → 字段更新），出队时**从集合里删掉**，并且**只清出队这些人的增量**。
+   * 副作用是顺带干掉了旧版「前 400 个人每 2 秒被无条件 UPDATE 一遍」的空转写（忙房间约 200 行/秒）。
    */
   takeUserDeltas(limit = 400): UserDeltaRow[] {
     const rows: UserDeltaRow[] = []
-    for (const [id, entry] of this.userMap) {
+    for (const id of this.pendingUsers) {
       if (rows.length >= limit) break
+      // 出队：这个人的这份增量交给调用方了（写不写得成是调用方的事，不留在这里反复写）
+      this.pendingUsers.delete(id)
+      const entry = this.userMap.get(id)
+      // 已经被内存上限挤掉的人（见 trim）：没有可写的增量了，跳过
+      if (!entry) continue
       const delta = entry.delta
-      const active =
-        delta.chat + delta.enter + delta.like + delta.follow + delta.gift > 0 ||
-        this.sessionUserIds.has(id)
-      if (!active) continue
       rows.push({
         webRid: this.webRid,
         userId: id,
@@ -338,11 +371,8 @@ export class RoomRecorder {
         firstSeen: entry.profile.firstSeen,
         lastSeen: entry.profile.lastSeen
       })
-    }
-    // 写过的增量清零（静态信息留着，下一批继续补空字段）
-    for (const id of this.sessionUserIds) {
-      const entry = this.userMap.get(id)
-      if (entry) entry.delta = emptyStats()
+      // 写过的增量清零（静态信息留着，下次他有新帧时再补空字段）
+      entry.delta = emptyStats()
     }
     return rows
   }
@@ -352,6 +382,7 @@ export class RoomRecorder {
     this.recent = []
     this.userMap.clear()
     this.touched.clear()
+    this.pendingUsers.clear()
     this.messages = []
     this.minutes.clear()
     this.minuteUsers.clear()
@@ -474,8 +505,35 @@ export class RoomRecorder {
     for (const entry of sorted.slice(0, this.userMap.size - USER_CAP)) {
       this.userMap.delete(entry.profile.id)
       this.touched.delete(entry.profile.id)
+      // 人已经从内存里挤掉了：待写队列里也留不住他（写不出增量），别让它无限涨
+      this.pendingUsers.delete(entry.profile.id)
     }
   }
+}
+
+/**
+ * 静态字段**有没有真变化**（决定这个人要不要再排一次队去写库）。
+ *
+ * 为什么需要（见 `takeUserDeltas`）：本场每个用户第一次出现时已经写过一次档案，
+ * 之后只在「这一帧带来了新东西」时才值得再写一次——旧版不管有没有变化，
+ * 都把前 400 个人每 2 秒无条件 UPDATE 一遍（忙房间 ≈200 行/秒的纯空转）。
+ */
+function staticChanged(before: UserProfile, after: UserProfile): boolean {
+  return (
+    before.displayId !== after.displayId ||
+    before.nickname !== after.nickname ||
+    before.gender !== after.gender ||
+    before.signature !== after.signature ||
+    before.city !== after.city ||
+    before.avatar !== after.avatar ||
+    before.following !== after.following ||
+    before.follower !== after.follower ||
+    before.honorLevel !== after.honorLevel ||
+    before.fansClubLevel !== after.fansClubLevel ||
+    before.secUid !== after.secUid ||
+    before.badges.length !== after.badges.length ||
+    before.badges.some((badge, index) => badge !== after.badges[index])
+  )
 }
 
 /** ms → 分钟桶号（floor(ms / 60000)，Postgres 侧直接用同一个数） */

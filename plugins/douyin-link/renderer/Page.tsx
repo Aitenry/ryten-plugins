@@ -1,7 +1,15 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, DatePicker, Modal, Segmented, Tag } from 'antd'
+import { Button, DatePicker, Input, Modal, Segmented, Select, Tag } from 'antd'
 import dayjs, { type Dayjs } from 'dayjs'
-import { RiDeleteBin6Line, RiRadarLine, RiTeamLine, RiUserSearchLine } from '@remixicon/react'
+import {
+  RiDeleteBin6Line,
+  RiLinkM,
+  RiLinkUnlinkM,
+  RiPencilLine,
+  RiRadarLine,
+  RiTeamLine,
+  RiUserSearchLine
+} from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
@@ -13,6 +21,7 @@ import type {
   MysteryReveal,
   RoomRuntime,
   UserAnalysis,
+  UserIdentity,
   UserProfile
 } from '../shared/types'
 import { isAnonymousId } from '../shared/anonymous'
@@ -1030,6 +1039,30 @@ function UserProfileModal(props: {
   const [analyzeError, setAnalyzeError] = useState(false)
   /** 点过「分析」之后弹窗右侧多一栏画像，弹窗跟着变宽（没点就保持原来的窄弹窗） */
   const splitOpen = Boolean(analysis || analyzeError)
+  /**
+   * 画像（多账号关联）：一个人可以有多个抖音账号，但画像只有一个。
+   *
+   * `accounts` 是**全部账号**（含当前这个 id）；列表里显示它们各自的累计数字，
+   * 「关联账号」按钮点开是一个搜索框（按昵称 / 抖音号 / 用户 id 搜，也可以直接粘贴 id）。
+   * 关联/解绑/改名都由主进程落库（`douyin_link_identity_accounts`，主键就是抖音 id），
+   * 这里拿到回话就直接替换 —— 界面不自己维护一份绑定关系。
+   */
+  const [identity, setIdentity] = useState<UserIdentity | null>(null)
+  const [bindOpen, setBindOpen] = useState(false)
+  const [accountQuery, setAccountQuery] = useState('')
+  const [accountOptions, setAccountOptions] = useState<Array<{ value: string; label: React.ReactNode }>>([])
+  const [binding, setBinding] = useState(false)
+  const [unbinding, setUnbinding] = useState(false)
+  const [nameEditing, setNameEditing] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
+
+  /** 一堆账号时，画像名（用户改的）优先；没改名就用主账号的昵称 */
+  const identityTitle = (() => {
+    const named = identity?.name?.trim()
+    if (named) return named
+    const primary = identity?.accounts.find((account) => account.userId === identity.primaryUserId)
+    return primary?.nickname || profile?.nickname || t('douyin-link.page.unknownUser')
+  })()
 
   /**
    * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
@@ -1047,6 +1080,9 @@ function UserProfileModal(props: {
     setReveal(null)
     setAnalysis(null)
     setAnalyzeError(false)
+    setIdentity(null)
+    setBindOpen(false)
+    setNameEditing(false)
     void api
       .userGet(props.webRid, props.userId)
       .then((next) => {
@@ -1056,10 +1092,129 @@ function UserProfileModal(props: {
       .finally(() => {
         if (alive) setLoading(false)
       })
+    void api
+      .userIdentity(props.userId)
+      .then((next) => {
+        if (alive) setIdentity(next)
+      })
+      .catch(() => undefined)
     return () => {
       alive = false
     }
   }, [props.webRid, props.userId])
+
+  /** 画像变了（绑定/解绑/改名）就同时重拉档案与画像：合并后的统计、账号清单、名字都要刷新 */
+  const refreshUser = useCallback((): void => {
+    void api.userGet(props.webRid, props.userId).then((next) => setProfile(next)).catch(() => undefined)
+    void api.userIdentity(props.userId).then((next) => setIdentity(next)).catch(() => undefined)
+  }, [props.webRid, props.userId])
+
+  /**
+   * 搜索可关联的账号（250ms 防抖：这个查询要在 `douyin_link_users` 上按 id 分组，别每敲一个字就打一次）。
+   *
+   * 两个细节：
+   * - 输入是**一整串数字**且结果里没有它时，补一条「直接用这个 id 关联」——
+   *   那个人可能还没进过库（绑上是合法的，历史一有数据就会算进画像）；
+   * - 已经在别的画像里的账号会标出来（绑过去会把两个画像合并）。
+   */
+  useEffect(() => {
+    if (!bindOpen) return
+    const needle = accountQuery.trim()
+    if (!needle) {
+      setAccountOptions([])
+      return
+    }
+    let alive = true
+    const timer = window.setTimeout(() => {
+      void api
+        .accountSearch(needle, 20)
+        .then((rows) => {
+          if (!alive) return
+          const options = rows.map((row) => ({
+            value: row.userId,
+            label: (
+              <span className="flex min-w-0 items-center gap-2 text-xs">
+                <span className="min-w-0 max-w-[140px] truncate">
+                  {row.nickname || t('douyin-link.page.unknownUser')}
+                </span>
+                <span className="shrink-0 font-mono opacity-50">{row.userId}</span>
+                <span className="ml-auto shrink-0 opacity-50">
+                  {t('douyin-link.users.identityAccountStats', {
+                    chat: formatNumber(row.chat),
+                    enter: formatNumber(row.enter),
+                    gift: formatNumber(row.gift)
+                  })}
+                </span>
+                {row.identityId > 0 ? (
+                  <span className="shrink-0 opacity-50">{t('douyin-link.users.identityBindOther')}</span>
+                ) : null}
+              </span>
+            )
+          }))
+          if (/^\d{4,}$/.test(needle) && !rows.some((row) => row.userId === needle)) {
+            options.unshift({
+              value: needle,
+              label: (
+                <span className="font-mono text-xs">{t('douyin-link.users.identityBindById', { id: needle })}</span>
+              )
+            })
+          }
+          setAccountOptions(options)
+        })
+        .catch(() => undefined)
+    }, 250)
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [bindOpen, accountQuery, t])
+
+  const bindAccount = useCallback(
+    (targetUserId: string): void => {
+      const target = targetUserId.trim()
+      if (!target || target === props.userId) return
+      setBinding(true)
+      void api
+        .accountBind(props.userId, target)
+        .then((next) => {
+          if (next) setIdentity(next)
+          setAccountQuery('')
+          setAccountOptions([])
+          setBindOpen(false)
+          refreshUser()
+        })
+        .catch(() => undefined)
+        .finally(() => setBinding(false))
+    },
+    [props.userId, refreshUser]
+  )
+
+  const unbind = useCallback(
+    (userId: string): void => {
+      setUnbinding(true)
+      void api
+        .accountUnbind(userId, props.userId)
+        .then((next) => {
+          if (next) setIdentity(next)
+          refreshUser()
+        })
+        .catch(() => undefined)
+        .finally(() => setUnbinding(false))
+    },
+    [props.userId, refreshUser]
+  )
+
+  const saveIdentityName = useCallback((): void => {
+    setNameEditing(false)
+    const next = nameDraft.trim()
+    if (!identity || next === identity.name) return
+    void api
+      .identityRename(props.userId, next)
+      .then((updated) => {
+        if (updated) setIdentity(updated)
+      })
+      .catch(() => undefined)
+  }, [identity, nameDraft, props.userId])
 
   const doReveal = useCallback((): void => {
     setRevealing(true)
@@ -1120,9 +1275,50 @@ function UserProfileModal(props: {
                 {/* 荣誉等级 / 粉丝团 / 「分析用户」都跟在名字这一行的**最右端**
                     （原来荣誉等级单独占一行，把名字行也拉长了；分析按钮原在页脚，现在收进图标） */}
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 truncate text-sm font-semibold">
-                    {profile.nickname || t('douyin-link.page.unknownUser')}
-                  </span>
+                  {nameEditing ? (
+                    <Input
+                      size="small"
+                      autoFocus
+                      className="min-w-0 flex-1"
+                      value={nameDraft}
+                      placeholder={t('douyin-link.users.identityNamePlaceholder')}
+                      onChange={(event) => setNameDraft(event.target.value)}
+                      onPressEnter={() => void saveIdentityName()}
+                      onBlur={() => void saveIdentityName()}
+                    />
+                  ) : (
+                    <span className="min-w-0 truncate text-sm font-semibold">{identityTitle}</span>
+                  )}
+                  {/* 改名：画像名（留空 = 退回主账号昵称）。只在绑定了账号时才有意义 */}
+                  {identity && identity.accounts.length > 1 && !nameEditing ? (
+                    <Button
+                      size="small"
+                      type="text"
+                      title={t('douyin-link.users.identityNameEdit')}
+                      aria-label={t('douyin-link.users.identityNameEdit')}
+                      icon={<RiPencilLine size={13} />}
+                      onClick={() => {
+                        setNameDraft(identity.name)
+                        setNameEditing(true)
+                      }}
+                    />
+                  ) : null}
+                  {/* 关联账号：一个图标入口（不另开平行按钮），点开才出现搜索框。
+                      匿名占位 id（111111）是抖音给所有隐藏身份的人共用的，绑它没有意义，不给入口 */}
+                  {!anonymousOnly ? (
+                    <Button
+                      size="small"
+                      type={bindOpen ? 'primary' : 'text'}
+                      title={t('douyin-link.users.identityBind')}
+                      aria-label={t('douyin-link.users.identityBind')}
+                      icon={<RiLinkM size={14} />}
+                      onClick={() => {
+                        setBindOpen((open) => !open)
+                        setAccountQuery('')
+                        setAccountOptions([])
+                      }}
+                    />
+                  ) : null}
                   <span className="ml-auto flex shrink-0 items-center gap-1">
                     {profile.honorLevel > 0 ? (
                       <Tag color="gold" style={{ marginInlineEnd: 0 }}>
@@ -1149,6 +1345,10 @@ function UserProfileModal(props: {
                 </div>
                 <span className="flex flex-wrap items-center gap-1 text-xs opacity-70">
                   <span>
+                    {t('douyin-link.users.userId')} {profile.id}
+                  </span>
+                  <span>·</span>
+                  <span>
                     {t('douyin-link.users.displayId')} {profile.displayId || '-'}
                   </span>
                   <span>·</span>
@@ -1164,6 +1364,58 @@ function UserProfileModal(props: {
                 </span>
               </div>
             </div>
+
+            {/* 关联账号：多账号时列出来（谁是谁）；单账号时这里什么都不占 */}
+            {identity && identity.accounts.length > 1 ? (
+              <div className="flex flex-col gap-1">
+                {identity.accounts.map((account) => (
+                  <div key={account.userId} className="flex min-w-0 items-center gap-2 text-xs">
+                    <span className="min-w-0 max-w-[160px] truncate">
+                      {account.nickname || t('douyin-link.page.unknownUser')}
+                    </span>
+                    <span className="shrink-0 font-mono opacity-50">{account.userId}</span>
+                    {account.userId === identity.primaryUserId ? (
+                      <Tag style={{ marginInlineEnd: 0 }}>{t('douyin-link.users.identityPrimary')}</Tag>
+                    ) : null}
+                    <span className="min-w-0 flex-1 truncate opacity-50">
+                      {t('douyin-link.users.identityAccountStats', {
+                        chat: formatNumber(account.chat),
+                        enter: formatNumber(account.enter),
+                        gift: formatNumber(account.gift)
+                      })}
+                    </span>
+                    {/* 解绑：图标按钮（语义自明，不带文字；无障碍名走 aria-label） */}
+                    <Button
+                      size="small"
+                      type="text"
+                      disabled={unbinding}
+                      title={t('douyin-link.users.identityUnbind')}
+                      aria-label={t('douyin-link.users.identityUnbind')}
+                      icon={<RiLinkUnlinkM size={13} />}
+                      onClick={() => void unbind(account.userId)}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {/* 关联账号的搜索框：搜昵称/抖音号/用户 id，粘贴 id 也行（下拉里会给「直接用这个 id 关联」） */}
+            {bindOpen ? (
+              <Select
+                size="small"
+                showSearch
+                autoFocus
+                loading={binding}
+                className="w-full"
+                value={null}
+                placeholder={t('douyin-link.users.identityBindPlaceholder')}
+                filterOption={false}
+                onSearch={(value) => setAccountQuery(value)}
+                onSelect={(value) => void bindAccount(String(value))}
+                notFoundContent={accountQuery ? t('douyin-link.users.identityBindEmpty') : null}
+                options={accountOptions}
+              />
+            ) : null}
 
             {profile.signature ? (
               <div className="rounded-md px-2 py-1.5 text-xs" style={{ backgroundColor: palette.soft }}>
@@ -1241,7 +1493,13 @@ function UserProfileModal(props: {
         ) : null}
 
         {/* 这个人说过什么：**不挂在档案分支里** —— 用户记录被清掉后档案查不到，但消息流水还在 */}
-        <UserHistory webRid={props.webRid} userId={props.userId} rooms={props.rooms} />
+        <UserHistory
+          webRid={props.webRid}
+          userId={props.userId}
+          rooms={props.rooms}
+          // 画像里的其它账号：历史一并查（按 id 集合，不看昵称）
+          userIds={identity?.accounts.map((account) => account.userId) ?? []}
+        />
       </div>
 
       {/* 右栏：用户画像。**不挂在档案分支里** —— 画像用的是消息流水里的互动数据，
@@ -1888,8 +2146,6 @@ function UserAnalysisPanel(props: {
           ]}
         />
       </div>
-
-      <span className="text-[10px] leading-3 opacity-50">{t('douyin-link.users.analyzeBasis')}</span>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import {
   boolean,
   doublePrecision,
+  index,
   integer,
   pgTable,
   serial,
@@ -9,7 +10,7 @@ import {
 } from 'drizzle-orm/pg-core'
 
 /**
- * 抖音直播分析器 的表（6 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
+ * 抖音直播分析器 的表（8 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
  *
  * 三条约定（与宿主同规矩）：
  * - JS 键 camelCase，列名显式给 snake_case，mapper 里同一套键名；
@@ -132,3 +133,36 @@ export const douyinLinkMeta = pgTable('douyin_link_meta', {
   value: text().notNull().default(''),
   updatedAt: doublePrecision('updated_at').notNull().default(0)
 })
+
+/**
+ * 画像（0.15.11 起）：**一个人可以有多个抖音账号，但画像只有一个**。
+ *
+ * 为什么要有这张表：抖音 id 才是身份（昵称会改、会重名，匿名时还会被占位串抹掉），
+ * 而「同一个人开两个号」在直播场景里很常见——送礼榜/发言榜上他们本来就是两个人，
+ * 但画像（RFM 分层、人格侧写、关系网）回答的是「这个人是谁」。绑定关系放这里，
+ * 所有按人的聚合都先经 `resolveAccountIds()` 换成 id 集合再查。
+ */
+export const douyinLinkIdentities = pgTable('douyin_link_identities', {
+  id: serial().primaryKey().notNull(),
+  /** 画像名（用户可改；空 = 界面上退回主账号的最新昵称） */
+  name: text().notNull().default(''),
+  note: text().notNull().default(''),
+  /** 主账号：界面上拿它的昵称/头像代表这个画像 */
+  primaryUserId: text('primary_user_id').notNull().default(''),
+  createdAt: doublePrecision('created_at').notNull().default(0),
+  updatedAt: doublePrecision('updated_at').notNull().default(0)
+})
+
+/**
+ * 画像 ↔ 抖音账号（多对一）。`user_id` 是主键 ⇒ **一个 id 只能属于一个画像**：
+ * 这就是「关联一律走抖音 id」在数据层的落点（昵称永远不参与关联）。
+ */
+export const douyinLinkIdentityAccounts = pgTable(
+  'douyin_link_identity_accounts',
+  {
+    userId: text('user_id').primaryKey().notNull(),
+    identityId: integer('identity_id').notNull(),
+    addedAt: doublePrecision('added_at').notNull().default(0)
+  },
+  (table) => [index('idx_douyin_link_identity_account_owner').on(table.identityId)]
+)

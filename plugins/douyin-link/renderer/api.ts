@@ -15,6 +15,7 @@ import type {
   FailureInfo,
   GiftBreakdownRow,
   GiftRankRow,
+  IdentityAccountRow,
   ImportResult,
   LiveSettings,
   MessagePage,
@@ -41,6 +42,7 @@ import type {
   UserAnalysisPeer,
   UserAnalysisScore,
   UserBatch,
+  UserIdentity,
   UserProfile,
   UserRankPage,
   UserRankRow
@@ -431,17 +433,29 @@ export const api = {
    * 不用新通道：`messages-query` 本来就支持 `userId`，这里只是把参数摆好。
    * `webRid` 传空串 = **跨房间查**（消息流水里的 userId 是全局的，用户统计才是按房间存的）。
    * `userId` 为空直接回空页——不拦的话空条件会变成「把整个库捞一遍」。
+   *
+   * **多账号（0.15.11）**：`userIds` 是画像的全部账号（含主 id），主进程按「命中任一 id」筛——
+   * 所以同一个人的两个号说过的话会**并成一份历史**（关联一律走 id，不看昵称）。
    */
   userMessages: async (
     webRid: string,
     userId: string,
-    options: { kind?: DanmakuKind | ''; limit?: number; offset?: number; from?: number; to?: number } = {}
+    options: {
+      kind?: DanmakuKind | ''
+      limit?: number
+      offset?: number
+      from?: number
+      to?: number
+      userIds?: string[]
+    } = {}
   ): Promise<MessagePage> => {
     if (!userId) return { rows: [], total: 0 }
+    const ids = (options.userIds ?? []).filter((id) => id && id !== userId)
     return normalizeMessagePage(
       await invoke(`${PREFIX}messages-query`, {
         webRid,
         userId,
+        ...(ids.length > 0 ? { userIds: ids } : {}),
         kind: options.kind ?? '',
         limit: options.limit ?? 50,
         offset: options.offset ?? 0,
@@ -521,6 +535,46 @@ export const api = {
   userGet: async (webRid: string, userId: string): Promise<UserProfile | null> => {
     const raw = await invoke(`${PREFIX}user-get`, webRid, userId)
     return isRecord(raw) ? (raw as unknown as UserProfile) : null
+  },
+  /**
+   * 画像（多账号）：这个人绑定的全部账号 + 画像名/主账号。
+   * 主进程没回话时返回一份「只有他自己」的空画像——界面按「一个人」渲染，不会白屏。
+   */
+  userIdentity: async (userId: string): Promise<UserIdentity> => {
+    const raw = await invoke(`${PREFIX}user-identity`, userId)
+    if (!isRecord(raw)) return { identityId: 0, name: '', note: '', primaryUserId: userId, accounts: [] }
+    return {
+      identityId: asCount(raw.identityId),
+      name: typeof raw.name === 'string' ? raw.name : '',
+      note: typeof raw.note === 'string' ? raw.note : '',
+      primaryUserId: typeof raw.primaryUserId === 'string' ? raw.primaryUserId : userId,
+      accounts: asList<IdentityAccountRow>(raw.accounts)
+    }
+  },
+  /**
+   * 搜可关联的账号（跨房间，按昵称/抖音号/id）。**粘贴 id 也走这条**：
+   * 输入一整串数字时，命中就是这个人自己。
+   */
+  accountSearch: async (keyword: string, limit = 20): Promise<IdentityAccountRow[]> =>
+    asList<IdentityAccountRow>(await invoke(`${PREFIX}account-search`, keyword, limit)),
+  /** 关联账号：把 `targetUserId` 绑到 `sourceUserId` 的画像（两边各有画像就合并），回最新画像视图 */
+  accountBind: async (sourceUserId: string, targetUserId: string): Promise<UserIdentity | null> => {
+    const raw = await invoke(`${PREFIX}account-bind`, sourceUserId, targetUserId)
+    return isRecord(raw) ? ((raw as unknown as UserIdentity) ?? null) : null
+  },
+  /**
+   * 解除关联（只剩一个账号时画像自动解散）。
+   * `viewerUserId` = 界面上正在看的 id：回话回的是**他的**画像视图（被解绑的那个账号
+   * 解绑后已经不属于任何画像了，拿它的视图回会把弹窗换成空壳）。
+   */
+  accountUnbind: async (userId: string, viewerUserId: string): Promise<UserIdentity | null> => {
+    const raw = await invoke(`${PREFIX}account-unbind`, userId, viewerUserId)
+    return isRecord(raw) ? ((raw as unknown as UserIdentity) ?? null) : null
+  },
+  /** 改画像名（空串 = 退回主账号昵称），回最新画像视图 */
+  identityRename: async (userId: string, name: string): Promise<UserIdentity | null> => {
+    const raw = await invoke(`${PREFIX}identity-rename`, userId, name)
+    return isRecord(raw) ? ((raw as unknown as UserIdentity) ?? null) : null
   },
   /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
   userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>

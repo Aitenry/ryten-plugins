@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, ne, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, ilike, inArray, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm'
 import logger from 'electron-log'
 import { withOrm } from '@host/main/database/orm'
 import type {
@@ -7,16 +7,21 @@ import type {
   DbStats,
   GiftBreakdownRow,
   GiftRankRow,
+  IdentityAccountRow,
+  IdentityGroup,
   LiveRoomInfo,
   MessagePage,
   MessageQuery,
   MonitorSession,
   RoomCompareRow,
   StoredMessage,
+  UserIdentity,
   UserRankRow,
   UserStats
 } from '../../shared/types'
 import {
+  douyinLinkIdentities,
+  douyinLinkIdentityAccounts,
   douyinLinkMessages,
   douyinLinkMeta,
   douyinLinkMinutes,
@@ -286,9 +291,18 @@ export async function queryMessages(query: MessageQuery): Promise<MessagePage> {
     const filters = []
     if (query.webRid) filters.push(eq(douyinLinkMessages.webRid, query.webRid))
     if (query.kind) filters.push(eq(douyinLinkMessages.kind, query.kind))
-    if (query.userId) filters.push(eq(douyinLinkMessages.userId, query.userId))
-    // 收礼人（礼物才有）：某人「收到的礼物历史」就是 kind='gift' + 这个条件
-    if (query.toUserId) filters.push(eq(douyinLinkMessages.toUserId, query.toUserId))
+    /**
+     * 发送者：单个 `userId` 与集合 `userIds` 合成**一个**条件（不能各推一条——两条会被 AND 起来，
+     * 变成「既是 A1 又在集合里」，集合里其它 id 的行永远查不出来；2026-10-11 工装抓到的）。
+     * 画像的多账号口径就是这一条：命中集合里任何一个 id 都算「这个人发的」。
+     */
+    const senderIds = [...new Set([...(query.userId ? [query.userId] : []), ...(query.userIds ?? [])])]
+    if (senderIds.length === 1) filters.push(eq(douyinLinkMessages.userId, senderIds[0]))
+    else if (senderIds.length > 1) filters.push(inArray(douyinLinkMessages.userId, senderIds))
+    // 收礼人（礼物才有）：某人「收到的礼物历史」就是 kind='gift' + 这个条件（同样的合并口径）
+    const recipientIds = [...new Set([...(query.toUserId ? [query.toUserId] : []), ...(query.toUserIds ?? [])])]
+    if (recipientIds.length === 1) filters.push(eq(douyinLinkMessages.toUserId, recipientIds[0]))
+    else if (recipientIds.length > 1) filters.push(inArray(douyinLinkMessages.toUserId, recipientIds))
     if (typeof query.from === 'number' && query.from > 0) filters.push(gte(douyinLinkMessages.atMs, query.from))
     if (typeof query.to === 'number' && query.to > 0) filters.push(lte(douyinLinkMessages.atMs, query.to))
     const keyword = (query.keyword ?? '').trim()
@@ -722,11 +736,463 @@ export async function getUsers(webRid: string, userIds: string[]): Promise<Map<s
   return out
 }
 
+/**
+ * 一批用户**跨房间**各取最近的一行（`webRid` 为空时用，例如「数据大屏」模式下没有当前房间）。
+ *
+ * 为什么单独一个函数：`getUsers` 是「某个房间里的这一批人」，空 webRid 它直接返回空；
+ * 而界面在大屏模式下仍然要能打开任何一个人的档案（老行为就是 `getUser('', id)` 取最近一行）。
+ * 口径与 `getUser('')` 一致：**每个 id 取 last_seen 最新的那一行**，不做跨房间累加。
+ */
+export async function getUsersAnyRoom(userIds: string[]): Promise<Map<string, UserRankRow>> {
+  const out = new Map<string, UserRankRow>()
+  const ids = [...new Set(userIds.filter((id) => id.length > 0))]
+  if (ids.length === 0) return out
+  await schemaReady
+  await withOrm('douyin-link.getUsersAnyRoom', async (db) => {
+    for (let index = 0; index < ids.length; index += MSG_CHUNK) {
+      const slice = ids.slice(index, index + MSG_CHUNK)
+      const rows = await db
+        .select()
+        .from(douyinLinkUsers)
+        .where(inArray(douyinLinkUsers.userId, slice))
+        .orderBy(desc(douyinLinkUsers.lastSeen))
+      for (const row of rows) if (!out.has(row.userId)) out.set(row.userId, toRankRow(row))
+    }
+  })
+  return out
+}
+
 export async function clearUsers(webRid = ''): Promise<void> {
   await schemaReady
   await withOrm('douyin-link.clearUsers', async (db) => {
     await db.delete(douyinLinkUsers).where(webRid ? eq(douyinLinkUsers.webRid, webRid) : undefined)
   })
+}
+
+/**
+ * **补档案**：把「有消息流水、但没有档案行」的人按消息流水补出来（历史数据修复）。
+ *
+ * 什么时候需要（2026-10-11）：0.15.9 及以前 `RoomRecorder.takeUserDeltas` 有配额饥饿 bug——
+ * 一个房间里本场用户超过 400 人之后，新出现的人**永远不会**被写进 `douyin_link_users`，
+ * 而他们的消息照常进 `douyin_link_messages`。表现是档案弹窗报「没有这个用户的档案」，
+ * 但按 id 去抖音仍能查到人（机制与真库证据见 `main/monitor/recorder.ts` 的 `takeUserDeltas` 注释）。
+ *
+ * 口径：
+ * - **只补缺的行**（`on conflict do nothing`）：已有档案的人一个字段都不动，统计也不会翻倍；
+ * - 能从流水复原的：昵称（**最近一条非空**的名字）、五类互动次数、送礼次数与抖币、首末时间；
+ *   复原不了的：头像 / 抖音号 / 荣誉等级 / secUid（流水里没有）——留给「在线观众按 id 补资料」
+ *   与后续监控继续补空；
+ * - 统计口径与实时写入逐条对齐：`chat/enter/likes/follows` = 条数、`gift` = 礼物行数、
+ *   `diamonds` = 礼物行抖币之和、`first_seen/last_seen` = 最早/最晚一条消息的时刻。
+ *
+ * 返回补出来的行数。
+ */
+export async function repairUsersFromMessages(webRid = ''): Promise<number> {
+  await schemaReady
+  return withOrm('douyin-link.repairUsers', async (db) => {
+    const scope = webRid ? sql`and m.web_rid = ${webRid}` : sql``
+    const gapResult = await db.execute<{ value: number }>(sql`
+      select count(*)::int as value from (
+        select distinct m.web_rid, m.user_id from douyin_link_messages m
+        where m.user_id <> '' ${scope}
+      ) missing
+      where not exists (
+        select 1 from douyin_link_users u
+        where u.web_rid = missing.web_rid and u.user_id = missing.user_id
+      )`)
+    const gap = Number(gapResult.rows?.[0]?.value ?? 0)
+    if (gap === 0) return 0
+
+    const inserted = await db.execute(sql`
+      insert into douyin_link_users (
+        web_rid, user_id, nickname, chat, enter, likes, follows, gift, diamonds, first_seen, last_seen
+      )
+      select
+        m.web_rid,
+        m.user_id,
+        coalesce((array_agg(m.user_name order by m.at_ms desc) filter (where m.user_name <> ''))[1], ''),
+        count(*) filter (where m.kind = 'chat')::int,
+        count(*) filter (where m.kind = 'member')::int,
+        count(*) filter (where m.kind = 'like')::int,
+        count(*) filter (where m.kind = 'social')::int,
+        count(*) filter (where m.kind = 'gift')::int,
+        coalesce(sum(m.diamonds) filter (where m.kind = 'gift'), 0)::int,
+        min(m.at_ms),
+        max(m.at_ms)
+      from douyin_link_messages m
+      where m.user_id <> '' ${scope}
+      group by m.web_rid, m.user_id
+      on conflict (web_rid, user_id) do nothing`)
+    return typeof inserted.affectedRows === 'number' ? inserted.affectedRows : gap
+  })
+}
+
+/* --------------------------------------------------------------- 画像（多账号） */
+
+/**
+ * 画像：**一个人可以有多个抖音账号，但画像只有一个**（用户 2026-10-11 的要求）。
+ *
+ * 三条口径：
+ * 1. **身份键永远是抖音数字 id**（`douyin_link_identity_accounts.user_id` 是主键）——
+ *    昵称会改、会重名、匿名时还会被占位串抹掉，所以昵称只用来显示，永不参与关联；
+ * 2. **绑定关系是全局的**（不带 `web_rid`）：同一个人在 A 房和 B 房是同一个人；
+ * 3. 所有「按人」的聚合都先经 `resolveAccountIds()` 换成 id 集合，再按集合查
+ *    （画像 / 档案 / 历史；榜单仍按账号分行——那是「哪个号在刷」，与「这个人是谁」是两回事）。
+ */
+
+/** `in (…)` 的**参数化**字面量列表：`inArray` 只能用在 drizzle 的 select 构造器里，
+ *  而下面几个画像查询要裸 SQL，所以自己拼一份（仍走绑定参数，不拼字符串） */
+function idInList(ids: string[]): SQL {
+  return sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `
+  )
+}
+
+/** `db.execute` 的行类型要求带索引签名，接口本身没有 → 交叉一层再断言（宿主的 Orm 泛型是 any） */
+type RawRow<T> = T & Record<string, unknown>
+
+
+/**
+ * 账号概览的聚合（跨房间并成一份）：昵称/抖音号/头像取**最近一次见到**的那份，
+ * 五类互动与抖币各自累加、首见取最早、末见取最晚、房间数去重。
+ */
+function accountBriefsQuery(where: SQL): SQL {
+  return sql`
+    select
+      u.user_id as "userId",
+      coalesce((array_agg(u.nickname order by u.last_seen desc) filter (where u.nickname <> ''))[1], '') as "nickname",
+      coalesce((array_agg(u.display_id order by u.last_seen desc) filter (where u.display_id <> ''))[1], '') as "displayId",
+      coalesce((array_agg(u.avatar order by u.last_seen desc) filter (where u.avatar <> ''))[1], '') as "avatar",
+      coalesce(sum(u.chat), 0)::int as "chat",
+      coalesce(sum(u.enter), 0)::int as "enter",
+      coalesce(sum(u.likes), 0)::int as "likes",
+      coalesce(sum(u.follows), 0)::int as "follows",
+      coalesce(sum(u.gift), 0)::int as "gift",
+      coalesce(sum(u.diamonds), 0)::int as "diamonds",
+      coalesce(min(nullif(u.first_seen, 0)), 0)::double precision as "firstSeen",
+      coalesce(max(u.last_seen), 0)::double precision as "lastSeen",
+      count(distinct u.web_rid)::int as "rooms"
+    from douyin_link_users u
+    where ${where}
+    group by u.user_id
+  `
+}
+
+/** 这个抖音 id 属于哪个画像（0 = 没绑定） */
+export async function identityOf(userId: string): Promise<number> {
+  const id = String(userId ?? '').trim()
+  if (!id) return 0
+  await schemaReady
+  return withOrm('douyin-link.identityOf', async (db) => {
+    const rows = await db
+      .select({ identityId: douyinLinkIdentityAccounts.identityId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.userId, id))
+      .limit(1)
+    return rows[0]?.identityId ?? 0
+  })
+}
+
+/** 这个 id 的**全部账号**（含它自己）。没绑定 = 只有它自己。所有按人的聚合都先过这一层。 */
+export async function resolveAccountIds(userId: string): Promise<string[]> {
+  const id = String(userId ?? '').trim()
+  if (!id) return []
+  const identityId = await identityOf(id)
+  if (!identityId) return [id]
+  await schemaReady
+  return withOrm('douyin-link.resolveAccountIds', async (db) => {
+    const rows = await db
+      .select({ userId: douyinLinkIdentityAccounts.userId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.identityId, identityId))
+    const ids = rows.map((row) => row.userId)
+    return ids.includes(id) ? ids : [id, ...ids]
+  })
+}
+
+/** 画像视图：名字 + 主账号 + 全部账号（跨房间概览）。没绑定就返回「一个账号的画像」。 */
+export async function userIdentity(userId: string): Promise<UserIdentity> {
+  const id = String(userId ?? '').trim()
+  if (!id) return { identityId: 0, name: '', note: '', primaryUserId: '', accounts: [] }
+  await schemaReady
+  return withOrm('douyin-link.userIdentity', async (db) => {
+    const owner = await db
+      .select({ identityId: douyinLinkIdentityAccounts.identityId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.userId, id))
+      .limit(1)
+    const identityId = owner[0]?.identityId ?? 0
+    const identity = identityId
+      ? (
+          await db
+            .select()
+            .from(douyinLinkIdentities)
+            .where(eq(douyinLinkIdentities.id, identityId))
+            .limit(1)
+        )[0]
+      : undefined
+    const members = identityId
+      ? await db
+          .select({ userId: douyinLinkIdentityAccounts.userId })
+          .from(douyinLinkIdentityAccounts)
+          .where(eq(douyinLinkIdentityAccounts.identityId, identityId))
+      : [{ userId: id }]
+    const ids = [...new Set([id, ...members.map((row) => row.userId)])]
+    const briefs: IdentityAccountRow[] = []
+    if (ids.length > 0) {
+      // 宿主的 Orm 泛型是 `any`（见 host.d.ts），`execute` 的行类型拿不到 → 这里显式收一下
+      const result = await db.execute(accountBriefsQuery(sql`u.user_id in (${idInList(ids)})`))
+      for (const row of (result.rows ?? []) as Array<RawRow<IdentityAccountRow>>) briefs.push(row)
+    }
+    const primary = identity?.primaryUserId && ids.includes(identity.primaryUserId) ? identity.primaryUserId : ids[0]
+    briefs.sort((a, b) => {
+      if (a.userId === primary) return -1
+      if (b.userId === primary) return 1
+      return b.lastSeen - a.lastSeen
+    })
+    return {
+      identityId,
+      name: identity?.name ?? '',
+      note: identity?.note ?? '',
+      primaryUserId: primary ?? '',
+      accounts: briefs.map((row) => ({ ...row, identityId }))
+    }
+  })
+}
+
+/**
+ * 搜索可关联的账号：**跨全部房间**按昵称 / 抖音号 / 用户 id 找（粘贴 id 也走这里，命中就是它自己）。
+ *
+ * 结果里带上 `identityId`：界面据此显示「已绑到另一个画像」（绑过去会合并两个画像）。
+ */
+export async function searchAccounts(keyword: string, limit = 20): Promise<IdentityAccountRow[]> {
+  await schemaReady
+  const needle = String(keyword ?? '').trim()
+  const pattern = `%${needle}%`
+  return withOrm('douyin-link.searchAccounts', async (db) => {
+    const where = needle
+      ? sql`(u.user_id like ${pattern} or u.nickname ilike ${pattern} or u.display_id ilike ${pattern})`
+      : sql`true`
+    const result = await db.execute(sql`
+      select briefs.*, coalesce(a.identity_id, 0)::int as "identityId"
+      from (${accountBriefsQuery(where)}) briefs
+      left join douyin_link_identity_accounts a on a.user_id = briefs."userId"
+      order by briefs."lastSeen" desc
+      limit ${Math.min(Math.max(1, Math.round(limit)), 50)}
+    `)
+    return ((result.rows ?? []) as Array<RawRow<IdentityAccountRow> & { identityId?: number }>).map((row) => ({
+      ...row,
+      identityId: Number(row.identityId ?? 0)
+    }))
+  })
+}
+
+/**
+ * 把 `targetUserId` 绑到 `sourceUserId` 所在的画像。
+ *
+ * 四种情形一次说清：
+ * - 两边都没绑 → 新建一个画像，主账号 = source；
+ * - source 有、target 没有 → target 加进来；
+ * - target 有、source 没有 → source 加进 target 那个画像；
+ * - 两边各有各的画像 → **合并**：账号全迁到 source 那个画像，空掉的那个删掉
+ *   （名字/主账号空的一边让位给有的一边）。
+ *
+ * 返回画像 id（0 = 入参不合法，例如同一个 id）。
+ */
+export async function bindAccount(sourceUserId: string, targetUserId: string): Promise<number> {
+  const source = String(sourceUserId ?? '').trim()
+  const target = String(targetUserId ?? '').trim()
+  if (!/^\d{4,}$/.test(source) || !/^\d{4,}$/.test(target) || source === target) return 0
+  await schemaReady
+  return withOrm('douyin-link.bindAccount', async (db) => {
+    const now = Date.now()
+    const ownerOf = async (userId: string): Promise<number> => {
+      const rows = await db
+        .select({ identityId: douyinLinkIdentityAccounts.identityId })
+        .from(douyinLinkIdentityAccounts)
+        .where(eq(douyinLinkIdentityAccounts.userId, userId))
+        .limit(1)
+      return rows[0]?.identityId ?? 0
+    }
+    const sourceIdentity = await ownerOf(source)
+    const targetIdentity = await ownerOf(target)
+
+    let identityId = sourceIdentity
+    if (sourceIdentity && targetIdentity && sourceIdentity !== targetIdentity) {
+      const pair = await db
+        .select()
+        .from(douyinLinkIdentities)
+        .where(inArray(douyinLinkIdentities.id, [sourceIdentity, targetIdentity]))
+      const keep = pair.find((row) => row.id === sourceIdentity)
+      const drop = pair.find((row) => row.id === targetIdentity)
+      await db
+        .update(douyinLinkIdentityAccounts)
+        .set({ identityId: sourceIdentity })
+        .where(eq(douyinLinkIdentityAccounts.identityId, targetIdentity))
+      await db.delete(douyinLinkIdentities).where(eq(douyinLinkIdentities.id, targetIdentity))
+      logger.info(
+        `[douyin-link] 画像合并：${targetIdentity} → ${sourceIdentity}（账号全部迁入，空画像已删）`
+      )
+      if (keep && drop) {
+        await db
+          .update(douyinLinkIdentities)
+          .set({
+            name: keep.name || drop.name,
+            note: keep.note || drop.note,
+            primaryUserId: keep.primaryUserId || drop.primaryUserId,
+            updatedAt: now
+          })
+          .where(eq(douyinLinkIdentities.id, sourceIdentity))
+      }
+    }
+
+    if (!identityId) identityId = targetIdentity
+    if (!identityId) {
+      const created = await db
+        .insert(douyinLinkIdentities)
+        .values({ name: '', note: '', primaryUserId: source, createdAt: now, updatedAt: now })
+        .returning({ id: douyinLinkIdentities.id })
+      identityId = created[0]?.id ?? 0
+    }
+    if (!identityId) return 0
+
+    await db
+      .insert(douyinLinkIdentityAccounts)
+      .values([
+        { userId: source, identityId, addedAt: now },
+        { userId: target, identityId, addedAt: now }
+      ])
+      // 已经属于别的画像（上面没走到合并的边角情形）也一并改归属：**一个 id 只能有一个画像**
+      .onConflictDoUpdate({
+        target: douyinLinkIdentityAccounts.userId,
+        set: { identityId: sql`excluded.identity_id` }
+      })
+
+    const identity = (
+      await db.select().from(douyinLinkIdentities).where(eq(douyinLinkIdentities.id, identityId)).limit(1)
+    )[0]
+    if (identity) {
+      await db
+        .update(douyinLinkIdentities)
+        .set({ primaryUserId: identity.primaryUserId || source, updatedAt: now })
+        .where(eq(douyinLinkIdentities.id, identityId))
+    }
+    logger.info(`[douyin-link] 画像绑定：${source} + ${target} → 画像 ${identityId}`)
+    return identityId
+  })
+}
+
+/**
+ * 解绑一个账号。**只剩一个账号时把这个画像一并解散**（单账号的「画像」等于没绑，
+ * 留着只会在界面上多一层壳）；主账号被解绑时把主账号让给剩下的第一个。
+ * 返回解绑后 source 还属于哪个画像（0 = 已经解散 / 本来就没绑）。
+ */
+export async function unbindAccount(userId: string): Promise<number> {
+  const id = String(userId ?? '').trim()
+  if (!id) return 0
+  await schemaReady
+  return withOrm('douyin-link.unbindAccount', async (db) => {
+    const owner = await db
+      .select({ identityId: douyinLinkIdentityAccounts.identityId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.userId, id))
+      .limit(1)
+    const identityId = owner[0]?.identityId ?? 0
+    if (!identityId) return 0
+
+    await db.delete(douyinLinkIdentityAccounts).where(eq(douyinLinkIdentityAccounts.userId, id))
+    const rest = await db
+      .select({ userId: douyinLinkIdentityAccounts.userId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.identityId, identityId))
+      .orderBy(asc(douyinLinkIdentityAccounts.addedAt))
+
+    if (rest.length <= 1) {
+      for (const row of rest) {
+        await db.delete(douyinLinkIdentityAccounts).where(eq(douyinLinkIdentityAccounts.userId, row.userId))
+      }
+      await db.delete(douyinLinkIdentities).where(eq(douyinLinkIdentities.id, identityId))
+      logger.info(`[douyin-link] 画像解散：${identityId}（只剩一个账号，不再算关联）`)
+      return 0
+    }
+
+    const identity = (
+      await db.select().from(douyinLinkIdentities).where(eq(douyinLinkIdentities.id, identityId)).limit(1)
+    )[0]
+    if (identity && identity.primaryUserId === id) {
+      await db
+        .update(douyinLinkIdentities)
+        .set({ primaryUserId: rest[0].userId, updatedAt: Date.now() })
+        .where(eq(douyinLinkIdentities.id, identityId))
+    }
+    logger.info(`[douyin-link] 画像解绑：${id} 已从画像 ${identityId} 移出（还剩 ${rest.length} 个账号）`)
+    return identityId
+  })
+}
+
+/** 改画像名（空串 = 退回主账号昵称；最多 40 字，超了截断而不是报错） */
+export async function renameIdentity(identityId: number, name: string): Promise<void> {
+  const id = Math.trunc(Number(identityId) || 0)
+  if (!id) return
+  const trimmed = String(name ?? '').trim().slice(0, 40)
+  await schemaReady
+  await withOrm('douyin-link.renameIdentity', async (db) => {
+    await db
+      .update(douyinLinkIdentities)
+      .set({ name: trimmed, updatedAt: Date.now() })
+      .where(eq(douyinLinkIdentities.id, id))
+  })
+}
+
+/** 导出用的画像分组（不带本地自增 id：导入时按账号重建，反复导入幂等） */
+export async function exportIdentityGroups(): Promise<IdentityGroup[]> {
+  await schemaReady
+  return withOrm('douyin-link.exportIdentities', async (db) => {
+    const identities = await db.select().from(douyinLinkIdentities)
+    const accounts = await db.select().from(douyinLinkIdentityAccounts)
+    const out: IdentityGroup[] = []
+    for (const identity of identities) {
+      const ids = accounts.filter((row) => row.identityId === identity.id).map((row) => row.userId)
+      if (ids.length < 2) continue
+      out.push({
+        name: identity.name,
+        note: identity.note,
+        primaryUserId: identity.primaryUserId,
+        accounts: ids
+      })
+    }
+    return out
+  })
+}
+
+/** 导入画像分组：逐个账号绑到一起（`bindAccount` 本身幂等，重复导入不会造出重复画像） */
+export async function importIdentityGroups(groups: IdentityGroup[]): Promise<number> {
+  let bound = 0
+  for (const group of groups) {
+    const accounts = [...new Set((group?.accounts ?? []).map((id) => String(id ?? '').trim()))].filter((id) =>
+      /^\d{4,}$/.test(id)
+    )
+    if (accounts.length < 2) continue
+    const head = accounts[0]
+    let identityId = 0
+    for (const account of accounts.slice(1)) {
+      identityId = (await bindAccount(head, account)) || identityId
+      bound += 1
+    }
+    if (identityId) {
+      if (group.name) await renameIdentity(identityId, group.name)
+      const primary = accounts.includes(String(group.primaryUserId ?? '')) ? String(group.primaryUserId) : head
+      await schemaReady
+      await withOrm('douyin-link.importIdentityPrimary', async (db) => {
+        await db
+          .update(douyinLinkIdentities)
+          .set({ primaryUserId: primary, note: String(group.note ?? '').slice(0, 200), updatedAt: Date.now() })
+          .where(eq(douyinLinkIdentities.id, identityId))
+      })
+    }
+  }
+  return bound
 }
 
 /* ------------------------------------------------------------ 会话 */
@@ -1000,13 +1466,15 @@ export async function dayRecords(webRid: string, limit = 90): Promise<DayRecordR
   })
 }
 
-/** 某个人送过的礼物（按礼物名聚合；用户榜悬停看明细用） */
+/** 某个人送过的礼物（按礼物名聚合；用户榜悬停看明细用）。
+ *  `userIds` 是**画像的全部账号**（没绑定时就是那一个 id）。 */
 export async function userGiftBreakdown(
   webRid: string,
-  userId: string,
+  userIds: string[],
   limit = 12
 ): Promise<GiftBreakdownRow[]> {
-  if (!webRid || !userId) return []
+  const ids = [...new Set(userIds.filter((id) => id.length > 0))]
+  if (!webRid || ids.length === 0) return []
   await schemaReady
   return withOrm('douyin-link.userGiftBreakdown', async (db) => {
     const rows = await db
@@ -1019,7 +1487,7 @@ export async function userGiftBreakdown(
       .where(
         and(
           eq(douyinLinkMessages.webRid, webRid),
-          eq(douyinLinkMessages.userId, userId),
+          inArray(douyinLinkMessages.userId, ids),
           eq(douyinLinkMessages.kind, 'gift')
         )
       )
@@ -1075,21 +1543,28 @@ function emptyAnalysisData(): UserAnalysisData {
  * - 档案缺失时（例如只剩消息流水的历史数据）退回**消息流水**现场聚合：
  *   非礼物按 `count(*)`、礼物按 `sum(count)`、抖币按 `sum(diamonds)`（对齐 recorder 的口径）；
  * - 分天/分时按**本地时区**，偏移拼字面量（同 `dayRecords`：绑定参数会让 GROUP BY 认不出同一表达式）。
+ *
+ * **多账号（0.15.11）**：入参是**画像的全部账号**（`resolveAccountIds()` 的结果，没绑定时就是一个 id）。
+ * 同一个人自己的两个号之间的收送礼物是**自环**，不算「送礼对象」，所以关系边、收礼人数都排掉集合内的 id。
  */
-export async function userAnalysisData(userId: string): Promise<UserAnalysisData> {
-  if (!userId) return emptyAnalysisData()
+export async function userAnalysisData(userIds: string[]): Promise<UserAnalysisData> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  if (ids.length === 0) return emptyAnalysisData()
   await schemaReady
   const offsetMs = -new Date().getTimezoneOffset() * 60000
   return withOrm('douyin-link.userAnalysisData', async (db) => {
     const offset = sql.raw(String(Math.trunc(offsetMs)))
-    /** 跨全部直播间的范围条件：只要「这个人发的」 */
-    const scope = eq(douyinLinkMessages.userId, userId)
+    /** 跨全部直播间的范围条件：只要「这个人（任一账号）发的」 */
+    const scope = inArray(douyinLinkMessages.userId, ids)
+    /** 自环：集合内部账号之间的收送不算「关系」 */
+    const selfLoopOut = ids.length > 1 ? notInArray(douyinLinkMessages.toUserId, ids) : undefined
+    const selfLoopIn = ids.length > 1 ? notInArray(douyinLinkMessages.userId, ids) : undefined
 
     // 档案表按房间存，这里把同一个人的所有房间档案并成一份
     const profileRows = await db
       .select()
       .from(douyinLinkUsers)
-      .where(eq(douyinLinkUsers.userId, userId))
+      .where(inArray(douyinLinkUsers.userId, ids))
     /** 两个都是正数才取小，否则取那个非零的（0 = 没记录，不该参与比较） */
     const minPositive = (a: number, b: number): number => (a > 0 && b > 0 ? Math.min(a, b) : Math.max(a, b))
     /** 跨房间合并后的档案口径（只保留画像要用到的字段） */
@@ -1204,7 +1679,14 @@ export async function userAnalysisData(userId: string): Promise<UserAnalysisData
           eq(douyinLinkUsers.userId, douyinLinkMessages.toUserId)
         )
       )
-      .where(and(scope, eq(douyinLinkMessages.kind, 'gift'), ne(douyinLinkMessages.toUserId, '')))
+      .where(
+        and(
+          scope,
+          eq(douyinLinkMessages.kind, 'gift'),
+          ne(douyinLinkMessages.toUserId, ''),
+          selfLoopOut
+        )
+      )
       .groupBy(douyinLinkMessages.toUserId)
       .orderBy(desc(sql`coalesce(sum(${douyinLinkMessages.diamonds}), 0)`), desc(sql`count(*)`))
       .limit(40)
@@ -1230,9 +1712,10 @@ export async function userAnalysisData(userId: string): Promise<UserAnalysisData
       )
       .where(
         and(
-          eq(douyinLinkMessages.toUserId, userId),
+          inArray(douyinLinkMessages.toUserId, ids),
           eq(douyinLinkMessages.kind, 'gift'),
-          ne(douyinLinkMessages.userId, '')
+          ne(douyinLinkMessages.userId, ''),
+          selfLoopIn
         )
       )
       .groupBy(douyinLinkMessages.userId)
@@ -1269,7 +1752,7 @@ export async function userAnalysisData(userId: string): Promise<UserAnalysisData
     const recipientRows = await db
       .select({ value: sql<number>`count(distinct nullif(${douyinLinkMessages.toUserId}, ''))::int` })
       .from(douyinLinkMessages)
-      .where(and(scope, eq(douyinLinkMessages.kind, 'gift')))
+      .where(and(scope, eq(douyinLinkMessages.kind, 'gift'), ne(douyinLinkMessages.toUserId, ''), selfLoopOut))
 
     const textRows = await db
       .select({ content: douyinLinkMessages.content })

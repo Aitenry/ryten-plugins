@@ -17,6 +17,7 @@ import {
   type FailureInfo,
   type GiftBreakdownRow,
   type GiftRankRow,
+  type IdentityAccountRow,
   type LiveRoomInfo,
   type LiveSettings,
   type MessageBatch,
@@ -36,9 +37,11 @@ import {
   type RoomTick,
   type SummaryPush,
   type UserAnalysis,
+  type UserIdentity,
   type UserInfo,
   type UserProfile,
   type UserRankPage,
+  type UserRankRow,
   type UserStats,
   type UserBatch
 } from '../../shared/types'
@@ -200,6 +203,13 @@ const ENRICH_CONCURRENCY = 2
 const ENRICH_FAIL_COOLDOWN_MS = 10 * 60 * 1000
 /** 保留期清理的节流 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * 「补档案」跑没跑过的标记（`douyin_link_meta` 的键，见 `repairUserRowsOnce`）。
+ * 只做一次的原因：那是**一次性的历史缺口**（0.15.9 以前的配额 bug 留下的），
+ * 而全表按 (web_rid, user_id) 聚合在「永久保存」的库上会越跑越贵。
+ */
+const USERS_REPAIRED_KEY = 'users.repaired'
 
 export const DEFAULT_SETTINGS: LiveSettings = {
   // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
@@ -417,6 +427,7 @@ export class AnalyzerHub {
     )
     this.startTimers()
     void this.cleanup()
+    void this.repairUserRowsOnce()
     /**
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
@@ -449,6 +460,36 @@ export class AnalyzerHub {
         logger.info(`[douyin-link] 打开应用不接着监控：已清掉 ${cleared} 个房间的监控勾选（开关如实显示为关）`)
       }
       this.emitRooms(true)
+    }
+  }
+
+  /**
+   * **补档案（跑一次）**：把 0.15.9 以前那个配额 bug 漏掉的历史档案行按消息流水补出来。
+   *
+   * 三个决定：
+   * 1. **放在装载时、fire-and-forget**：补档案不该拖慢装载（界面上晚几秒看到档案没关系）；
+   * 2. **只跑一次**（`users.repaired` 标记）：这是历史缺口，新数据现在由 recorder 正常写入，
+   *    而全表聚合在永久保存的库上会越跑越贵；跑失败不写标记，下次启动再试；
+   * 3. **不覆盖已有档案**：`repairUsersFromMessages` 是 `on conflict do nothing`，
+   *    用户自己「清空用户记录」之后也不会被它偷偷补回来（清空会留下这个标记）。
+   */
+  private async repairUserRowsOnce(): Promise<void> {
+    try {
+      if ((await store.getMeta(USERS_REPAIRED_KEY)) === '1') return
+      const startedAt = Date.now()
+      const repaired = await store.repairUsersFromMessages('')
+      await store.setMeta(USERS_REPAIRED_KEY, '1')
+      logger.info(
+        repaired > 0
+          ? `[douyin-link] 补档案：按消息流水补回 ${repaired} 个用户的档案行（+${since(startedAt)}）`
+          : `[douyin-link] 补档案：没有缺失的用户档案（+${since(startedAt)}）`
+      )
+      if (repaired > 0) {
+        // 补出来的是**新行**：作废「库里累计量」缓存，让房间列表的「用户 N」跟着更新
+        this.storeCache.at = 0
+      }
+    } catch (error) {
+      logger.warn('[douyin-link] 补档案失败（下次启动会再试）:', describe(error))
     }
   }
 
@@ -2286,9 +2327,11 @@ export class AnalyzerHub {
     return store.listUsersPage(webRid, sort, keyword, limit, offset)
   }
 
-  /** 某个人送过的礼物（用户榜悬停时按需查；只查库，不进内存） */
+  /** 某个人送过的礼物（用户榜悬停时按需查；只查库，不进内存）。
+   *  **画像口径**：按这个人的全部账号查（没绑定时就是那一个 id）。 */
   async userGifts(webRid: string, userId: string): Promise<GiftBreakdownRow[]> {
-    return store.userGiftBreakdown(webRid, userId)
+    const ids = await this.accountIdsOf(userId)
+    return store.userGiftBreakdown(webRid, ids)
   }
 
   /**
@@ -2312,46 +2355,155 @@ export class AnalyzerHub {
     range?: { from: number; to: number }
   ): Promise<MessagePage> {
     if (!userId) return { rows: [], total: 0 }
+    // 画像的多账号：他哪个号送/收的礼物都算这个人的
+    const ids = await this.accountIdsOf(userId)
     return store.queryMessages({
       webRid,
       kind: 'gift',
-      ...(direction === 'received' ? { toUserId: userId } : { userId }),
+      ...(direction === 'received' ? { toUserIds: ids } : { userIds: ids }),
       ...(range && range.to > range.from ? { from: range.from, to: range.to } : {}),
       limit,
       offset
     })
   }
 
-  /** 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并） */
+  /**
+   * 「这个人」的全部抖音账号（画像）；没绑定时就是 `[userId]`。
+   *
+   * 一处收口的原因：所有「按人」的查询（档案 / 画像 / 历史 / 礼物明细）都要用同一份 id 集合，
+   * 各自去查一次 identity 表既慢又容易漏——实现见 `mapper.resolveAccountIds`。
+   */
+  private async accountIdsOf(userId: string): Promise<string[]> {
+    const id = String(userId ?? '').trim()
+    if (!id) return []
+    const ids = await store.resolveAccountIds(id)
+    return ids.length > 0 ? ids : [id]
+  }
+
+  /**
+   * 用户档案：库里的累计数字（本场数字由 recorder 提供，界面按需合并）。
+   *
+   * **多账号（0.15.11）**：画像里的每个账号都并进来——统计累加、首见取最早、末见取最晚、
+   * 等级取最高、静态字段（昵称/头像/抖音号/签名/城市）**按主账号优先**取第一个非空的。
+   * 锚点仍是传进来的那个 `userId`（界面的头像/历史按它取），所以没绑定时行为与旧版逐字一致。
+   */
   async userProfile(webRid: string, userId: string): Promise<UserProfile | null> {
     if (!userId) return null
-    const row = await store.getUser(webRid, userId)
-    const session = webRid ? this.states.get(webRid)?.recorder.profile(userId) : undefined
-    const source = row
-    if (!source && !session) return null
-    if (!source && session) return session
-    const base = source!
-    return {
-      id: base.userId,
-      displayId: base.displayId,
-      // 静态字段：库里的是跨会话最全的一份，本场解出来的补空（且优先用本场的头像地址，
-      // 它可能是这个房间刚换过的）
-      nickname: base.nickname || session?.nickname || '',
-      gender: base.gender || session?.gender || 0,
-      signature: base.signature || session?.signature || '',
-      city: base.city || session?.city || '',
-      avatar: base.avatar || session?.avatar || '',
-      following: base.following || session?.following || 0,
-      follower: base.follower || session?.follower || 0,
-      honorLevel: base.honorLevel || session?.honorLevel || 0,
-      fansClubLevel: base.fansClubLevel || session?.fansClubLevel || 0,
-      badges: base.badges.length > 0 ? base.badges : (session?.badges ?? []),
-      secUid: base.secUid || session?.secUid || '',
-      // 时间是「库里最早 / 本场最近」：档案里两个都要（跨度才有意义）
-      firstSeen: base.firstSeen || session?.firstSeen || 0,
-      lastSeen: Math.max(base.lastSeen, session?.lastSeen ?? 0),
-      stats: base.stats
+    const ids = await this.accountIdsOf(userId)
+    const ordered = [userId, ...ids.filter((id) => id !== userId)]
+    // 有当前房间就按房间取（每人一行）；没有（数据大屏模式）就跨房间各取最近的一行
+    const stored = webRid ? await store.getUsers(webRid, ordered) : await store.getUsersAnyRoom(ordered)
+    const sessions = new Map<string, UserProfile>()
+    const state = webRid ? this.states.get(webRid) : undefined
+    for (const id of ordered) {
+      const profile = state?.recorder.profile(id)
+      if (profile) sessions.set(id, profile)
     }
+    if (stored.size === 0 && sessions.size === 0) return null
+
+    const rows = ordered
+      .map((id) => ({ row: stored.get(id), session: sessions.get(id) }))
+      .filter((entry) => entry.row || entry.session)
+    if (rows.length === 0) return null
+
+    const pick = <T>(get: (entry: { row?: UserRankRow; session?: UserProfile }) => T | undefined, fallback: T): T => {
+      for (const entry of rows) {
+        const value = get(entry)
+        if (value !== undefined && value !== '' && value !== 0) return value
+      }
+      return fallback
+    }
+    const mergedBadges: string[] = []
+    for (const entry of rows) {
+      for (const badge of entry.row?.badges.length ? entry.row.badges : (entry.session?.badges ?? [])) {
+        if (!mergedBadges.includes(badge)) mergedBadges.push(badge)
+      }
+    }
+    const stats: UserStats = { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 }
+    let firstSeen = 0
+    let lastSeen = 0
+    for (const { row, session } of rows) {
+      // 库里的是跨会话累计的一份；本场没有再补（本场数字只有 recorder 有）
+      if (row) {
+        stats.chat += row.stats.chat
+        stats.enter += row.stats.enter
+        stats.like += row.stats.like
+        stats.follow += row.stats.follow
+        stats.gift += row.stats.gift
+        stats.diamonds += row.stats.diamonds
+      } else if (session) {
+        stats.chat += session.stats.chat
+        stats.enter += session.stats.enter
+        stats.like += session.stats.like
+        stats.follow += session.stats.follow
+        stats.gift += session.stats.gift
+        stats.diamonds += session.stats.diamonds
+      }
+      const first = row?.firstSeen || session?.firstSeen || 0
+      if (first > 0) firstSeen = firstSeen > 0 ? Math.min(firstSeen, first) : first
+      lastSeen = Math.max(lastSeen, row?.lastSeen ?? 0, session?.lastSeen ?? 0)
+    }
+
+    return {
+      id: userId,
+      displayId: pick(({ row, session }) => row?.displayId || session?.displayId, ''),
+      nickname: pick(({ row, session }) => row?.nickname || session?.nickname, ''),
+      gender: pick(({ row, session }) => row?.gender || session?.gender, 0),
+      signature: pick(({ row, session }) => row?.signature || session?.signature, ''),
+      city: pick(({ row, session }) => row?.city || session?.city, ''),
+      avatar: pick(({ row, session }) => session?.avatar || row?.avatar, ''),
+      following: pick(({ row, session }) => row?.following || session?.following, 0),
+      follower: pick(({ row, session }) => row?.follower || session?.follower, 0),
+      honorLevel: pick(({ row, session }) => row?.honorLevel || session?.honorLevel, 0),
+      fansClubLevel: pick(({ row, session }) => row?.fansClubLevel || session?.fansClubLevel, 0),
+      badges: mergedBadges,
+      secUid: pick(({ row, session }) => row?.secUid || session?.secUid, ''),
+      firstSeen,
+      lastSeen,
+      stats
+    }
+  }
+
+  /** 画像视图（名字 + 主账号 + 全部账号概览）；给档案弹窗的「关联账号」那块用 */
+  async userIdentity(userId: string): Promise<UserIdentity> {
+    return store.userIdentity(userId)
+  }
+
+  /** 搜索可关联的账号（跨房间，按昵称/抖音号/id）；粘贴 id 也走这一条 */
+  async searchAccounts(keyword: string, limit = 20): Promise<IdentityAccountRow[]> {
+    const needle = String(keyword ?? '').trim()
+    if (!needle) return []
+    return store.searchAccounts(needle, limit)
+  }
+
+  /** 把 target 绑到 source 的画像（两边各有画像就合并），返回 source 现在的画像视图 */
+  async bindAccount(sourceUserId: string, targetUserId: string): Promise<UserIdentity> {
+    await store.bindAccount(sourceUserId, targetUserId)
+    return store.userIdentity(sourceUserId)
+  }
+
+  /**
+   * 解绑一个账号（只剩一个账号时画像自动解散）。
+   *
+   * `viewerUserId` = **界面上正在看的那个 id**：被解绑的那个账号解绑后就不属于任何画像了，
+   * 拿它自己的视图回给界面会把弹窗里的画像换成「一个空壳」——所以要回**看的人**的视图。
+   * 不传就退回 `userId`（脚本/一次性调用）。
+   */
+  async unbindAccount(userId: string, viewerUserId = ''): Promise<UserIdentity> {
+    const id = String(userId ?? '').trim()
+    const viewer = String(viewerUserId ?? '').trim() || id
+    await store.unbindAccount(id)
+    return store.userIdentity(viewer)
+  }
+
+  /** 改画像名（空 = 退回主账号昵称）。按账号 id 定位画像，改完回一份最新视图。 */
+  async renameIdentity(userId: string, name: string): Promise<UserIdentity> {
+    const id = String(userId ?? '').trim()
+    if (!id) return { identityId: 0, name: '', note: '', primaryUserId: '', accounts: [] }
+    const identityId = await store.identityOf(id)
+    if (!identityId) return store.userIdentity(id)
+    await store.renameIdentity(identityId, name)
+    return store.userIdentity(id)
   }
 
   /**
@@ -2362,9 +2514,11 @@ export class AnalyzerHub {
    *
    * **跨全部直播间**（不接收 webRid）：画像回答的是「这个人在这个平台什么样」，
    * 同一个房间的相关性只体现在消息本身，不需要按房间切片。
+   * **多账号**：绑定的账号合成一份画像（自环礼物不计入关系网）。
    */
   async userAnalysis(userId: string): Promise<UserAnalysis> {
-    const data = await store.userAnalysisData(userId)
+    const ids = await this.accountIdsOf(userId)
+    const data = await store.userAnalysisData(ids)
     return buildUserAnalysis(data, Date.now())
   }
 

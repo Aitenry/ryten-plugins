@@ -676,6 +676,56 @@ export interface UserRankPage {
   lastSeen: number
 }
 
+/* ------------------------------------------------------------- 画像（多账号） */
+
+/**
+ * 画像里的一个账号（跨房间并成一份的概览）。
+ *
+ * 用户 2026-10-11 的要求：「一个人可以有多个账号，但是其用户画像就一个，多用户账号关联」，
+ * 并且「所有内容关联要通过抖音 id 作为唯一标识，别人改名称了就乱了」——
+ * 所以这里的身份键永远是 `userId`（抖音数字 id），`nickname` 只是**显示用**的最近一次名字。
+ */
+export interface IdentityAccountRow {
+  /** 抖音用户 id —— 唯一标识（画像关联、历史查询、去重都用它） */
+  userId: string
+  /** 最近一次见到的昵称（**显示用**：会改名，不参与任何关联） */
+  nickname: string
+  /** 抖音号（也会改） */
+  displayId: string
+  avatar: string
+  /** 已属于哪个画像（0 = 还没绑定） */
+  identityId: number
+  chat: number
+  enter: number
+  likes: number
+  follows: number
+  gift: number
+  diamonds: number
+  firstSeen: number
+  lastSeen: number
+  /** 出现在几个直播间（跨房间并起来的一个信号） */
+  rooms: number
+}
+
+/** 一个画像：名字 + 主账号 + 它的全部账号（`identityId = 0` = 这个 id 还没绑定任何人） */
+export interface UserIdentity {
+  identityId: number
+  /** 画像名（空 = 界面上退回主账号昵称） */
+  name: string
+  note: string
+  /** 主账号 id（显示用） */
+  primaryUserId: string
+  accounts: IdentityAccountRow[]
+}
+
+/** 导出/导入用的一个画像（**不带本地自增 id**：导入时按账号重建，反复导入幂等） */
+export interface IdentityGroup {
+  name: string
+  note: string
+  primaryUserId: string
+  accounts: string[]
+}
+
 /* --------------------------------------------- 「分析用户」画像（规则算法，不依赖大模型） */
 
 /**
@@ -910,10 +960,17 @@ export interface MessageQuery {
   /** 发送者 id */
   userId?: string
   /**
+   * 发送者 id **集合**（画像里绑定了多个账号时用）：与 `userId` 是「或」的关系，
+   * 命中任一个都算「这个人发的」。关联走 id，不走昵称。
+   */
+  userIds?: string[]
+  /**
    * **收礼人 id**（礼物才有：`messages.to_user_id`）。
    * 「某人收到的礼物历史」就是 `kind = 'gift'` + 这个条件。
    */
   toUserId?: string
+  /** 收礼人 id 集合（同上：画像多账号时用） */
+  toUserIds?: string[]
   /** 时间范围（ms） */
   from?: number
   to?: number

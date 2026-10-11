@@ -285,6 +285,21 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       span: 'Active span',
       statsTitle: 'Interaction stats (per-room total)',
       statsHint: 'These are the stored totals; session numbers are shown in the room title bar.',
+      /* Identity (multi-account): one person may own several Douyin accounts, one profile.
+         Everything is linked by the numeric user id (nicknames change). */
+      identityAccounts: '{{count}} accounts',
+      identityPrimary: 'Primary',
+      identityBind: 'Link account',
+      identityBindPlaceholder: 'Search nickname / Douyin id / user id',
+      identityBindById: 'Link this id directly: {{id}}',
+      identityBindEmpty: 'No matching account (you can also paste a user id)',
+      identityBindOther: 'Already in another profile (linking merges them)',
+      identityUnbind: 'Unlink',
+      identityNameEdit: 'Rename profile',
+      identityNamePlaceholder: 'Profile name (empty = primary account nickname)',
+      identityAccountStats: 'chat {{chat}} · join {{enter}} · gift {{gift}}',
+      identityLinked: 'Linked accounts',
+      historyAccounts: 'includes {{count}} linked account(s)',
       /* Message history (click a user → bottom of the profile dialog) */
       historyTitle: 'Message history ({{count}})',
       historyRoom: 'This room',
@@ -336,8 +351,6 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       analyzeTagsTitle: 'Tags',
       analyzeInsightsTitle: 'Findings',
       analyzeFactsTitle: 'Quantified facts',
-      analyzeBasis:
-        'Method: RFM value tiers + Bartle player archetypes + Big Five behavioural profiling + Self-Determination Theory motives + an interaction-structure breakdown across all five kinds (chat / joins / likes / follows / gifts: shares, sessions, stay time, follow conversion) + lexicon-based chat analysis (7 emotion categories and 5 strength tiers from the DUTIR Chinese emotion lexicon; polarity weighted by degree adverbs and negations following HowNet) + gifting breakdown and relationship-network modelling — all deterministic rules, no LLM. Topics and lexicons cover the common live formats: chat rooms, song requests, shopping, gaming, talent and PK.',
       analyzeRecencyNow: 'just now',
       analyzeRecencyMinutesAgo: '{{n}} min ago',
       analyzeRecencyHoursAgo: '{{n}} h ago',

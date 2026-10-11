@@ -41,6 +41,11 @@ export function UserHistory(props: {
   userId: string
   /** 房间下拉的可选项（拿不到就只有一个「全部房间」+ 当前房间号） */
   rooms?: RoomRuntime[]
+  /**
+   * 画像里的**其它账号**（0.15.11 多账号关联）：一起查。
+   * 关联走抖音 id，所以这里只是多几个 id；同一个人两个号说过的话会并成一份历史。
+   */
+  userIds?: string[]
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
@@ -60,6 +65,9 @@ export function UserHistory(props: {
     dates && dates[0] && dates[1]
       ? { from: dates[0].startOf('day').valueOf(), to: dates[1].endOf('day').valueOf() }
       : null
+
+  /** 画像里的其它账号（去掉当前这个 id；空数组 = 没有绑定，行为与旧版逐字一致） */
+  const otherAccounts = (props.userIds ?? []).filter((id) => id && id !== props.userId)
 
   // 换用户 / 换房间（外部传入的当前房间变了）时，把房间选择对齐并回到第一页
   useEffect(() => {
@@ -81,7 +89,8 @@ export function UserHistory(props: {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
         from: range?.from,
-        to: range?.to
+        to: range?.to,
+        userIds: otherAccounts
       })
       .then((result) => {
         if (!alive) return
@@ -95,7 +104,7 @@ export function UserHistory(props: {
     return () => {
       alive = false
     }
-  }, [props.userId, roomSel, kindScope, page, range, tick])
+  }, [props.userId, roomSel, kindScope, page, range, tick, otherAccounts.join(',')])
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -128,6 +137,12 @@ export function UserHistory(props: {
           <span className="text-xs font-medium">
             {t('douyin-link.users.historyTitle', { count: formatNumber(total) })}
           </span>
+          {/* 多账号：说明这份历史是「这个人」的（几个号并起来），不是单个号的 */}
+          {otherAccounts.length > 0 ? (
+            <span className="text-[10px] opacity-50">
+              {t('douyin-link.users.historyAccounts', { count: otherAccounts.length + 1 })}
+            </span>
+          ) : null}
           <div className="flex min-w-0 items-center gap-2">
             <Segmented
               size="small"

@@ -189,6 +189,21 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
       ),
     'plugin:douyin-link:user-get': (webRid?: string, userId?: string) =>
       hub.userProfile(String(webRid ?? ''), String(userId ?? '')),
+    // 画像（多账号）：这个人绑定的全部账号与画像名 —— 档案弹窗的「关联账号」那块
+    'plugin:douyin-link:user-identity': (userId?: string) => hub.userIdentity(String(userId ?? '')),
+    // 搜索可关联的账号：跨全部房间按昵称/抖音号/用户 id 找（粘贴 id 也走这条）
+    'plugin:douyin-link:account-search': (keyword?: string, limit?: number) =>
+      hub.searchAccounts(String(keyword ?? ''), typeof limit === 'number' ? limit : 20),
+    // 关联账号：把 target 绑到 source 的画像（两边各有画像就合并）
+    'plugin:douyin-link:account-bind': (sourceUserId?: string, targetUserId?: string) =>
+      hub.bindAccount(String(sourceUserId ?? ''), String(targetUserId ?? '')),
+    // 解除关联（只剩一个账号时画像自动解散）；第二个参数是**界面上正在看的 id**，
+    // 回话要回他的画像视图（被解绑的那个账号解绑后已经不属于任何画像了）
+    'plugin:douyin-link:account-unbind': (userId?: string, viewerUserId?: string) =>
+      hub.unbindAccount(String(userId ?? ''), String(viewerUserId ?? '')),
+    // 改画像名（空 = 退回主账号昵称）
+    'plugin:douyin-link:identity-rename': (userId?: string, name?: string) =>
+      hub.renameIdentity(String(userId ?? ''), String(name ?? '')),
     // 某个人送过的礼物（用户榜悬停看明细）
     'plugin:douyin-link:user-gifts': (webRid?: string, userId?: string) =>
       hub.userGifts(String(webRid ?? ''), String(userId ?? '')),

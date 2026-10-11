@@ -1,14 +1,16 @@
 import * as fs from 'fs'
 import { BrowserWindow, dialog } from 'electron'
 import logger from 'electron-log'
-import type { ExportResult, ImportResult } from '../shared/types'
+import type { ExportResult, IdentityGroup, ImportResult } from '../shared/types'
 import { createZip, readZip, type ZipEntryInput } from './zip'
 import {
   exportDayRanges,
+  exportIdentityGroups,
   exportMessageRows,
   exportMinuteRows,
   exportSessionRows,
   exportUserRows,
+  importIdentityGroups,
   importMessages,
   importMinutes,
   importRooms,
@@ -29,6 +31,7 @@ import {
  * - `manifest.json`            —— 格式与版本、导出时刻、房间数等；
  * - `rooms.json`               —— 房间清单（备注 / 监控开关也在内）；
  * - `users/<webRid>.json`      —— 该房间的全部用户档案；
+ * - `identities.json`          —— **画像（多账号关联）**：一个人绑了哪几个抖音 id（全局，不按房间）；
  * - `records/<webRid>/<day>.json` —— **每个 JSON = 某房间某一天的直播数据**
  *    （消息流水 + 分钟聚合 + 当天的监控会话）。
  *
@@ -124,6 +127,11 @@ export async function exportArchive(): Promise<ExportResult> {
       }
     }
     entries.push({ name: 'rooms.json', data: JSON.stringify(rooms) })
+    // 画像（多账号关联）：全局一份，不挂在房间下——同一个人在哪个房间都是同一个人
+    const identities = await exportIdentityGroups()
+    if (identities.length > 0) {
+      entries.push({ name: 'identities.json', data: JSON.stringify(identities) })
+    }
     const manifest: ArchiveManifest = {
       format: FORMAT,
       version: FORMAT_VERSION,
@@ -198,6 +206,12 @@ export async function importArchive(): Promise<ImportResult> {
 
     let messages = 0
     let skipped = 0
+    // 画像（多账号关联）：先按账号重建画像，再导消息——这样导入完历史查询就能直接按画像合并
+    let identitiesBound = 0
+    if (files.has('identities.json')) {
+      const groups = JSON.parse(files.get('identities.json')!.toString('utf-8')) as IdentityGroup[]
+      if (Array.isArray(groups)) identitiesBound = await importIdentityGroups(groups)
+    }
     // 逐天文件处理：每个 JSON 是「某房间某一天的直播数据」
     for (const [name, content] of files) {
       if (!name.startsWith('records/') || !name.endsWith('.json')) continue
@@ -213,7 +227,8 @@ export async function importArchive(): Promise<ImportResult> {
     }
 
     logger.info(
-      `[douyin-link] 导入完成：${file}（新增房间 ${roomsAdded}、用户 ${users}、消息 ${messages}、跳过重复 ${skipped}）`
+      `[douyin-link] 导入完成：${file}（新增房间 ${roomsAdded}、用户 ${users}、消息 ${messages}、跳过重复 ${skipped}、` +
+        `画像关联 ${identitiesBound} 个账号）`
     )
     return { ok: true, rooms: roomsAdded, messages, skipped, users }
   } catch (error) {
