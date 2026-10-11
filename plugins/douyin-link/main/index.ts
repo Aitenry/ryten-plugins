@@ -1,11 +1,13 @@
 import { PLUGIN_PURGE } from '@host/main/plugins/contributions'
 import { APP_BEFORE_QUIT } from '@host/main/plugins/app-hooks'
 import { HARNESS_TOOL_CONTRIBUTION } from '@host/main/plugins/tool-contract'
+import logger from 'electron-log'
 import { EVENTS, createIpcHandlers, initAnalyzer } from './ipc'
 import { analyzerHub } from './monitor/hub'
 import { giftCatalog } from './gift/catalog'
 import { purgePluginData } from './purge'
 import { createToolContribution } from './tools'
+import { installQuitProbe } from './quit-probe'
 import type { MainPluginContext } from '@host/main/plugins/context'
 
 /**
@@ -53,8 +55,26 @@ export function install(ctx: MainPluginContext): void {
   // 返回值是 Promise：宿主会 await 它，等本机浏览器子进程真正收干净再退出（见 hub.suspend）。
   ctx.contribute(APP_BEFORE_QUIT, {
     label: '抖音直播分析器：停掉弹幕轮询与音频泵',
-    run: () => analyzerHub.suspend('appQuit')
+    run: async () => {
+      /**
+       * 这一段计时是给「关闭窗口要关两次」留证据用的：宿主是**逐个 await** 退出前钩子的，
+       * 只要有一个钩子慢，退出就会被拖住（用户看到的就是「关了没反应，再点一次」）。
+       * 写成 `[quit-probe]` 前后两行，日志里一眼能看出是不是我们这一环慢。
+       */
+      const startedAt = Date.now()
+      logger.info('[douyin-link][quit-probe] 退出前钩子开始（停采集器）')
+      await analyzerHub.suspend('appQuit')
+      logger.info(`[douyin-link][quit-probe] 退出前钩子结束（${Date.now() - startedAt}ms）`)
+    }
   })
+
+  /**
+   * 「关闭窗口要关两次」的现场记录（见 `./quit-probe`）。
+   *
+   * 插件主模块跑在宿主主进程里，所以能直接听 Electron 的 `close`/`before-quit`/`will-quit`：
+   * 下一轮用户再遇到时，日志里就能分清是「系统的关闭消息没到应用」还是「到了、被退出链拖住」。
+   */
+  ctx.effect(() => installQuitProbe())
 
   ctx.contribute(PLUGIN_PURGE, {
     label:
