@@ -604,6 +604,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       network: 'Network request failed: {{detail}}',
       pageFailed: 'Cannot open the room page: {{detail}}',
       roomNotFound: 'No room id on the page; the room may be offline or the link is wrong',
+      resolving:
+        'Douyin is showing a captcha to this network: open live.douyin.com once in a browser to clear it, then update the cookie in settings (the plugin keeps retrying)',
       enterFailed: 'The room API returned an error: {{detail}}',
       resolveFailed: 'Resolving the room failed: {{detail}}',
       connectFailed: 'Cannot start the realtime channel: {{detail}}',

@@ -794,7 +794,7 @@ export class AnalyzerHub {
     if (!webRid) return { ok: false, failure: { code: 'badInput', detail: String(input ?? '').slice(0, 60) } }
     const startedAt = Date.now()
     try {
-      const resolved = await withTimeout(resolveLiveRoom(`https://live.douyin.com/${webRid}`), RESOLVE_DEADLINE_MS, 'addRoom')
+      const resolved = await withTimeout(resolveLiveRoom(`https://live.douyin.com/${webRid}`, this.settings.douyinCookie), RESOLVE_DEADLINE_MS, 'addRoom')
       const existing = this.states.get(webRid)
       const state = existing ?? this.createState({ webRid, addedAt: Date.now() })
       this.applyResolved(state, resolved)
@@ -913,7 +913,7 @@ export class AnalyzerHub {
     const state = this.states.get(webRid)
     if (!state) return false
     try {
-      const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'refreshRoom')
+      const resolved = await withTimeout(resolveLiveRoom(state.target, this.settings.douyinCookie), RESOLVE_DEADLINE_MS, 'refreshRoom')
       this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
       state.failure = null
@@ -1041,7 +1041,7 @@ export class AnalyzerHub {
     let url = state.streams[quality] ?? ''
     if (!url) {
       try {
-        const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startAudio')
+        const resolved = await withTimeout(resolveLiveRoom(state.target, this.settings.douyinCookie), RESOLVE_DEADLINE_MS, 'startAudio')
         this.applyResolved(state, resolved)
         await store.upsertRoom(resolved.room)
         url = state.streams[this.pickQuality(state)] ?? ''
@@ -1103,7 +1103,7 @@ export class AnalyzerHub {
     pump.start(state.sourceUrl || null, async () => {
       // 地址过期时重解析（签名带 t=）；**不改界面状态**，音频自己换地址即可
       logger.info(`[douyin-link] 重新解析音频地址（${state.webRid}）`)
-      const resolved = await resolveLiveRoom(state.target)
+      const resolved = await resolveLiveRoom(state.target, this.settings.douyinCookie)
       this.applyResolved(state, resolved)
       const url = state.streams[this.pickQuality(state)] ?? ''
       if (!url) throw new ResolveFailure('enterFailed', 'no flv url')
@@ -1183,7 +1183,7 @@ export class AnalyzerHub {
     this.emitRooms(true)
     const startedAt = Date.now()
     try {
-      const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'startMonitor')
+      const resolved = await withTimeout(resolveLiveRoom(state.target, this.settings.douyinCookie), RESOLVE_DEADLINE_MS, 'startMonitor')
       if (!alive()) return
       this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
@@ -1308,6 +1308,20 @@ export class AnalyzerHub {
       return
     }
     state.attempts += 1
+    /**
+     * **风控验证页（`resolving`）退让得更久**（2026-10-11 真机踩到）：
+     * 这个状态下抖音已经把这个 IP 挡在验证码后面了，25 秒一次的密集重连只会让它更不高兴，
+     * 而密集重试的额度（`RETRY_LIMIT` 次）几分钟就用光，之后就只剩每分钟探测。
+     * 所以这一类直接用 2 分钟起步、并随次数线性拉长（最多 10 分钟），等用户去过验证码或风控自己解除。
+     */
+    const challenged = state.failure?.code === 'resolving'
+    const delay = challenged ? Math.min(120_000 * state.attempts, 600_000) : RETRY_DELAY_MS
+    if (challenged) {
+      logger.warn(
+        `[douyin-link] ${state.webRid} 被抖音的验证码挡着，${Math.round(delay / 1000)}s 后再试` +
+          `（用浏览器打开一次 live.douyin.com 过掉验证码会立刻恢复）`
+      )
+    }
     this.retryTimers.set(
       state.webRid,
       setTimeout(() => {
@@ -1316,7 +1330,7 @@ export class AnalyzerHub {
         if (this.states.get(state.webRid) !== state) return
         this.stopRoomSocket(state)
         this.reconcile()
-      }, RETRY_DELAY_MS)
+      }, delay)
     )
   }
 
@@ -1753,7 +1767,7 @@ export class AnalyzerHub {
             await store.upsertRoom(entered.room)
           } else {
             // 还没有进房 Cookie（这个房间从没解析过 / 库里的房间刚恢复）：完整解析一次
-            const resolved = await withTimeout(resolveLiveRoom(state.target), RESOLVE_DEADLINE_MS, 'refreshLight')
+            const resolved = await withTimeout(resolveLiveRoom(state.target, this.settings.douyinCookie), RESOLVE_DEADLINE_MS, 'refreshLight')
             this.applyResolved(state, resolved)
             await store.upsertRoom(resolved.room)
           }
