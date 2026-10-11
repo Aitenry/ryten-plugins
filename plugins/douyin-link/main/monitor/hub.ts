@@ -145,6 +145,19 @@ const RETRY_LIMIT = 12
  * 一整天下来是 1440 次轻量解析——比「主播开播了却永远不开始监控」划算得多。
  */
 const RELIVE_PROBE_MS = 60 * 1000
+/**
+ * 实时通道「连着但一条业务消息都没有」容忍多久（见 `watchMonitors`）。
+ *
+ * 主播下播时推送 ws **常常既不推下播帧、也不断开**，只是不再有业务消息；实测那条废连接
+ * 挂着推了 7 个多小时的空帧（真机日志：「实时通道推送过的消息：（一条都没有）」），
+ * 于是「连接还在」这件事本身不能当作「还在采集」。live 房间每几秒就有成员/点赞/人数帧，
+ * 5 分钟一条业务消息都没有只可能是这条连接已经废了。
+ *
+ * 这个阈值按真机日志校过（2026-10-11 的 `logs/main.log`，三个房间共 447 段）：
+ * 直播中的房间相邻两段消息**中位 120 秒、最大 173 秒**（那是日志自己的 2 分钟汇总节流），
+ * 所以 5 分钟离正常抖动还有一倍余量；判错的代价也只是重连一次（约 2 秒）。
+ */
+const STALL_MS = 5 * 60 * 1000
 /** 房间信息（成员名单/在线人数/标题）的轻刷新间隔：只打 enter，一次一个请求 */
 const ROOM_REFRESH_MS = 5 * 60 * 1000
 /** 没在监控的房间多久刷一次（只要面板有房间级数据就行，别为闲置房间频繁抓页面） */
@@ -273,6 +286,16 @@ export class AnalyzerHub {
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** 「下播了、等它重新开播」的探测定时器（每房间一个，见 `scheduleRelive`） */
   private reliveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /**
+   * 正在跑「开播探测」的房间（解析要一两秒）。这一两秒里既没有采集、也没有定时器，
+   * 看门狗（`watchMonitors`）别把同一件事又排一遍。
+   */
+  private reliveProbing = new Set<string>()
+  /**
+   * 每个房间**最近一次真的收到业务消息**的时刻（见 `watchMonitors`）。
+   * 只记业务消息（弹幕/进场/礼物/麦位），空帧与心跳不算——它们证明不了房间还在。
+   */
+  private lastDataAt = new Map<string, number>()
   private roomsDirty = false
   private roomsPushedAt = 0
   /** 启动令牌自增（见 RoomState.startToken） */
@@ -418,6 +441,9 @@ export class AnalyzerHub {
     this.retryTimers.clear()
     for (const timer of this.reliveTimers.values()) clearTimeout(timer)
     this.reliveTimers.clear()
+    // 停用之后不留「正在探测」「最后一条消息」这类运行态（重新启用时 init 会重建）
+    this.reliveProbing.clear()
+    this.lastDataAt.clear()
     this.flushTimer = null
     this.cleanupTimer = null
     this.started = false
@@ -724,13 +750,34 @@ export class AnalyzerHub {
       this.applyResolved(state, resolved)
       await store.upsertRoom(resolved.room)
       state.failure = null
-      if (state.phase === 'ended' && resolved.room.status === 'live' && state.monitor) {
-        logger.info(`[douyin-link] ${webRid} 重新开播，自动拉起监听`)
-        this.reconcile()
-      } else if (state.phase === 'ended' && state.monitor) {
-        // 还是没开播：继续排队等着（下播期间开关一直是开的）
-        logger.debug(`[douyin-link] ${webRid} 还没开播，继续等（每分钟探测一次）`)
-        this.scheduleRelive(state)
+      /**
+       * 判据是「**有没有采集在跑**」，不是相位（2026-10-11 修）。
+       *
+       * 旧版两个分支都写成 `state.phase === 'ended' && ...`，于是相位一旦被别的回调改掉
+       * （通道那边上报 retrying/error、并发满之后 reconcile 打上 queued），
+       * 这一条路就**两个分支都不进**：定时器进来之前已经删掉了、也没有人再排新的 ——
+       * 房间永久停摆：开关开着、没有任何采集、主播重开播也不再有人管（就是用户报的
+       * 「断播后重新开播拉不起来、丢数据」）。真机实测：探测失败一次之后相位变 error，
+       * 之后再没有任何「还没开播，继续等」，一整天都不回来。
+       */
+      if (state.monitor && !state.roomSocket && !state.startToken && resolved.room.status === 'ended') {
+        // 没在播就如实显示「已下播 · 等开播」（探测失败过的房间也在这里被捋回来）
+        state.phase = 'ended'
+      }
+      if (state.monitor && !state.roomSocket && !state.startToken) {
+        if (resolved.room.status === 'live') {
+          logger.info(`[douyin-link] ${webRid} 重新开播，自动拉起监听`)
+          this.reconcile()
+        } else {
+          // 还是没开播：继续排队等着（下播期间开关一直是开的）
+          logger.debug(`[douyin-link] ${webRid} 还没开播，继续等（每分钟探测一次）`)
+        }
+        /**
+         * reconcile 之后还是没有人管它（并发满被排队 / 解析到还没开播 / 连开关都是刚打开的），
+         * 就把下一次探测排上——**这一句是「等待链永远不会断」的保证**。
+         * `scheduleRelive` 自己会判重（有定时器就不排），不会叠。
+         */
+        if (!state.roomSocket && !state.startToken) this.scheduleRelive(state)
       }
       this.emitRooms(true)
       return true
@@ -739,7 +786,16 @@ export class AnalyzerHub {
         error instanceof ResolveFailure
           ? { code: error.code, detail: error.detail || undefined }
           : { code: 'resolveFailed', detail: describe(error) }
-      if (!state.roomSocket) state.phase = 'error'
+      if (!state.roomSocket) {
+        /**
+         * 还在等开播的房间，探测失败只是「这一分钟没问到」，**不能**把相位改成错误：
+         * 开关开着 = 还在等（界面「已下播 · 等开播」），失败明细走 `failure` 字段。
+         * 相位一改，用户看到的就是「监控莫名其妙停了」。
+         */
+        state.phase = state.monitor && state.phase === 'ended' ? 'ended' : 'error'
+      }
+      // 失败也必须把下一次探测排上（旧版这里直接 return：探测失败一次 = 等待链从此断掉）
+      if (state.monitor && !state.roomSocket && !state.startToken) this.scheduleRelive(state)
       this.emitRooms(true)
       return false
     }
@@ -764,7 +820,12 @@ export class AnalyzerHub {
         if (!state.monitor) return
         if (this.states.get(state.webRid) !== state) return
         if (state.roomSocket) return
-        void this.refreshRoom(state.webRid)
+        /**
+         * 探测期间打个标记（见 `watchMonitors`）：解析要一两秒，这期间「没有采集、也没有定时器」，
+         * 看门狗别把同一件事又排一遍 —— 否则等待期的探测频率会翻倍。
+         */
+        this.reliveProbing.add(state.webRid)
+        void this.refreshRoom(state.webRid).finally(() => this.reliveProbing.delete(state.webRid))
       }, RELIVE_PROBE_MS)
     )
   }
@@ -1009,6 +1070,8 @@ export class AnalyzerHub {
     state.startToken = 0
     const hadSocket = Boolean(state.roomSocket)
     this.stopRoomSocket(state)
+    // 没在跑了，就别再拿旧的「最后一条消息时刻」判相位（见 watchMonitors）
+    this.lastDataAt.delete(state.webRid)
     const timer = this.retryTimers.get(state.webRid)
     if (timer) {
       clearTimeout(timer)
@@ -1032,6 +1095,8 @@ export class AnalyzerHub {
    */
   private startRoomSocket(state: RoomState): void {
     if (state.roomSocket) return
+    // 新通道的「宽限期」从这里算（见 watchMonitors）：刚连上还没来消息不算废
+    this.lastDataAt.set(state.webRid, Date.now())
     const socket = new DirectPushCapture(
       { webRid: state.webRid, roomId: state.roomId, cookie: mergeCookieHeaders(this.settings.douyinCookie, state.cookie) },
       {
@@ -1055,7 +1120,19 @@ export class AnalyzerHub {
   private scheduleRetry(state: RoomState): void {
     if (!state.monitor || this.retryTimers.has(state.webRid)) return
     if (state.attempts >= RETRY_LIMIT) {
-      logger.warn(`[douyin-link] ${state.webRid} 重试 ${state.attempts} 次仍未成功，停止自动重试`)
+      /**
+       * 密集重连到上限就**换成慢探测**，不许直接放弃（2026-10-11 修）。
+       *
+       * 旧版这里只打一条 warn 就 return，而调用它的两条路上 `state.roomSocket` 可能还是那个
+       * 已经死掉的采集器：`reconcile` 看 `roomSocket` 非空会一直跳过这个房间，
+       * `scheduleRelive` 的回调也因为它非空而直接返回 —— 于是「开关开着、界面显示错误、
+       * 主播再开播也不会有人管」，一停就是一整晚（真机日志：连续 12 次重试用尽后再无任何动作）。
+       */
+      logger.warn(
+        `[douyin-link] ${state.webRid} 重试 ${state.attempts} 次仍未成功，改为每分钟探测一次（不再密集重连）`
+      )
+      this.stopRoomSocket(state)
+      this.scheduleRelive(state)
       return
     }
     state.attempts += 1
@@ -1180,6 +1257,11 @@ export class AnalyzerHub {
 
   /** 把一批消息真正吃进去（计数/落库/推界面）；送礼人昵称补好之后由 `handleItems` 调这里 */
   private applyItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
+    /**
+     * 有业务消息 = 这条通道真的还在采集（看门狗按它判废，见 `watchMonitors`）。
+     * 空帧/心跳不算：真机上下播之后那条连接还在推空帧，正是被它骗过去的。
+     */
+    this.lastDataAt.set(state.webRid, Date.now())
     this.noteEmptyGifts(state, items)
     const touched = state.recorder.ingest(items, users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)
@@ -1262,6 +1344,8 @@ export class AnalyzerHub {
    * 这份同步是**全量快照**（不是增量），所以每次整份替换——留着旧的会让下麦的人永远在麦上。
    */
   private handleMic(state: RoomState, userIds: string[]): void {
+    // 麦位同步也是业务消息（语音房掉线时它同样会停，见 watchMonitors）
+    this.lastDataAt.set(state.webRid, Date.now())
     const before = state.recorder.micList()
     const changed =
       before.length !== userIds.length ||
@@ -1297,6 +1381,8 @@ export class AnalyzerHub {
 
   /** 攒批落库：消息流水 / 分钟桶 / 用户统计（三类增量一次 flush 写完） */
   private async flush(): Promise<void> {
+    // 每 2 秒看一眼「开关开着的房间是不是真的有人在管」（见 watchMonitors）
+    this.watchMonitors()
     let flushed = false
     for (const state of this.states.values()) {
       const recorder = state.recorder
@@ -1381,6 +1467,57 @@ export class AnalyzerHub {
       if (this.roomsDirty) this.pushRoomsThrottled(true)
     } finally {
       this.refreshing = false
+    }
+  }
+
+  /**
+   * **看门狗**（每 2 秒跟着 `flush` 跑一次）：开关开着的房间，必须真的有人在管它。
+   *
+   * 为什么必须有它（2026-10-11 用户反馈「断播后重新开播拉不起来、丢监控数据」）：
+   * 那两个故障都不是「某一次操作失败」，而是**状态机里走进去就出不来的死角**：
+   *
+   * 1. **通道活着、其实早废了**：主播下播时推送 ws 常常既不推下播帧、也不断开，只是不再有业务
+   *    消息（真机日志里那条「实时通道推送过的消息：（一条都没有）」挂了 7 个多小时）。
+   *    `state.roomSocket` 非空 → `reconcile` 认为它在跑、`scheduleRelive` 的回调直接返回，
+   *    主播重开播之后**永远**收不到东西，界面还一直显示「直播中」——数据就是这么丢的。
+   *    这里按「多久没有一条业务消息」判废：到点就把这条连接收掉、重新解析一次
+   *    （房间重开后抖音给的**内部房间号会变**，不重新解析连不上新房间）。
+   * 2. **没有采集、也没有任何定时器**：探测失败、重试用尽、并发满被排队，都可能留下
+   *    「开关开着但没人管」的房间（旧版一次探测失败就永久停摆）。这里补一次开播探测，
+   *    保证等待链永远不断——`reconcile` 那边只要有一个并发位空出来就会被叫醒。
+   *
+   * 两条都以「监控开关」为准：开关关着就什么都不做（用户的意图优先）。
+   */
+  private watchMonitors(): void {
+    const now = Date.now()
+    for (const state of this.states.values()) {
+      if (!state.monitor) continue
+      if (state.roomSocket) {
+        const last = this.lastDataAt.get(state.webRid)
+        if (last === undefined) {
+          this.lastDataAt.set(state.webRid, now)
+          continue
+        }
+        if (now - last < STALL_MS) continue
+        const minutes = Math.max(1, Math.round((now - last) / 60000))
+        logger.warn(
+          `[douyin-link] ${state.webRid} 实时通道 ${minutes} 分钟没有任何消息（多半是下播后重开、` +
+            '这条连接已经废了），重新解析并重连'
+        )
+        // 先把时刻顶掉：重连本身也要一两秒，别让下一次 flush 又触发一遍
+        this.lastDataAt.set(state.webRid, now)
+        this.stopState(state, 'stalled')
+        this.reconcile()
+        continue
+      }
+      if (state.startToken) continue
+      if (this.retryTimers.has(state.webRid)) continue
+      if (this.reliveTimers.has(state.webRid)) continue
+      if (this.reliveProbing.has(state.webRid)) continue
+      logger.warn(
+        `[douyin-link] ${state.webRid} 监控开着却没有任何采集在跑（相位 ${state.phase}），重新排一次开播探测`
+      )
+      this.scheduleRelive(state)
     }
   }
 
