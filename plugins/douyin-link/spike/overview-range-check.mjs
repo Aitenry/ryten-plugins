@@ -475,6 +475,8 @@ console.log(`  中间那行：${ends?.middle ?? ''}`)
 check('正文第二行还是三个印章（左端点 / 这一段 / 右端点）', ends?.count, 3)
 check('正文两端印章读得到', Boolean(ends && ends.first > 0 && ends.last > ends.first), true)
 const wholeDayText = zh['douyin-link'].page.rangeSpan.replace('{{duration}}', duration(ends.last - ends.first))
+/** 整段那一天的跨度（ms）：拖动后的断言用它比**数值**，不比文案（见第 3 段那条注释） */
+const wholeDaySpan = ends.last - ends.first
 check('没拖过进度条时时长 = 这一天整段', (extraEl?.textContent ?? '').trim(), wholeDayText)
 
 console.log('\n=== 2. 「这一天全部」按钮被移除 ===')
@@ -493,12 +495,19 @@ check(
 
 console.log('\n=== 3. 拖动进度条：时长跟着换，按钮依然不在 ===')
 check('两个把手都在', handles().length, 2)
+/** 滑块自己的值（rc-slider 写在把手上的 `aria-valuenow`，秒级；文案只到分钟，见下面那段注释） */
+const handleValue = (index) => Number(handles()[index]?.getAttribute('aria-valuenow') ?? NaN)
+const rightBefore = handleValue(1)
+check('右把手拖之前有值（rc-slider 的 aria-valuenow）', Number.isFinite(rightBefore), true)
 /*
  * 页面传下来的 `range` 一直是**生效区间**（不是 null）——没拖过就是这一天 00:00 → 现在，
  * 所以旧代码里那个「这一天全部」按钮**一直挂着**（第 2 段那几条断言在改动前必炸）。
- * 右把手在 x=1000 处按住、拖到 x=980：Δ = -2% × 这一天跨度。
+ *
+ * 拖动量取**整段的 40%**（右把手 x=1000 → 600）：早先固定拖 2%，在**刚过午夜**那个窗口里
+ * 整段本身只有几分钟，2% 只有几秒，取整到分钟后文案与整段一模一样（2026-10-13 复核发布字节时
+ * 正好踩在 00:04），于是「时长变了」这条断言会误报。拖 40% 之后，任何真实跨度都会跨过一分钟。
  */
-check('拖右把手', await dragHandle(1, 1000, 980), true)
+check('拖右把手', await dragHandle(1, 1000, 600), true)
 const after = rangeEnds() ?? { first: 0, last: 0, middle: '' }
 console.log(`  拖动后中间那行：${after?.middle ?? ''}`)
 check('中间那行变成「起 → 止」（选了具体一段）', (after?.middle ?? '').includes('→'), true)
@@ -508,7 +517,19 @@ const toAt = parseStamp(toText ?? '')
 const spanText = zh['douyin-link'].page.rangeSpan.replace('{{duration}}', duration(toAt - fromAt))
 console.log(`  换算：${new Date(fromAt).toLocaleString()} → ${new Date(toAt).toLocaleString()} = ${spanText}`)
 check('标题右边换成了这一段的时长（和正文印的起止时刻一致）', (rangeExtra()?.textContent ?? '').trim(), spanText)
-check('时长确实变了（不再是整段那一天）', (rangeExtra()?.textContent ?? '').trim() !== wholeDayText, true)
+/*
+ * 「时长变了没有」比**滑块自己的值**（秒级），不比文案：`duration()` 与正文印章都只到分钟，
+ * 而刚过午夜时整段本身就只有几分钟——那时任何小于一分钟的位移在文案上看不出来（第一版就是这么误报的）。
+ * 选中区间是不是整段的**真子集**，与跑在一天中的什么时刻无关。
+ */
+const rightAfter = handleValue(1)
+console.log(`  右把手：拖前 ${rightBefore} → 拖后 ${rightAfter}（秒级，文案只到分钟）`)
+check(
+  '右把手确实变小了（选中区间成为整段的真子集）',
+  Number.isFinite(rightAfter) && rightAfter < rightBefore,
+  true
+)
+check('时长确实变了（不再是整段那一天）', toAt - fromAt < wholeDaySpan, true)
 check('拖完还是没有「这一天全部」', text().includes('这一天全部'), false)
 check('拖完正文还是一个按钮都没有', rangeBody()?.querySelectorAll('button').length ?? -1, 0)
 check('拖完「时长」仍然只在标题右边', (text().match(/时长/g) ?? []).length, 1)
