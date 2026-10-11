@@ -298,6 +298,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       statsGiftSent: 'Sent',
       statsGiftReceived: 'Received',
       giftCalendarOpen: 'See every day\u2019s sent and received coins, month by month',
+      /* The gift-value tile shows two bare numbers, so the hint carries their meaning */
+      giftCalendarHint: '{{sent}} (green) \u00b7 {{received}} (amber) \u2014 click for every day\u2019s sent and received coins',
       giftCalendarTitle: '{{name}} \u00b7 daily earnings',
       giftCalendarSentRow: 'Sent',
       giftCalendarReceivedRow: 'Received',

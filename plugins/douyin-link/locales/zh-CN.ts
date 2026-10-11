@@ -308,6 +308,8 @@ export const DouyinLinkZhCN = {
       statsGiftSent: '送礼',
       statsGiftReceived: '收礼',
       giftCalendarOpen: '点击查看每个月的每一天送礼和收礼的抖币',
+      /* 礼物价值那格只有两个数字（没有文字标签），含义靠这句提示说清 */
+      giftCalendarHint: '{{sent}}（绿）· {{received}}（黄）——点击查看每个月的每一天送礼和收礼的抖币',
       giftCalendarTitle: '{{name}} · 每日收益',
       giftCalendarSentRow: '送礼',
       giftCalendarReceivedRow: '收礼',

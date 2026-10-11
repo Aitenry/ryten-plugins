@@ -15,7 +15,7 @@
  *   node scripts/build.mjs --plugin douyin-link
  *   node plugins/douyin-link/spike/rank-profile-check.mjs
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,6 +23,8 @@ import { pathToFileURL } from 'node:url'
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const distDir = process.env.DY_DIST ? process.env.DY_DIST.replace(/^\/([A-Za-z]:)/, '$1') : join(ROOT, 'dist/douyin-link')
 const bundlePath = join(distDir, 'renderer.mjs')
+/** 插件自带的样式表（截图自检要用它，否则版式全塌） */
+const pluginCssPath = join(distDir, 'plugin.css')
 if (!existsSync(bundlePath)) {
   console.error(`找不到渲染层产物：${bundlePath}（先跑 node scripts/build.mjs --plugin douyin-link）`)
   process.exit(2)
@@ -395,6 +397,25 @@ const check = (label, actual, expected) => {
   )
 }
 
+/**
+ * 把**真产物渲染出来的 DOM**（不是手写的仿制品）连同**插件自带的 plugin.css** 落成一个 HTML 文件，
+ * 用来给人/截图看版式：jsdom 量不到像素（`getBoundingClientRect` 全是 0），所以「有没有撑高、
+ * 两列分不分得开」这类事只能靠眼睛。默认写到临时目录，用完删。
+ */
+const snap = (name, node) => {
+  if (!node) return ''
+  const css = existsSync(pluginCssPath) ? readFileSync(pluginCssPath, 'utf8') : ''
+  const file = join(tmpdir(), `douyin-snap-${name}.html`)
+  writeFileSync(
+    file,
+    `<!doctype html><html class="dark"><head><meta charset="utf-8"><style>${css}</style>` +
+      `<style>body{margin:0;background:#141414;padding:16px;font-family:"Microsoft YaHei",sans-serif}.ant-modal{position:static!important;width:auto!important;margin:0!important}.ant-modal-content{background:#1f1f1f}.ant-modal-body{padding:12px!important}</style>` +
+      `</head><body>${node.outerHTML}</body></html>`,
+    'utf8'
+  )
+  return file
+}
+
 const Page = (await route.load()).default
 const root = createRoot(dom.window.document.getElementById('root'))
 await act(async () => {
@@ -560,18 +581,51 @@ const giftBlock = [...(profileModal()?.querySelectorAll('button') ?? [])].find((
   bodyText(node).includes(zh['douyin-link'].page.kpiDiamonds)
 )
 check('礼物价值那一块是个按钮（可点）', Boolean(giftBlock), true)
-const giftBlockText = bodyText(giftBlock)
+/*
+ * 用户 2026-10-11 第二轮：「超出了高度了…不需要文字了送礼和收礼这两个文字了，我只要数字即可」。
+ * 所以这一格里**只有两个数字**，两个都是**定死在块内两半、居中**的（`data-rb-gift-*` 是标记锚点），
+ * 并且**不再出现「送礼 / 收礼」这两个词的可见文本**（含义改由悬浮提示承载）。
+ */
+const sentNode = giftBlock?.querySelector('[data-rb-gift-sent]')
+const receivedNode = giftBlock?.querySelector('[data-rb-gift-received]')
+check('两个数字都在（各有自己的锚点）', [Boolean(sentNode), Boolean(receivedNode)], [true, true])
+check('左边那个是送礼 1,200', (sentNode?.textContent ?? '').trim(), '1,200')
+check('右边那个是收礼 1,300', (receivedNode?.textContent ?? '').trim(), '1,300')
 check(
-  '里面同时有「送礼」与「收礼」两个标签',
-  [giftBlockText.includes(zh['douyin-link'].users.statsGiftSent), giftBlockText.includes(zh['douyin-link'].users.statsGiftReceived)],
-  [true, true]
+  '格子里没有「送礼 / 收礼」这两个词（只剩数字）',
+  [bodyText(giftBlock).includes(zh['douyin-link'].users.statsGiftSent), bodyText(giftBlock).includes(zh['douyin-link'].users.statsGiftReceived)],
+  [false, false]
 )
-check('送礼 1200、收礼 1300 都画出来了', [giftBlockText.includes('1,200'), giftBlockText.includes('1,300')], [true, true])
+/*
+ * 「横排」在 jsdom 里**量不到**（工装的 `getBoundingClientRect` 对所有元素给同一个矩形），
+ * 所以这里只钉结构：两个数字是**同一个 flex 行**里的兄弟，各占一半（`flex-1`）——
+ * 真正的像素版式看 `snap()` 落出来的那张快照（同目录的截图自检）。
+ */
 check(
-  '悬浮提示说清了点了会看到什么',
+  '两个数字是同一个 flex 行里的兄弟、各占一半（横排结构）',
+  [
+    Boolean(sentNode?.parentElement) && sentNode?.parentElement === receivedNode?.parentElement,
+    (sentNode?.parentElement?.className ?? '').includes('flex'),
+    [sentNode?.className.includes('flex-1'), receivedNode?.className.includes('flex-1')]
+  ],
+  [true, true, [true, true]]
+)
+/*
+ * 高度对齐：旁边四个块都是「一行标签 + 一行数字」，礼物那格也必须是**两行**的高度
+ * （标签 + 一行数字），不能再多出第三行——工装能数的是子元素层数，像素高度在 jsdom 里都是 0。
+ */
+check(
+  '礼物格结构 = 标签行 + 数字行（没有多出来的第三行）',
+  [...(giftBlock?.children ?? [])].map((node) => node.querySelectorAll('span').length),
+  [0, 2]
+)
+check(
+  '悬浮提示写清了两个数字是什么（含义不靠格子里的文字）',
   giftBlock?.getAttribute('title'),
-  zh['douyin-link'].users.giftCalendarOpen
+  zh['douyin-link'].users.giftCalendarHint.replace('{{sent}}', zh['douyin-link'].users.statsGiftSent).replace('{{received}}', zh['douyin-link'].users.statsGiftReceived)
 )
+/* 留一张「真 DOM + 真 plugin.css」的快照给眼睛看（暗色主题，与用户截图一致） */
+console.log(`  版式快照：${snap('profile-stats', profileModal())}`)
 
 console.log('\n=== 6. 点礼物价值 → 「每日收益」日历弹窗 ===')
 calls.length = 0

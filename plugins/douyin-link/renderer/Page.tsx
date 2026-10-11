@@ -1759,13 +1759,14 @@ function UserProfileModal(props: {
                 <StatBlock label={t('douyin-link.kinds.social')} value={formatNumber(profile.stats.follow)} palette={palette} />
                 <GiftValueBlock
                   label={t('douyin-link.page.kpiDiamonds')}
-                  sentLabel={t('douyin-link.users.statsGiftSent')}
                   sent={profile.stats.diamonds}
                   sentColor={palette.up}
-                  receivedLabel={t('douyin-link.users.statsGiftReceived')}
                   received={profile.stats.receivedDiamonds}
                   receivedColor={palette.warn}
-                  hint={t('douyin-link.users.giftCalendarOpen')}
+                  hint={t('douyin-link.users.giftCalendarHint', {
+                    sent: t('douyin-link.users.statsGiftSent'),
+                    received: t('douyin-link.users.statsGiftReceived')
+                  })}
                   palette={palette}
                   onClick={() => props.onOpenCalendar(identityTitle)}
                 />
@@ -1834,21 +1835,23 @@ function FactLine(props: { items: string[] }): React.JSX.Element {
 }
 
 /**
- * 「礼物价值」那一格：**送礼 / 收礼两个统计**（用户 2026-10-11 的要求），整块可点。
+ * 「礼物价值」那一格：**送礼 / 收礼两个数**（用户 2026-10-11 的要求），整块可点。
  *
- * 版式与 `StatBlock` 同款（软底小方块 + 一行小标签），只是里面塞两行：
- * 每行**双列布局**（标签在左、数字在右，颜色区分送/收），所以这一块高度与旁边四个块一致。
- * 点一下开「每日收益」日历（每月每天的送礼/收礼抖币）。
+ * 版式（用户 2026-10-11 第二轮：「超出了高度了…不需要文字了送礼和收礼这两个文字了，
+ * 我只要数字即可」）：**与旁边四个块同高**（标签一行 + 数字一行），数字**横排两个、居中**——
+ * 所以里面不再有「送礼 / 收礼」这两行文字，两个数就是那两行的高度。绿 = 送出、琥珀 = 收到
+ * （与礼物榜、日历同一套色），顺序与日历里的「上送下收」一致：**左送右收**。
+ *
+ * 悬浮提示写清这两行是什么（读屏与鼠标悬停都有），点击开「每日收益」日历。
+ * 加宽的写法说明：这一个块占两栏才放得下两个六位数，`grid-cols-6` 见调用处。
  */
 function GiftValueBlock(props: {
   label: string
-  sentLabel: string
   sent: number
   sentColor: string
-  receivedLabel: string
   received: number
   receivedColor: string
-  /** 悬浮提示（说清点了会发生什么） */
+  /** 悬浮提示（写清两个数字分别是什么 + 点了会发生什么） */
   hint: string
   palette: PluginPalette
   onClick: () => void
@@ -1856,21 +1859,27 @@ function GiftValueBlock(props: {
   return (
     <button
       type="button"
+      data-rb-gift-value=""
       className="col-span-2 flex min-w-0 cursor-pointer flex-col rounded-md px-1.5 py-1 text-left"
       style={{ backgroundColor: props.palette.soft }}
       title={props.hint}
       onClick={props.onClick}
     >
       <span className="truncate text-[10px] opacity-60">{props.label}</span>
-      <span className="flex min-w-0 items-baseline justify-between gap-1 text-[10px] leading-5">
-        <span className="shrink-0 opacity-60">{props.sentLabel}</span>
-        <span className="truncate font-semibold" style={{ color: props.sentColor }}>
+      {/*
+        两个数各占一半、各自居中：数字只有颜色区分送/收，不再带文字标签。
+        `leading-5` 与 `StatBlock` 的数字行**逐字一致**——两边行高相同，这一格才与旁边四个块等高
+        （用户报的「超出了高度」就是这里比旁边高出一截）。
+      */}
+      <span className="flex min-w-0 flex-1 items-center tabular-nums leading-5">
+        <span data-rb-gift-sent="" className="min-w-0 flex-1 truncate text-center text-sm font-semibold" style={{ color: props.sentColor }}>
           {formatNumber(props.sent)}
         </span>
-      </span>
-      <span className="flex min-w-0 items-baseline justify-between gap-1 text-[10px] leading-5">
-        <span className="shrink-0 opacity-60">{props.receivedLabel}</span>
-        <span className="truncate font-semibold" style={{ color: props.receivedColor }}>
+        <span
+          data-rb-gift-received=""
+          className="min-w-0 flex-1 truncate text-center text-sm font-semibold"
+          style={{ color: props.receivedColor }}
+        >
           {formatNumber(props.received)}
         </span>
       </span>
