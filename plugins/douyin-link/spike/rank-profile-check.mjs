@@ -452,16 +452,23 @@ const check = (label, actual, expected) => {
  * 把**真产物渲染出来的 DOM**（不是手写的仿制品）连同**插件自带的 plugin.css** 落成一个 HTML 文件，
  * 用来给人/截图看版式：jsdom 量不到像素（`getBoundingClientRect` 全是 0），所以「有没有撑高、
  * 两列分不分得开」这类事只能靠眼睛。默认写到临时目录，用完删。
+ *
+ * `theme` 只影响外层那张壳（深/浅背景），插件自己的颜色来自 `usePluginPalette()`（渲染时就定好了）。
  */
-const snap = (name, node) => {
+const snap = (name, node, theme = 'dark') => {
   if (!node) return ''
   const css = existsSync(pluginCssPath) ? readFileSync(pluginCssPath, 'utf8') : ''
   const file = join(tmpdir(), `douyin-snap-${name}.html`)
+  const shell =
+    theme === 'dark'
+      ? 'body{margin:0;background:#141414;color:rgba(255,255,255,.88);padding:16px;font-family:"Microsoft YaHei",sans-serif}' +
+        '.ant-modal{position:static!important;width:auto!important;margin:0!important}.ant-modal-content{background:#1f1f1f}.ant-modal-body{padding:12px!important}'
+      : 'body{margin:0;background:#fff;color:rgba(0,0,0,.88);padding:16px;font-family:"Microsoft YaHei",sans-serif}' +
+        '.ant-modal{position:static!important;width:auto!important;margin:0!important}.ant-modal-content{background:#fff}.ant-modal-body{padding:12px!important}'
   writeFileSync(
     file,
-    `<!doctype html><html class="dark"><head><meta charset="utf-8"><style>${css}</style>` +
-      `<style>body{margin:0;background:#141414;padding:16px;font-family:"Microsoft YaHei",sans-serif}.ant-modal{position:static!important;width:auto!important;margin:0!important}.ant-modal-content{background:#1f1f1f}.ant-modal-body{padding:12px!important}</style>` +
-      `</head><body>${node.outerHTML}</body></html>`,
+    `<!doctype html><html class="${theme === 'dark' ? 'dark' : ''}"><head><meta charset="utf-8"><style>${css}</style>` +
+      `<style>${shell}</style></head><body>${node.outerHTML}</body></html>`,
     'utf8'
   )
   return file
@@ -769,13 +776,53 @@ const historyModal = [...doc.querySelectorAll('.ant-modal')].find((node) =>
 )
 check('明细弹窗标题行写着「送出与收到」', Boolean(historyModal), true)
 const historyText = bodyText(historyModal)
-check('送出的那条在（带 → 指向对方）', historyText.includes(`→ ${GIFT_HISTORY[0].toUser}`), true)
-check('收到的那条也在（带 ← 指向对方）', historyText.includes(`← ${GIFT_HISTORY[1].user}`), true)
+/*
+ * 方向显示：**不要箭头**（用户 2026-10-11：「不要用箭头来显示，要放在时间的前面，用文字，
+ * 收入，支出，来表示，用不同颜色」）。断言三件事：行首是「收入 / 支出」文字、
+ * 它们在时间**前面**（DOM 顺序）、两类的颜色不同（绿 = 收入、琥珀 = 支出）。
+ */
+const historyRows = [...(historyModal?.querySelectorAll('[data-rb-row]') ?? [])]
+check('明细里两条都在（送出的 + 收到的）', historyRows.length, 2)
+check(
+  '每行行首是方向文字（不是箭头）',
+  historyRows.map((node) => (node.querySelector('[data-rb-gift-direction]')?.textContent ?? '').trim()),
+  [zh['douyin-link'].page.giftHistoryExpense, zh['douyin-link'].page.giftHistoryIncome]
+)
+check(
+  '而且行里没有箭头（翻页按钮的箭头不算：只看数据行）',
+  historyRows.some((node) => /[→←]/.test(node.textContent ?? '')),
+  false
+)
+check(
+  '方向标签在时间前面（DOM 顺序：方向 → 时间）',
+  historyRows.map((node) => {
+    const children = [...node.children]
+    return children.indexOf(node.querySelector('[data-rb-gift-direction]')) <
+      children.findIndex((child) => /^\d{2}-\d{2} \d{2}:\d{2}$/.test((child.textContent ?? '').trim()))
+  }),
+  [true, true]
+)
+const directionColors = historyRows.map((node) => {
+  const tag = node.querySelector('[data-rb-gift-direction]')
+  return tag instanceof dom.window.HTMLElement ? tag.style.color : ''
+})
+check('两类用不同颜色（绿 = 收入 / 琥珀 = 支出）', [directionColors[0] !== directionColors[1], directionColors.every(Boolean)], [true, true])
+check(
+  '两条的礼物名与对方昵称都在',
+  [
+    historyText.includes(GIFT_HISTORY[0].text) && historyText.includes(GIFT_HISTORY[0].toUser),
+    historyText.includes(GIFT_HISTORY[1].text) && historyText.includes(GIFT_HISTORY[1].user)
+  ],
+  [true, true]
+)
 check(
   '两条的抖币都画出来了',
   [historyText.includes('1,200'), historyText.includes('500')],
   [true, true]
 )
+/* 明细那几行也留一张快照（方向标签的位置与配色只能靠眼睛看） */
+console.log(`  明细快照（暗）：${snap('gift-history-dark', historyModal, 'dark')}`)
+console.log(`  明细快照（亮）：${snap('gift-history-light', historyModal, 'light')}`)
 
 console.log('\n=== 8. 日历能翻到上一个月 ===')
 calls.length = 0

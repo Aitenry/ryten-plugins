@@ -95,18 +95,16 @@ export function GiftHistoryModal(props: {
   }, [page, pages])
 
   /**
-   * 这一行的**对方**：`→ 昵称` = 我送出去的、`← 昵称` = 我收到的。
+   * 这一行的**对方**（送礼/收礼的另一头是谁）。
    *
-   * 两个方向都要时箭头是必须的——不然「软软呀」既可能是我送的人、也可能是我收的人，读不出来。
-   * 单一方向时（榜单点进来的）不画箭头：那个方向已经写在标题行上了（「送出」/「收到」）。
+   * 两个方向都要时这一列**不带箭头**：方向已经由行首那个彩色文字标签（收入/支出）说清了，
+   * 再画箭头是重复表达（用户 2026-10-11 明确「不要用箭头来显示」）。
    */
   const counterpart = (row: GiftHistoryRow): string => {
     const received = props.both ? row.direction === 'received' : props.direction === 'received'
     const name = received ? row.user : row.toUser
     const id = received ? row.userId : row.toUserId
-    const label = name || (id ? t('douyin-link.page.idOnly', { id }) : '')
-    if (!props.both) return label
-    return `${received ? '←' : '→'} ${label}`
+    return name || (id ? t('douyin-link.page.idOnly', { id }) : '')
   }
 
   return (
@@ -166,27 +164,46 @@ export function GiftHistoryModal(props: {
               {loading ? t('douyin-link.page.loading') : t('douyin-link.page.giftHistoryEmpty')}
             </span>
           ) : (
-            rows.map((row) => (
-              <div
-                key={`${row.webRid}-${row.id}`}
-                data-rb-row=""
-                className="flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-xs leading-5"
-              >
-                <span className="shrink-0 opacity-60">{stamp(row.at)}</span>
-                <span className="min-w-0 flex-1 truncate" title={row.text}>
-                  {row.text || t('douyin-link.page.giftNameUnknown')}
-                </span>
-                <span className="max-w-[110px] shrink-0 truncate opacity-60" title={counterpart(row)}>
-                  {counterpart(row)}
-                </span>
-                {row.count > 1 ? <span className="shrink-0 opacity-60">×{row.count}</span> : null}
-                <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
-                  {row.diamonds > 0
-                    ? t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
-                    : t('douyin-link.page.giftValueUnknown')}
-                </span>
-              </div>
-            ))
+            rows.map((row) => {
+              /*
+               * 方向（只有「两个方向都要」时才有这一列）：**时间前面**一个彩色文字标签，
+               * 收入 = 绿（`palette.up`，他收到的）/ 支出 = 琥珀（`palette.warn`，他送出的）——
+               * 与日历里送礼/收礼两行、礼物价值那两个数同一套色，颜色本身就是口径。
+               * 用户 2026-10-11：「不要用箭头来显示，要放在时间的前面，用文字，收入，支出，来表示，
+               * 用不同颜色」。
+               */
+              const income = row.direction === 'received'
+              return (
+                <div
+                  key={`${row.webRid}-${row.id}`}
+                  data-rb-row=""
+                  className="flex min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-xs leading-5"
+                >
+                  {props.both ? (
+                    <span
+                      data-rb-gift-direction={income ? 'received' : 'sent'}
+                      className="w-8 shrink-0 text-center font-medium"
+                      style={{ color: income ? palette.up : palette.warn }}
+                    >
+                      {t(income ? 'douyin-link.page.giftHistoryIncome' : 'douyin-link.page.giftHistoryExpense')}
+                    </span>
+                  ) : null}
+                  <span className="shrink-0 opacity-60">{stamp(row.at)}</span>
+                  <span className="min-w-0 flex-1 truncate" title={row.text}>
+                    {row.text || t('douyin-link.page.giftNameUnknown')}
+                  </span>
+                  <span className="max-w-[110px] shrink-0 truncate opacity-60" title={counterpart(row)}>
+                    {counterpart(row)}
+                  </span>
+                  {row.count > 1 ? <span className="shrink-0 opacity-60">×{row.count}</span> : null}
+                  <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
+                    {row.diamonds > 0
+                      ? t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                      : t('douyin-link.page.giftValueUnknown')}
+                  </span>
+                </div>
+              )
+            })
           )}
         </div>
 
