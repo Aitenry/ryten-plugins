@@ -239,6 +239,19 @@ const anonUser = (nickname, honorLevel, at) => ({
   ]
 })
 
+/**
+ * 喂一批消息：**先等补名字那条异步链跑完再落库**。
+ *
+ * `handleItems` 里「帧里没带名字」的那一类会先 `await` 一次查库（补昵称），
+ * 所以 ingest 发生在下一个微任务/宏任务里；直接 `flushForTest()` 会**抢在它前面**把这批丢掉
+ * （2026-10-11 工装里就是这么假失败的：断言说「没记录」，其实是没等它）。
+ */
+const feedAndFlush = async (webRid, items, users = []) => {
+  analyzerHub.ingestItemsForTest(webRid, items, users, false)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await analyzerHub.flushForTest()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+}
 const feed = (webRid, items, users) => analyzerHub.ingestItemsForTest(webRid, items, users, false)
 
 console.log('\n=== 2. 真链路：三个匿名用户各说一句 + 各进一次场 ===')
@@ -317,13 +330,10 @@ check(
 
 console.log('\n=== 5. 认不出人的匿名帧：进本房间的未知桶，但不建档案 ===')
 const ghostAt = startedAt + 6000
-feed(
-  ROOM,
-  [{ id: 0, kind: 'chat', user: '', userId: '111111', text: '我是谁', count: 0, diamonds: 0, toUser: '', toUserId: '', at: ghostAt }],
-  []
-)
-await analyzerHub.flushForTest()
-await new Promise((resolve) => setTimeout(resolve, 200))
+/** 用 `feedAndFlush`：这一帧要经过「补名字」那条异步链（等它跑完再落库） */
+await feedAndFlush(ROOM, [
+  { id: 0, kind: 'chat', user: '', userId: '111111', text: '我是谁', count: 0, diamonds: 0, toUser: '', toUserId: '', at: ghostAt }
+])
 const ghostRows = (await mapper.queryMessages({ webRid: ROOM, limit: 200 })).rows.filter(
   (row) => row.kind === 'chat' && row.text === '我是谁'
 )
@@ -444,12 +454,10 @@ const maskedUser = (name, honorLevel) => ({
   secUid: ''
 })
 const bucketAt = Date.now()
-feed(BUCKET_ROOM_A, [maskedItem('秋***', '甲说的话', bucketAt)], [maskedUser('秋***', 24)])
-feed(BUCKET_ROOM_A, [maskedItem('刘***', '乙说的话', bucketAt + 1)], [maskedUser('刘***', 31)])
-feed(BUCKET_ROOM_A, [maskedItem('M***', '丙说的话', bucketAt + 2)], [maskedUser('M***', 0)])
-feed(BUCKET_ROOM_B, [maskedItem('秋***', '别的房间的话', bucketAt + 3)], [maskedUser('秋***', 24)])
-await analyzerHub.flushForTest()
-await new Promise((resolve) => setTimeout(resolve, 200))
+await feedAndFlush(BUCKET_ROOM_A, [maskedItem('秋***', '甲说的话', bucketAt)], [maskedUser('秋***', 24)])
+await feedAndFlush(BUCKET_ROOM_A, [maskedItem('刘***', '乙说的话', bucketAt + 1)], [maskedUser('刘***', 31)])
+await feedAndFlush(BUCKET_ROOM_A, [maskedItem('M***', '丙说的话', bucketAt + 2)], [maskedUser('M***', 0)])
+await feedAndFlush(BUCKET_ROOM_B, [maskedItem('秋***', '别的房间的话', bucketAt + 3)], [maskedUser('秋***', 24)])
 
 const bucketRows = (await mapper.queryMessages({ webRid: BUCKET_ROOM_A, limit: 50 })).rows.filter((row) => row.text)
 const bucketIds = [...new Set(bucketRows.map((row) => row.userId))]
@@ -518,6 +526,105 @@ const noLead = await revealAnonymousProfile(
   }
 )
 check('没有线索 → 回 anonymousMasked，且不查库', noLead, { ok: false, code: 'anonymousMasked' })
+
+console.log('\n=== 7. 帧里没带名字、但我们库里已经有档案 → 弹幕行要把名字补上 ===')
+/**
+ * 用户 2026-10-11 报障：「为什么这个神秘人获取不了名称，神秘人七阶」。
+ *
+ * 真库证据：`108011161837` 的 `douyin_link_users` 里明明有一行
+ * `user_id=99740023199 / nickname=神秘人七阶 / display_id=1023428548 / 粉丝 362 / 关注 296`，
+ * 而同一时刻的弹幕行（`@幻影…打算随多少呀`，22:25:15）`user_name` 是**空串**——
+ * 因为那一刻帧里没带名字，而补名字那一环以前**只对礼物类做**，弹幕/进场从来没查过库。
+ */
+const NAMED_ROOM = '880000000103'
+const MYSTERY_ID = '99740023199'
+await mapper.upsertRoom({ webRid: NAMED_ROOM, roomId: '1003', title: '神秘人房间', anchor: '', cover: '', onlineText: '', status: 'live' })
+/** 库里先有档案（模拟「他以前露过面」）：**没有任何弹幕/进场统计**，只有静态资料 */
+await mapper.upsertUserDeltas([
+  {
+    webRid: NAMED_ROOM,
+    userId: MYSTERY_ID,
+    displayId: '1023428548',
+    nickname: '神秘人七阶',
+    gender: 0,
+    signature: '',
+    city: '',
+    avatar: '',
+    following: 296,
+    follower: 362,
+    honorLevel: 35,
+    fansClubLevel: 0,
+    badges: '[]',
+    secUid: '',
+    delta: { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 },
+    firstSeen: startedAt,
+    lastSeen: startedAt
+  }
+])
+/**
+ * 他在这个房间里**露过面**（真机里就是这样：进场帧带全了 `User`，库里那行档案也是这么来的）。
+ * 补名字那一环先看**本场见过的人**，所以这一步必须先有——否则它只能去查库，而库里那行的昵称
+ * 正是这一步写进去的。
+ */
+await feedAndFlush(
+  NAMED_ROOM,
+  [
+    {
+      id: 0,
+      kind: 'member',
+      user: '神秘人七阶',
+      userId: MYSTERY_ID,
+      text: '',
+      count: 31,
+      diamonds: 0,
+      toUser: '',
+      toUserId: '',
+      at: startedAt - 1000
+    }
+  ],
+  [
+    {
+      id: MYSTERY_ID,
+      displayId: '1023428548',
+      nickname: '神秘人七阶',
+      gender: 0,
+      signature: '',
+      city: '',
+      avatar: '',
+      following: 296,
+      follower: 362,
+      honorLevel: 35,
+      fansClubLevel: 0,
+      badges: [],
+      secUid: ''
+    }
+  ]
+)
+/** 这一帧：**只有 id、没有名字**（就是真机那条弹幕的形态） */
+await feedAndFlush(NAMED_ROOM, [
+  {
+    id: 0,
+    kind: 'chat',
+    user: '',
+    userId: MYSTERY_ID,
+    text: '@幻影🎁002(主打代升级开通装扮) 打算随多少呀[看]',
+    count: 0,
+    diamonds: 0,
+    toUser: '',
+    toUserId: '',
+    at: startedAt
+  }
+])
+const namedRows = (await mapper.queryMessages({ webRid: NAMED_ROOM, limit: 50 })).rows
+console.log(`      debug: 该房间落库行 = ${JSON.stringify(namedRows.map((r) => [r.kind, r.userId, r.user, r.text]))}`)
+const chatRows = namedRows.filter((row) => row.kind === 'chat')
+console.log(`      落库的弹幕行：user_id=${chatRows[0]?.userId} user_name=${JSON.stringify(chatRows[0]?.user)}`)
+check('弹幕行补上了库里的昵称（不再是一行空名字）', chatRows[0]?.user, '神秘人七阶')
+check('身份仍是真实 id（神秘人这类 id 是真的，不该被归桶）', chatRows[0]?.userId, MYSTERY_ID)
+/** 补名字时顺带把静态资料交给 recorder：这样档案行也跟着有资料可查 */
+const namedProfile = (await mapper.listUsersPage(NAMED_ROOM, 'recent', '', 50)).rows.find((row) => row.userId === MYSTERY_ID)
+check('档案里的粉丝数没被这次补名弄丢', namedProfile?.follower, 362)
+check('档案里的抖音号还在', namedProfile?.displayId, '1023428548')
 
 /* ------------------------------------------------ 真库副本上的历史重排（另开一个进程做） */
 if (sourceDir) {

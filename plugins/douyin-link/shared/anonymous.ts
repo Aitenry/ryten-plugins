@@ -69,10 +69,27 @@ export function anonymousMaskTail(mask: string | null | undefined): string {
 }
 
 /**
+ * 这个名字**能不能用来认人**（能 = 不是空串、也不是通用打码名 `秋***`）。
+ *
+ * ⚠️ 与 `isAnonymousName` 的区别很重要，2026-10-11 因为混用踩过一次：
+ * - `isAnonymousName` 回答的是「他是不是**隐藏了身份**」——`神秘人七阶`、`匿名` 都算（那是隐私标记）；
+ * - 这个回答的是「这个名字**指向谁**」——`神秘人七阶` **指向明确**（抖音里叫这个名字的账号就那一个），
+ *   而 `秋***` / 空串什么都不指向。
+ *
+ * 补名字、落库、判断「要不要查库」都该用这个；只有「这个人是不是匿名」才用 `isAnonymousName`。
+ */
+export function isUsableNickname(name: string | null | undefined): boolean {
+  const text = String(name ?? '').trim()
+  if (!text) return false
+  return !isGenericMaskName(text)
+}
+
+/**
  * 一个名字是不是**信息量为零**的占位名（空串 / 「匿名」/「神秘人」/「anonymous」/ 打码名）。
  *
- * 与马甲名的区别：马甲名（`dou2056511`）是抖音**给这个人**的名字，可以用来区分人；
- * 占位名是抖音**给这一类人**的名字，谁看了都是它。所以只有占位名要被丢掉、去别的字段找区分度。
+ * ⚠️ 这个判断的语义是「**这个人隐藏了身份**」，不是「这个名字没价值」：
+ * 叫「神秘人七阶」的账号**名字是真实昵称**（抖音允许用户这么起名），落库时一个字都不能改。
+ * 「该不该清掉名字」请看 `isUsableNickname`（2026-10-11 就是这里混用，把名字清成了空串）。
  */
 export function isAnonymousName(name: string | null | undefined): boolean {
   const text = String(name ?? '')
@@ -138,6 +155,8 @@ const MASK_MAX = 24
  *
  * **通用打码名不算马甲**（`秋***`：先看原文再清洗，否则 `cleanMask` 会把尾巴的星号剪掉、
  * 只剩一个「秋」字，那反而成了会把十几个人并起来的假身份——2026-10-12 工装抓到的那版）。
+ * 注意「神秘人七阶」这类名字**算马甲**：它不是打码名，抖音里叫这个名字的账号是认得出的
+ * （见 `isUsableNickname` 与 `isAnonymousName` 的语义区别）。
  *
  * 为什么等级组合要留在最后（它其实**不保证唯一**，同一场里两个人等级一模一样是常事）：
  * 总比所有匿名人共用一个 id 强；这个只在「连名字都没有」的残缺帧上兜底，
@@ -145,7 +164,7 @@ const MASK_MAX = 24
  */
 export function anonymousMask(source: AnonymousIdentitySource): string {
   const nickname = cleanMask(source.nickname)
-  if (nickname && !isAnonymousName(nickname) && !isGenericMaskName(source.nickname)) {
+  if (nickname && isUsableNickname(source.nickname)) {
     return MASK_MAX < nickname.length ? hashMasks(nickname) : nickname
   }
   const displayId = String(source.displayId ?? '').trim()
@@ -189,8 +208,9 @@ export function anonymousUserId(id: string | null | undefined, source: Anonymous
 /**
  * 这一帧该显示的昵称。
  *
- * 占位名（「匿名」/空串）不再硬塞给界面——它没有信息量，还会让十几个人看着像同一个；
- * 真正的马甲名（`dou2056511`）照显，因为那就是抖音给这个人挂的牌子。
+ * **只在「这个 id 是占位」时才用**（见 `hub.identifyBatch` 的 `nameFor`）：
+ * 那时名字是马甲/打码名，没有展示价值；而 id 是真的用户（哪怕他叫「神秘人七阶」），
+ * 名字就是他的真实昵称，一个字都不能动。
  */
 export function displayNickname(name: string | null | undefined): string {
   const text = String(name ?? '').trim()

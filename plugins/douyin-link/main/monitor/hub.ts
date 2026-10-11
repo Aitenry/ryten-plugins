@@ -74,6 +74,7 @@ import {
   displayNickname,
   isAnonymousId,
   isAnonymousName,
+  isUsableNickname,
   isGenericMaskName
 } from '../../shared/anonymous'
 import { revealAnonymousProfile } from '../douyin/anonymous-reveal'
@@ -512,6 +513,12 @@ export class AnalyzerHub {
   /** 工装用：立刻跑一次攒批落库（不等 2 秒那一拍） */
   async flushForTest(): Promise<void> {
     await this.flush()
+  }
+
+  /** 工装用：看一眼某个房间记录器里**本场**那份用户档案（排查「名字为什么没补上」） */
+  debugProfileForTest(webRid: string, userId: string): { nickname: string } | null {
+    const profile = this.states.get(webRid)?.recorder.profile(userId)
+    return profile ? { nickname: profile.nickname } : null
   }
 
   /**
@@ -1336,22 +1343,20 @@ export class AnalyzerHub {
 
   /* --------------------------------------------------------- 采集回调 */
 
-  private handleItems(state: RoomState, items: DanmakuItem[], users: UserInfo[], roomEnded: boolean): void {
-    if (items.length === 0 && users.length === 0) return
+  private handleItems(state: RoomState, items: DanmakuItem[], infoList: UserInfo[], roomEnded: boolean): void {
+    if (items.length === 0 && infoList.length === 0) return
     /**
-     * 礼物/点歌那一类里，帧里只有发送者的 **id**（点歌单号串的第一段），没有昵称；
-     * **匿名送礼**时帧里给的名字则是占位串（空串或「☞ 匿名 -」）。两种情况都用我们自己的数据补：
-     * 先本场见过的人，再查库（见 `resolveGiftSenders`）——补到了就直接显示真名，
-     * 补不到就照实显示匿名/裸 id，用户可以在档案弹窗里点「查看神秘人信息」按 id 去抖音查
-     * （见 `main/douyin/mystery.ts`）。
+     * 帧里没带名字的消息要补名字：`item.user` 是空串或占位名（`匿名` / 打码名）时，
+     * **先看本场见过的人，再查我们自己的库**（见 `resolveMissingNames`）。
      *
-     * 注意这里判「没名字」用的是**原始占位名**（`isAnonymousName`）：马甲名（`dou2056511`）
-     * 在抖音那边不算匿名，但在我们这套口径里**属于匿名人**——他的 id 也是共用的占位 `111111`，
-     * 所以照样要走「补真名」，只是补不到时下面会按马甲分开记账（见 `identifyBatch`）。
+     * 两类都走这条路：
+     * - 点歌/礼物帧里根本没有发送者的 `User`，只有单号串里的 id；
+     * - **弹幕/进场帧偶尔只给 id、名字是空的**（2026-10-11 用户报障「神秘人获取不了名称」：
+     *   库里这个人明明有档案（昵称=神秘人七阶、抖音号、粉丝数都在），弹幕行却写着空名字）。
      */
-    const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && isAnonymousName(item.user))
+    const unnamed = items.filter((item) => item.userId && !isUsableNickname(item.user))
     if (unnamed.length === 0) {
-      this.applyItems(state, items, users, roomEnded)
+      this.applyItems(state, items, infoList, roomEnded)
       return
     }
     /**
@@ -1361,11 +1366,18 @@ export class AnalyzerHub {
     const previous = this.ingestChain.get(state.webRid) ?? Promise.resolve()
     const next = previous.then(async () => {
       try {
-        const extra = await this.resolveGiftSenders(state, unnamed)
-        this.applyItems(state, items, extra.length > 0 ? [...users, ...extra] : users, roomEnded)
+        /**
+         * ⚠️ 这里的三个参数名**不能叫 `users`**（2026-10-11 踩到）：`DanmakuItem` 自己也有一个
+         * `users` 字段（这一帧里带出来的用户数组），`recorder.ingest(items, users)` 的第二参是
+         * **用户静态信息**。之前这里传的是 `applyItems` 的 `items`（元素带 `users` 字段），
+         * TypeScript 的 `UserInfo[]` 只约束 `id`，结构上「也像」，于是编译期一声不响，
+         * 运行期 `frameUsers` 里全是 `info.nickname === undefined` —— 名字补了个空。
+         */
+        const extra = await this.resolveMissingNames(state, unnamed, infoList)
+        this.applyItems(state, items, extra.length > 0 ? [...infoList, ...extra] : infoList, roomEnded)
       } catch (error) {
         logger.warn(`[douyin-link] ${state.webRid} 处理这一批消息失败:`, describe(error))
-        this.applyItems(state, items, users, roomEnded)
+        this.applyItems(state, items, infoList, roomEnded)
       }
     })
     this.ingestChain.set(state.webRid, next.catch(() => undefined))
@@ -1386,6 +1398,18 @@ export class AnalyzerHub {
   private identifyBatch(state: RoomState, items: DanmakuItem[], users: UserInfo[]): { items: DanmakuItem[]; users: UserInfo[] } {
     const identityOf = new Map<string, string>()
     const usersOut: UserInfo[] = []
+    /**
+     * **名字该不该清掉，看的是「这个 id 是不是占位」，不是「这个名字像不像匿名」**
+     * （2026-10-11 修的，就是「神秘人七阶」这个报障）：
+     * - id 是共用占位 `111111` / 合成键 → 名字是马甲或打码名，清掉（见 `isAnonymousName`）；
+     * - **id 是真的**（`99740023199` 这种）→ 名字就是这个人**真实的昵称**，
+     *   「神秘人七阶」「匿名」这些是抖音允许用户自己起的名字，**一个字都不能动**。
+     *
+     * 之前这里无条件调用 `displayNickname()`，于是 id 是真的、昵称叫「神秘人七阶」的用户
+     * 在落库前被清成了空名字——库里档案写着名字、弹幕行却是空的。
+     */
+    const nameFor = (item: DanmakuItem, key: string): string =>
+      isAnonymousId(key) ? displayNickname(item.user) : String(item.user ?? '').trim()
     for (const info of users) {
       if (!info.id) continue
       const key = this.anonymousKeyOf(state.webRid, info.id, info)
@@ -1405,7 +1429,7 @@ export class AnalyzerHub {
         continue
       }
       const key = identityOf.get(item.userId) ?? this.anonymousKeyOf(state.webRid, item.userId, { nickname: item.user })
-      itemsOut.push({ ...item, userId: key, user: displayNickname(item.user) })
+      itemsOut.push({ ...item, userId: key, user: nameFor(item, key) })
       // 帧里没带 `User` 的那条（点歌 / 只有裸 id 的礼物）：身份是从 id 推出来的，
       // 这一批若没有它的档案就补一份只有昵称的，否则名字就丢了
       if (!identityOf.has(item.userId) && !seen.has(key)) {
@@ -1477,34 +1501,67 @@ export class AnalyzerHub {
   }
 
   /**
-   * 给「只有 id 的送礼人」补昵称：**先本场见过的人，再查库**（跨会话留下的档案）。
+   * 给「帧里没带名字」的消息补昵称：**先本场见过的人，再查库**（跨会话留下的档案）。
    *
-   * 为什么必须有这一步：点歌/礼物帧里没有发送者的 `User`，只有点歌单号串里的 id；
-   * 而发送礼物的人**通常不在本场说过话**（`userMap` 里没有），但他多半在进场消息或房间榜里
-   * 露过面、库里也留着上一轮的档案。查到的档案一并交给 recorder，顺手把昵称/头像进用户库。
+   * 为什么必须有这一步：
+   * - **点歌/礼物帧**里没有发送者的 `User`，只有点歌单号串里的 id，而送礼的人通常不在本场说过话
+   *   （`userMap` 里没有），但他多半在进场消息或房间榜里露过面、库里也留着上一轮的档案；
+   * - **弹幕/进场帧偶尔只给 id、名字是空的**（2026-10-11 用户报障「神秘人获取不了名称」）：
+   *   库里这个人明明有档案、有抖音号有粉丝数，弹幕行却是空名字——名字本来就在我们自己库里，
+   *   只是以前只在礼物那一类上做补名，别的消息类型从来没查过。
    *
-   * **匿名送礼**（帧里给的是空串或「☞ 匿名 -」）走同一条路：`isAnonymousName` 把占位名也当成
-   * 「没有名字」，于是这个人只要在房间里露过面，我们就能把马甲脱掉、直接显示真名。
+   * **匿名送礼**（帧里给的是空串或「☞ 匿名 -」）走同一条路：这些占位名不算名字
+   * （`isUsableNickname`），于是这个人只要在房间里露过面，我们就能把马甲脱掉、直接显示真名。
    */
-  private async resolveGiftSenders(state: RoomState, items: DanmakuItem[]): Promise<UserInfo[]> {
+  private async resolveMissingNames(state: RoomState, items: DanmakuItem[], users: UserInfo[]): Promise<UserInfo[]> {
     const found: UserInfo[] = []
     const missing: string[] = []
+    /**
+     * **帧自己的 `users` 就是第一手资料**（2026-10-11 修）：以前这里只看 recorder 里的本场档案，
+     * 而「这个人第一次出现」时那份档案**还没建**——于是帧里明明带着 `User`（昵称/等级/粉丝都有），
+     * 这一批却被塞进 `users=[]` 交给 recorder，弹幕行落库就成了空名字
+     * （真机表现：库里档案写着「神秘人七阶」，弹幕行却只有 id）。
+     */
+    const frameUsers = new Map<string, UserInfo>()
+    for (const info of users) if (info.id && info.nickname) frameUsers.set(info.id, info)
+
+    /**
+     * 一个 item 现在能拿到的**最好名字**（帧 > 本场档案；查库那一轮在此之前已经先跑过）。
+     *
+     * 判据是 `isUsableNickname`（占位名/打码名不算），**不是** `isAnonymousName`——
+     * 后者回答的是「他是不是隐藏了身份」，而叫「神秘人七阶」的人名字是真实的
+     * （2026-10-11 就是这两者混用，把名字清成了空串）。
+     */
+    const bestName = (item: DanmakuItem): string => {
+      const fromFrame = frameUsers.get(item.userId)?.nickname
+      if (isUsableNickname(fromFrame)) return String(fromFrame).trim()
+      const fromSession = state.recorder.profile(item.userId)?.nickname
+      if (isUsableNickname(fromSession)) return String(fromSession).trim()
+      return ''
+    }
+    /**
+     * 补名的主循环：**空名和打码名都要补**（`isUsableNickname` 判「这名字能不能指向人」），
+     * 补不到就先记 id、等查库那一轮。
+     */
     for (const item of items) {
-      const session = state.recorder.profile(item.userId)
-      if (session?.nickname) {
-        item.user = session.nickname
+      if (item.user && isUsableNickname(item.user)) continue
+      const name = bestName(item)
+      if (name) {
+        item.user = name
         continue
       }
-      missing.push(item.userId)
+      if (!missing.includes(item.userId)) missing.push(item.userId)
     }
     if (missing.length === 0) return found
     try {
       const rows = await store.getUsers(state.webRid, missing)
       for (const item of items) {
-        if (item.user && !isAnonymousName(item.user)) continue
+        /** 已经有真名字的不用动；空名/占位名（含打码名）才补 */
+        if (item.user && isUsableNickname(item.user)) continue
         const row = rows.get(item.userId)
-        if (!row?.nickname || isAnonymousName(row.nickname)) continue
+        if (!row?.nickname || !isUsableNickname(row.nickname)) continue
         item.user = row.nickname
+        if (found.some((entry) => entry.id === row.userId)) continue
         found.push({
           id: row.userId,
           displayId: row.displayId,
@@ -1523,7 +1580,16 @@ export class AnalyzerHub {
       }
     } catch (error) {
       // 查库失败不该让这一批消息消失：宁可先记 id，下一条再补名字
-      logger.warn(`[douyin-link] ${state.webRid} 补送礼人昵称失败:`, describe(error))
+      logger.warn(`[douyin-link] ${state.webRid} 补昵称失败:`, describe(error))
+    }
+    /**
+     * 最后一轮兜底：**凡是这一批里还空着名字、而我们知道他叫什么**的，都补上
+     * （帧里带来的 `User`、本场档案、刚查到的库档案三者都算）。
+     */
+    for (const item of items) {
+      if (item.user) continue
+      const name = frameUsers.get(item.userId)?.nickname ?? state.recorder.profile(item.userId)?.nickname
+      if (isUsableNickname(name)) item.user = String(name).trim()
     }
     return found
   }
