@@ -41,6 +41,7 @@ function resolvePglite() {
 }
 const pglitePath = resolvePglite()
 
+const START = Date.now()
 const workDir = mkdtempSync(join(tmpdir(), 'douyin-db-cost-'))
 
 /* 宿主那层薄封装（withOrm）→ 真 PGlite + 真 drizzle（与 db-merge-check.mjs 同款） */
@@ -108,6 +109,68 @@ process.env.DY_PGLITE_DIR = dataDir
 process.env.DY_PGLITE_URL = pathToFileURL(pglitePath).href
 
 const { mapper, rawQuery, closeOrm } = await import(pathToFileURL(outfile).href)
+
+/**
+ * `RB_COST_CLOSE_ONLY=1`：只量「打开 + 关闭」——用来回答「点退出之后为什么要等那么久」。
+ *
+ * 为什么单独一个模式：正常模式会先跑一堆查询，那些查询本身会推动检查点，
+ * 量出来的 close 就不代表「用户点退出那一刻」的成本了。这个模式**只开、不查、立刻关**。
+ */
+if (process.env.RB_COST_CLOSE_ONLY === '1') {
+  const openMs = Date.now() - START
+  console.log(`库目录：${dataDir}`)
+  console.log(`  PGlite 打开（含 WAL 恢复）  ${openMs}ms`)
+  /**
+   * **心跳**：这是判断「该用什么修法」的关键——如果 close 期间事件循环还在跑，
+   * 那宿主可以用 `Promise.race(close, 超时)` 兜住；如果心跳停了，说明 close 是**同步**堵死
+   * 主线程的（PGlite 是 WASM、跑在主进程里），那任何超时/定时器都不会触发，
+   * 只能改成「退出时不等它」。
+   */
+  let beats = 0
+  const beat = setInterval(() => {
+    beats += 1
+    console.log(`    [心跳] close 已跑 ${((Date.now() - START - openMs) / 1000).toFixed(0)}s（事件循环仍然活着）`)
+  }, 3000)
+  const closeMs = await closeOrm()
+  clearInterval(beat)
+  console.log(`  db.close()（检查点 + 折 WAL）  ${closeMs}ms，期间心跳 ${beats} 次`)
+  console.log(beats === 0 ? '  → close 期间事件循环**没有**跑（同步堵死主线程）' : '  → close 期间事件循环仍在跑（可以用超时兜）')
+  rmSync(workDir, { recursive: true, force: true })
+  process.exit(0)
+}
+
+/**
+ * `RB_COST_CHECKPOINT=1`：量「手动 CHECKPOINT」的成本，以及**检查点之后**的 close 成本。
+ *
+ * 这是为 2026-10-11 那个「关应用要关两次」：真库的 `pg_wal` 涨到 912MB，
+ * `db.close()`（检查点 + 折 WAL）在主进程里跑了 **10 分钟以上没结束**——PGlite 是 WASM、
+ * 跑在主进程里，整个应用因此卡住，点关闭当然「没反应」。这个模式用来验证
+ * 「定期主动 CHECKPOINT、把 WAL 压住，让退出那次检查点变便宜」这条路走不走得通。
+ */
+if (process.env.RB_COST_CHECKPOINT === '1') {
+  const openMs = Date.now() - START
+  const walBytes = async () => {
+    const r = await rawQuery(`select coalesce(sum(size), 0)::bigint as bytes from pg_ls_waldir()`)
+    return Number(r.rows[0].bytes)
+  }
+  console.log(`库目录：${dataDir}`)
+  console.log(`  PGlite 打开（含 WAL 恢复）  ${openMs}ms`)
+  console.log(`  检查点之前 pg_wal           ${(await walBytes() / 1048576).toFixed(1)} MB`)
+  const t1 = Date.now()
+  await rawQuery('CHECKPOINT')
+  console.log(`  第 1 次 CHECKPOINT         ${Date.now() - t1}ms`)
+  console.log(`  检查点之后 pg_wal           ${(await walBytes() / 1048576).toFixed(1)} MB`)
+  const t2 = Date.now()
+  await rawQuery('CHECKPOINT')
+  console.log(`  第 2 次 CHECKPOINT         ${Date.now() - t2}ms`)
+  const t3 = Date.now()
+  await rawQuery('CHECKPOINT')
+  console.log(`  第 3 次 CHECKPOINT         ${Date.now() - t3}ms`)
+  const closeMs = await closeOrm()
+  console.log(`  db.close()                 ${closeMs}ms`)
+  rmSync(workDir, { recursive: true, force: true })
+  process.exit(0)
+}
 
 const NOW = Date.now()
 const HOUR = 3600 * 1000
@@ -203,3 +266,4 @@ const closeMs = await closeOrm()
 console.log(`  db.close()  ${closeMs}ms`)
 
 rmSync(workDir, { recursive: true, force: true })
+
