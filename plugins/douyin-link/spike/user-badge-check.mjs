@@ -79,6 +79,13 @@ export const ipcMain = { handle() {}, on() {} }
 export default { app, net, BrowserWindow, ipcMain }
 `,
   '@host/main/safe-send': `export const safeSend = () => {}\nexport const isSenderAlive = () => false\n`,
+  /*
+   * AI 画像（`main/portrait.ts`）也挂在 hub 上，所以打包 hub 就把它一起拉进来了：
+   * 这三样只有「真去调大模型」时才用得上，工装给最小桩（**工装里绝不联网、绝不花钱**）。
+   */
+  '@host/main/i18n': `export const getMainLanguage = () => 'zh-CN'\nexport const mainFormat = (t) => String(t)\nexport const mainPlural = (o) => String(o)\nexport const mainMessages = () => ({})\n`,
+  '@host/main/provider/service': `export const getProviderService = () => ({ createModel: async () => { throw new Error('probe: 工装不调模型') }, getConfig: async () => ({ model: '', name: '' }), clearCache() {} })\n`,
+  '@host/main/database/mapper/provider': `export const getEnabledProviders = async () => []\nexport const getDefaultProvider = async () => null\nexport const getProviderById = async () => null\n`,
   '../avatar': `export const avatarCache = { dataUrl: () => '', dispose() {} }\n`,
   '../douyin/mystery': `
 export async function fetchUserProfile() { return { ok: false, code: 'notFound' } }

@@ -105,6 +105,15 @@ writeFileSync(
   `export async function withOrm(_op, fn) { return fn(null) }\n` +
     `export function safeSend() {}\n` +
     `export function isSenderAlive() { return true }\n` +
+    // AI 画像（main/portrait.ts）也挂在 hub 上：这几样只有真去调大模型时才用（工装里绝不联网、不花钱）
+    `export function getMainLanguage() { return 'zh-CN' }\n` +
+    `export function mainFormat(t) { return String(t) }\n` +
+    `export function mainPlural(o) { return String(o) }\n` +
+    `export function mainMessages() { return {} }\n` +
+    `export function getProviderService() { return { createModel: async () => { throw new Error('probe: 工装不调模型') }, getConfig: async () => ({ model: '', name: '' }), clearCache() {} } }\n` +
+    `export async function getEnabledProviders() { return [] }\n` +
+    `export async function getDefaultProvider() { return null }\n` +
+    `export async function getProviderById() { return null }\n` +
     `export default new Proxy({}, { get: () => () => undefined })\n`,
   'utf8'
 )

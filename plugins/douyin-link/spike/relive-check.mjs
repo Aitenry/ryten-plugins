@@ -77,6 +77,17 @@ STUBS['../analysis/portrait'] = `
 export function buildUserAnalysis() { return { ok: false } }
 `
 
+/** AI 画像（`main/portrait.ts`）挂在 hub 上，但这个工装只管「下播后重开播」，整块桩掉 */
+STUBS['../portrait'] = `
+export const AI_PORTRAIT_EVENT = 'plugin:douyin-link:portrait'
+export async function aiPortraitState() {
+  return { portrait: null, current: { fingerprint: '', interactions: 0 }, running: false, models: [], selectedProviderId: null }
+}
+export async function generateAiPortrait() { return { ok: false, reason: 'no-model' } }
+export async function listPortraitModels() { return [] }
+export function disposePortrait() {}
+`
+
 STUBS['../audio/pump'] = `
 export class AudioPump {
   constructor() {}
