@@ -227,10 +227,18 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
      * - `ai-portrait-generate`：真调模型（花钱；`force = false` 时若已有缓存直接回缓存）。
      *   带 webRid 是因为档案的静态字段（昵称/地区/等级）按房间取，口径要与弹窗上显示的那份一致；
      * - `ai-portrait-models`：可选模型清单（设置页下拉与弹窗头部用；**不含 api_key**）。
+     *
+     * 两个都带 `role`（`viewer` / `host`，空 = 自动判定）：一条流水按观众问和按主播问是两个答案，
+     * 缓存也按角色分开（用户 2026-10-13：「应该是分析主播…和用户，两者分开」）。
      */
-    'plugin:douyin-link:ai-portrait': (userId?: string) => hub.aiPortrait(String(userId ?? '')),
-    'plugin:douyin-link:ai-portrait-generate': (webRid?: string, userId?: string, force?: boolean) =>
-      hub.generateAiPortrait(String(webRid ?? ''), String(userId ?? ''), force === true),
+    'plugin:douyin-link:ai-portrait': (userId?: string, webRid?: string, role?: string) =>
+      hub.aiPortrait(String(userId ?? ''), String(webRid ?? ''), role ?? null),
+    'plugin:douyin-link:ai-portrait-generate': (
+      webRid?: string,
+      userId?: string,
+      force?: boolean,
+      role?: string
+    ) => hub.generateAiPortrait(String(webRid ?? ''), String(userId ?? ''), force === true, role ?? null),
     // 停止这次生成（本地小模型一次可能跑十几分钟，光等不行）；回 `true` = 确实掐了一次
     'plugin:douyin-link:ai-portrait-cancel': (userId?: string) => hub.cancelAiPortrait(String(userId ?? '')),
     'plugin:douyin-link:ai-portrait-models': () => listPortraitModels(),

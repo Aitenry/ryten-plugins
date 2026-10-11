@@ -82,6 +82,15 @@ export const douyinLinkUsers = pgTable(
     fansClubLevel: integer('fans_club_level').notNull().default(0),
     badges: text().notNull().default('[]'),
     secUid: text('sec_uid').notNull().default(''),
+    /**
+     * **见过他在麦上**（0.15.32 起）：语音房麦位表 / 房间主播见过这个人就置 true，并且**一直留着**。
+     *
+     * 为什么要有这一列：「AI 画像」要分清**主播**与**观众**（用户 2026-10-13：「应该是分析主播
+     * （个播、房间播有好多主播的）和用户，两者分开，现在都是按照用户的内容进行分析了」）。
+     * 麦位是**运行态**（`recorder.micSeats`），关掉应用就没了，所以历史判定只能靠这一列
+     * （「以收礼为主」那条启发式只作兜底）。
+     */
+    onMic: boolean('on_mic').notNull().default(false),
     chat: integer().notNull().default(0),
     enter: integer().notNull().default(0),
     likes: integer().notNull().default(0),
@@ -180,12 +189,20 @@ export const douyinLinkIdentityAccounts = pgTable(
  * 与确定性画像 / 礼物日历同口径。
  */
 export const douyinLinkUserPortraits = pgTable('douyin_link_user_portraits', {
-  /** 缓存键：`identity:<画像 id>` 或 `user:<抖音 id>` */
+  /** 缓存键：`identity:<画像 id>:<角色>` 或 `user:<抖音 id>:<角色>` */
   portraitKey: text('portrait_key').primaryKey().notNull(),
   /** 画像锚点（打开弹窗时的那个人） */
   userId: text('user_id').notNull().default(''),
   identityId: integer('identity_id').notNull().default(0),
-  /** 第几版（重新生成递增） */
+  /**
+   * 这一版分析的角色（`viewer` / `host`）。
+   *
+   * 用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开」——
+   * 同一份流水按观众口径问和按主播口径问是两个答案，所以角色**必须随画像一起落库**，
+   * 否则读回缓存时无法说清「这版到底在说谁」。
+   */
+  role: text().notNull().default('viewer'),
+  /** 第几版（重新生成递增；每个角色各自递增） */
   version: integer().notNull().default(0),
   providerId: integer('provider_id').notNull().default(0),
   providerName: text('provider_name').notNull().default(''),

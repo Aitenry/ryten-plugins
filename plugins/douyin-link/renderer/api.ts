@@ -7,6 +7,7 @@ import type {
   AiPortraitFailure,
   AiPortraitModel,
   AiPortraitResult,
+  AiPortraitRole,
   AiPortraitState,
   AllAnalysisPush,
   AllRoomsAnalysis,
@@ -418,6 +419,16 @@ function normalizeAiPortraitModel(value: unknown): AiPortraitModel | null {
 }
 
 /**
+ * 角色字段的归一：只认 `viewer` / `host`，其它一律按观众。
+ *
+ * 与主进程的 `portraitRoleArg` 是**一对**：主进程那边「不认识就当没传（自动判定）」，
+ * 这边「不认识就当观众」——界面宁可显示成观众，也不要因为一个脏字段白屏。
+ */
+export function asPortraitRole(value: unknown): AiPortraitRole {
+  return value === 'host' ? 'host' : 'viewer'
+}
+
+/**
  * 一份已生成的画像。
  *
  * `report` 走 shared 的 `normalizePortraitReport`（与主进程**同一份**校验与限长逻辑）：
@@ -430,6 +441,7 @@ export function normalizeAiPortrait(value: unknown): AiPortrait {
   return {
     key: asText(raw.key),
     userId: asText(raw.userId),
+    role: asPortraitRole(raw.role),
     version: asCount(raw.version),
     providerId: asCount(raw.providerId),
     providerName: asText(raw.providerName),
@@ -451,6 +463,8 @@ export function normalizeAiPortraitState(value: unknown): AiPortraitState {
   const selected = raw.selectedProviderId
   return {
     portrait: isRecord(raw.portrait) ? normalizeAiPortrait(raw.portrait) : null,
+    role: asPortraitRole(raw.role),
+    detectedRole: asPortraitRole(raw.detectedRole),
     current: { fingerprint: asText(current.fingerprint), interactions: asCount(current.interactions) },
     running: raw.running === true,
     models: asList<unknown>(raw.models)
@@ -702,12 +716,15 @@ export const api = {
   /**
    * 「AI 画像」：**读缓存状态**（打开弹窗就调）。
    *
-   * 回的是四样：已生成的画像（含版本 / 模型 / 用量 / 数据指纹）、当前数据侧现状
-   * （用来提示「数据已更新」）、是否正在生成、以及可选模型清单。
-   * 这里同样把 IPC 回话归一化——主进程换实现或缺字段时，界面最多是空态，不会白屏。
+   * 回的是五样：已生成的画像（含角色 / 版本 / 模型 / 用量 / 数据指纹）、当前数据侧现状
+   * （用来提示「数据已更新」）、是否正在生成、可选模型清单，以及**自动判定的角色**
+   * （界面用它做分段控件的默认值）。这里同样把 IPC 回话归一化——主进程换实现或缺字段时，
+   * 界面最多是空态，不会白屏。
+   *
+   * `role` 不传（`undefined`）时主进程按数据自动判定；切角色就是再调一次这个。
    */
-  aiPortrait: async (userId: string): Promise<AiPortraitState> => {
-    const raw = await invoke(`${PREFIX}ai-portrait`, userId)
+  aiPortrait: async (userId: string, webRid = '', role?: AiPortraitRole): Promise<AiPortraitState> => {
+    const raw = await invoke(`${PREFIX}ai-portrait`, userId, webRid, role ?? '')
     return normalizeAiPortraitState(raw)
   },
   /**
@@ -715,13 +732,15 @@ export const api = {
    *
    * `force = false` 时主进程若已有缓存就直接回缓存——「每次重开弹窗都重新生成」会白烧 token
    * （用户 2026-10-13 的原话）。只有用户点了「重新生成」才 `force = true`（版本 +1）。
+   * `role` 决定用的是哪一套材料与提问（观众 / 主播），缓存也按角色分开。
    */
   aiPortraitGenerate: async (
     webRid: string,
     userId: string,
-    force = false
+    force = false,
+    role?: AiPortraitRole
   ): Promise<AiPortraitResult> => {
-    const raw = await invoke(`${PREFIX}ai-portrait-generate`, webRid, userId, force)
+    const raw = await invoke(`${PREFIX}ai-portrait-generate`, webRid, userId, force, role ?? '')
     if (!isRecord(raw)) return { ok: false, reason: 'model-failed' }
     const reason = asText(raw.reason)
     return {

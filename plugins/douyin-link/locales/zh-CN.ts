@@ -388,6 +388,16 @@ export const DouyinLinkZhCN = {
       aiButton: 'AI 画像（大模型）',
       aiTitle: 'AI 画像',
       aiScopeHint: '大模型解读 · 跨全部直播间',
+      /*
+       * 分析角色（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开，
+       * 现在都是按照用户的内容进行分析了」）：同一条流水按观众问和按主播问是两个答案，
+       * 所以弹窗上要能看见、也要能改。
+       */
+      aiRoleLabel: '分析角色',
+      aiRoleViewer: '观众',
+      aiRoleHost: '主播',
+      aiRoleDetected: '数据判断：{{role}}',
+      aiRoleHint: '主播按直播风格、话术、互动与收益结构分析；观众按消费动机与关系阶段分析。两种角色各存一份，切回来不用重新生成。',
       aiModel: '模型',
       aiVersion: '第 {{n}} 版',
       aiGeneratedAt: '生成于',
@@ -401,14 +411,17 @@ export const DouyinLinkZhCN = {
       aiThinking: '正在生成，模型还在思考…（本地小模型可能会先静默推理几分钟）',
       aiWriting: '正在生成…（已写 {{n}} 字）',
       aiStop: '停止',
-      aiIntro:
+      aiIntroViewer:
         '这份画像由大模型写：它拿到的是这个人的互动数据、弹幕原话、礼物流水与算法算出的行为特征，写出的是一段「他是什么样的人、为什么留在这里、该怎么维护」的解读。生成一次会保存下来，下次打开直接用（不重复花钱）。',
+      aiIntroHost:
+        '这份画像由大模型写：它拿到的是这个主播的发言记录、礼物与收益流水、互动结构和算法算出的行为特征，写出的是一段「他的直播风格是什么、靠什么留住人、收益从哪里来」的解读。生成一次会保存下来，下次打开直接用（不重复花钱）。',
       aiWillUse: '将使用：{{model}}（在插件设置里可换）',
       aiNoModel: '还没有可用的模型：先在设置 → 模型里配置一个大模型供应商',
       aiGenerate: '生成画像',
       aiUnstructured: '模型这次没有按结构回话，下面是它的原文：',
       aiEvidenceTitle: '关键证据',
       aiSuggestionsTitle: '维护建议',
+      aiSuggestionsTitleHost: '直播建议',
       aiCaveatsTitle: '数据局限',
       aiFooter:
         '事实层（互动统计 / 大五侧写 / 情感构成）来自本插件的确定性算法，与本弹窗里的解读相互独立；解读由大模型依据同一份材料写出。',

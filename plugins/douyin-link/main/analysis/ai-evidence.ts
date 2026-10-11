@@ -1,5 +1,6 @@
 import type {
   AiPortraitReport,
+  AiPortraitRole,
   LiveSettings,
   UserAnalysis,
   UserDetail
@@ -33,34 +34,51 @@ import { portraitFingerprint, portraitInteractions } from '../../shared/ai-portr
  * 才能让模型稳定地按同语言作答（中英混排时模型爱跟着最后一段的语言走）。
  */
 const zh = {
-  role: '你是直播运营的数据分析师，擅长从观众的行为流水里读出「这个人是谁、为什么留在这里」。',
-  task: '根据下面这份**真实数据材料**，为这位抖音直播间的观众写一份尽可能全面、可执行的用户画像。',
+  roleViewer: '你是直播运营的数据分析师，擅长从观众的行为流水里读出「这个人是谁、为什么留在这里」。',
+  roleHost:
+    '你是直播运营的数据分析师，擅长从主播的直播流水里读出「他的直播风格是什么、靠什么留住人、收益从哪里来」。',
+  taskViewer: '根据下面这份**真实数据材料**，为这位抖音直播间的观众写一份尽可能全面、可执行的用户画像。',
+  taskHost:
+    '根据下面这份**真实数据材料**，为这位抖音直播间/语音房的**主播**写一份尽可能全面、可执行的主播画像（分析的是他自己的直播表现，不是把他当观众）。',
   rulesTitle: '硬性要求',
   rules: [
     '只依据材料。材料里没有的事实不要补；不要猜测真实姓名、职业、住址、性别取向等现实身份信息；不要输出政治、宗教、医疗等敏感判断。',
-    '引用用户原话时**必须逐字**取自「弹幕样本」；没有合适的原话就不要引用，不要自己编一句像弹幕的话。',
+    '引用原话时**必须逐字**取自「{{samples}}」；没有合适的原话就不要引用，不要自己编一句像弹幕的话。',
     '所有数字必须与材料一致（材料里的数字都是**跨全部直播间**的累计值，礼物抖币是平台虚拟币）。',
     '材料不足以支撑的结论要降低措辞强度（例如「从现有样本看」），并在 caveats 里如实说明样本量与不确定项。',
     '输出**只有一个 JSON 对象**：不要 markdown 围栏、不要任何解释性前后文、不要注释。',
     `全部文案用{{language}}书写。`
   ],
+  rulesHostExtra:
+    '材料里的发言记录是**他本人在房间里发的话**（本插件只记录文字消息，不记录语音），不要把观众的发言当成他的表现；房间播 / 语音房里同一场可能有多个主播，判断某句话是不是他本人输出时以发言人 id 为准，不确定就少说。',
   shapeTitle: '输出 JSON 的形状（字段名必须完全一致）',
   shape: [
     '{',
-    '  "persona": "人物类型名，4-10 字，你自己起（例如「夜聊型陪伴者」「闷声打赏的老观众」）",',
+    '  "persona": "{{persona}}",',
     '  "headline": "一句话画像，不超过 40 字，最精炼的结论",',
-    '  "overview": "总览，2-4 句，把这个人整体说清楚（他是什么人、为什么来、处于什么关系阶段）",',
+    '  "overview": "{{overview}}",',
     '  "tags": ["3-6 个短标签"],',
     '  "sections": [',
     '    { "title": "小标题", "items": ["每条一句话，可带数字"] }',
     '  ],',
-    '  "evidence": [ { "quote": "弹幕原话或具体数字", "note": "它说明了什么" } ],',
-    '  "suggestions": ["可执行的维护 / 互动建议（对主播或运营说的话）"],',
+    '  "evidence": [ { "quote": "原话或具体数字", "note": "它说明了什么" } ],',
+    '  "suggestions": ["{{suggestions}}"],',
     '  "caveats": ["数据局限、样本不足、不确定的地方"]',
     '}'
   ],
-  sectionsHint:
+  shapePersonaViewer: '人物类型名，4-10 字，你自己起（例如「夜聊型陪伴者」「闷声打赏的老观众」）',
+  shapePersonaHost: '主播类型名，4-10 字，你自己起（例如「深夜点歌型」「唠嗑控场型」「安静才艺型」）',
+  shapeOverviewViewer: '总览，2-4 句，把这个人整体说清楚（他是什么人、为什么来、处于什么关系阶段）',
+  shapeOverviewHost: '总览，2-4 句，把他的直播整体说清楚（做什么内容、什么风格、现在处于什么阶段）',
+  shapeSuggestionsViewer: '可执行的维护 / 互动建议（对主播或运营说的话）',
+  shapeSuggestionsHost:
+    '可执行的直播建议（直接对这位主播说：内容与选题、话术与控场、互动与节奏、留人和转化）',
+  samplesShortViewer: '弹幕样本',
+  samplesShortHost: '发言记录样本',
+  sectionsHintViewer:
     'sections 建议覆盖这些角度（每节 2-5 条，按材料支持程度取舍）：说话风格与语言特征 / 消费与送礼动机 / 社交角色与关系 / 内容偏好与兴趣 / 活跃节律与到访习惯 / 与主播的关系阶段 / 流失或升级信号。',
+  sectionsHintHost:
+    'sections 建议覆盖这些角度（每节 2-5 条，按材料支持程度取舍）：直播风格与话术特征 / 内容与才艺构成 / 与观众的互动方式（点名、回应、控场） / 留人与转化手段（引导关注、粉丝团、礼物） / 收益与礼物结构 / 与其他主播的连麦与关系 / 开播节律与场次表现 / 成长或瓶颈信号。',
   sectionCount: 'sections 给 4-7 节，evidence 给 3-6 条，suggestions 给 3-6 条，caveats 给 1-4 条。',
   refineTitle: '这是一次迭代（不是从零开始）',
   refine:
@@ -74,10 +92,17 @@ const zh = {
   algorithm: '四、算法层事实（确定性规则算出来的，不要重算，只用于解读与印证）',
   rhythm: '五、活跃节律（24 小时分布，本地时区）',
   rooms: '六、出现过的直播间（按房间摊开）',
-  chatSamples: '七、弹幕样本（最近 %s 条，新 → 旧，带时间）',
-  sentGifts: '八、送礼流水（最近 %s 条，新 → 旧）',
-  receivedGifts: '九、收礼流水（最近 %s 条，新 → 旧）',
+  chatSamplesViewer: '七、弹幕样本（最近 %s 条，新 → 旧，带时间）',
+  chatSamplesHost: '七、发言记录样本（他本人在房间里发的话，最近 %s 条，新 → 旧，带时间）',
+  sentGiftsViewer: '八、送礼流水（最近 %s 条，新 → 旧）',
+  sentGiftsHost: '八、送礼流水（他自己送出去的，最近 %s 条，新 → 旧）',
+  receivedGiftsViewer: '九、收礼流水（最近 %s 条，新 → 旧）',
+  receivedGiftsHost: '九、收礼流水（别人送给他的，最近 %s 条，新 → 旧，这是他的收益）',
   network: '十、人物关系网（算法算出的送礼 / 收礼排行）',
+  networkOutHost: '他送礼最多的人（他主动维护的关系）',
+  networkInHost: '送礼给他最多的人（他的主要收入来源）',
+  hostNote:
+    '角色说明：这份材料分析的是**主播**本人——他在房间里的发言是他的工作输出，收到的礼物是他的收益；房间播 / 语音房里一场可能有多个主播，别把其他主播或观众的行为算到他头上。',
   previous: '十一、上一版画像（第 %s 版）',
   noData: '（没有）',
   nickname: '昵称',
@@ -213,35 +238,53 @@ const zh = {
  * （同 `main/tool-texts.ts` 的说明）——要约束的只是键，值本来就是另一种语言。
  */
 const en: typeof zh = {
-  role:
+  roleViewer:
     'You are a data analyst for live-streaming operations, skilled at reading who a viewer is and why they stay from their interaction logs.',
-  task: 'Write the most comprehensive, actionable viewer profile you can for this Douyin live-stream viewer, based only on the real data material below.',
+  roleHost:
+    'You are a data analyst for live-streaming operations, skilled at reading a streamer\u2019s style, how they keep people in the room, and where their revenue comes from.',
+  taskViewer:
+    'Write the most comprehensive, actionable viewer profile you can for this Douyin live-stream viewer, based only on the real data material below.',
+  taskHost:
+    'Write the most comprehensive, actionable **streamer** profile you can for this Douyin live-room / voice-room host, based only on the real data material below (analyse his own performance, do not treat him as a viewer).',
   rulesTitle: 'Hard requirements',
   rules: [
     'Use only the material. Do not add facts that are not present; do not guess real names, jobs, addresses or any real-world identity; no political, religious or medical judgements.',
-    'Quotes must be **verbatim** from the "danmaku samples" section; if nothing fits, do not quote and do not invent a line that sounds like a comment.',
+    'Quotes must be **verbatim** from the "{{samples}}" section; if nothing fits, do not quote and do not invent a line that sounds like a comment.',
     'Every number must match the material (numbers are cumulative across all rooms; gift diamonds are platform virtual coins).',
     'Softly word anything the material cannot support (e.g. "based on the current sample") and state sample size and uncertainty honestly in caveats.',
     'Return **exactly one JSON object**: no markdown fences, no prose before or after, no comments.',
     'Write all copy in {{language}}.'
   ],
+  rulesHostExtra:
+    'The message samples are lines **he himself posted** in the room (this plugin records text messages only, never audio); do not mistake viewer messages for his performance. A voice room may have several hosts in one session \u2014 decide authorship by sender id and stay quiet when unsure.',
   shapeTitle: 'JSON shape (field names must match exactly)',
   shape: [
     '{',
-    '  "persona": "a short type name you coin (e.g. \\"late-night companion\\")",',
+    '  "persona": "{{persona}}",',
     '  "headline": "one-line profile, at most 40 characters",',
-    '  "overview": "overview in 2-4 sentences (who they are, why they come, relationship stage)",',
+    '  "overview": "{{overview}}",',
     '  "tags": ["3-6 short tags"],',
     '  "sections": [',
     '    { "title": "section title", "items": ["one sentence each, numbers welcome"] }',
     '  ],',
     '  "evidence": [ { "quote": "verbatim quote or a concrete number", "note": "what it shows" } ],',
-    '  "suggestions": ["actionable retention / interaction advice for the streamer or operator"],',
+    '  "suggestions": ["{{suggestions}}"],',
     '  "caveats": ["data limits, small samples, uncertainty"]',
     '}'
   ],
-  sectionsHint:
+  shapePersonaViewer: 'a short viewer type name you coin (e.g. "late-night companion")',
+  shapePersonaHost: 'a short streamer type name you coin (e.g. "late-night song host", "chatterbox MC")',
+  shapeOverviewViewer: 'overview in 2-4 sentences (who they are, why they come, relationship stage)',
+  shapeOverviewHost: 'overview in 2-4 sentences (what he streams, his style, what stage he is at)',
+  shapeSuggestionsViewer: 'actionable retention / interaction advice for the streamer or operator',
+  shapeSuggestionsHost:
+    'actionable advice addressed to this streamer: content and topics, scripting and crowd control, interaction and pacing, retention and conversion',
+  samplesShortViewer: 'danmaku samples',
+  samplesShortHost: 'message samples',
+  sectionsHintViewer:
     'Cover angles like these in sections (2-5 items each, skip what the material cannot support): speaking style and language features / spending and gifting motives / social role and relationships / content interests / activity rhythm and visiting habits / relationship stage with the streamer / churn or upgrade signals.',
+  sectionsHintHost:
+    'Cover angles like these in sections (2-5 items each, skip what the material cannot support): streaming style and scripting / content and talent mix / how he interacts with viewers (call-outs, replies, crowd control) / retention and conversion tactics (follows, fan club, gifts) / revenue and gifting structure / co-hosting and peer relationships / schedule and per-session performance / growth or plateau signals.',
   sectionCount: 'Give 4-7 sections, 3-6 evidence items, 3-6 suggestions and 1-4 caveats.',
   refineTitle: 'This is an iteration (not a fresh start)',
   refine:
@@ -255,10 +298,17 @@ const en: typeof zh = {
   algorithm: '4. Algorithmic facts (computed by deterministic rules — do not recompute, use them to interpret and corroborate)',
   rhythm: '5. Activity rhythm (24-hour distribution, local time)',
   rooms: '6. Rooms they appeared in (per room)',
-  chatSamples: '7. Danmaku samples (latest %s, newest first, with timestamps)',
-  sentGifts: '8. Gifts they sent (latest %s, newest first)',
-  receivedGifts: '9. Gifts they received (latest %s, newest first)',
+  chatSamplesViewer: '7. Danmaku samples (latest %s, newest first, with timestamps)',
+  chatSamplesHost: '7. Message samples he himself posted (latest %s, newest first, with timestamps)',
+  sentGiftsViewer: '8. Gifts they sent (latest %s, newest first)',
+  sentGiftsHost: '8. Gifts he sent out (latest %s, newest first)',
+  receivedGiftsViewer: '9. Gifts they received (latest %s, newest first)',
+  receivedGiftsHost: '9. Gifts he received (latest %s, newest first \u2014 this is his revenue)',
   network: '10. Relationship graph (top senders / recipients computed by the algorithm)',
+  networkOutHost: 'people he gifts most (relationships he actively maintains)',
+  networkInHost: 'people who gift him most (his main revenue source)',
+  hostNote:
+    'Role note: this material profiles the **streamer** himself \u2014 his messages are his work output and received gifts are his revenue. A voice room may host several streamers in one session, so do not attribute other hosts\u2019 or viewers\u2019 behaviour to him.',
   previous: '11. Previous version (v%s)',
   noData: '(none)',
   nickname: 'nickname',
@@ -468,6 +518,13 @@ export interface PortraitPrevious {
 export interface PortraitEvidenceInput {
   /** 弹窗上的那个人（锚点） */
   anchor: { userId: string; name: string }
+  /**
+   * 这一版要分析的角色（观众 / 主播）。
+   *
+   * 用户 2026-10-13：「应该是分析主播…和用户，两者分开」——同一个人两种角色的材料侧重、
+   * 提问角度与建议对象都不一样，所以角色是**输入的一部分**，不是渲染层换个标题的事。
+   */
+  role: AiPortraitRole
   identity: PortraitIdentity | null
   /** 档案（昵称/地区/签名/等级…；拿不到就是 null） */
   profile: Pick<
@@ -523,6 +580,16 @@ export interface PortraitPrompt {
  */
 export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPrompt {
   const t = labelsFor(input.language)
+  const host = input.role === 'host'
+  const roleText = host ? t.roleHost : t.roleViewer
+  const taskText = host ? t.taskHost : t.taskViewer
+  const sectionsHint = host ? t.sectionsHintHost : t.sectionsHintViewer
+  const samplesShort = host ? t.samplesShortHost : t.samplesShortViewer
+  const chatSamplesTitle = host ? t.chatSamplesHost : t.chatSamplesViewer
+  const sentGiftsTitle = host ? t.sentGiftsHost : t.sentGiftsViewer
+  const receivedGiftsTitle = host ? t.receivedGiftsHost : t.receivedGiftsViewer
+  const networkOutLabel = host ? t.networkOutHost : t.networkOut
+  const networkInLabel = host ? t.networkInHost : t.networkIn
   const a = input.analysis
   const factsOf = a.facts
   const lines: string[] = []
@@ -675,8 +742,8 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
     }
   }
 
-  /* 七、弹幕样本 */
-  lines.push('', `## ${t.chatSamples.replace('%s', String(input.extras.recentChat.length))}`)
+  /* 七、弹幕样本（主播视角下这是他自己的发言记录） */
+  lines.push('', `## ${chatSamplesTitle.replace('%s', String(input.extras.recentChat.length))}`)
   if (input.extras.recentChat.length === 0) {
     lines.push(t.noData)
   } else {
@@ -686,7 +753,7 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
   }
 
   /* 八、送礼流水 */
-  lines.push('', `## ${t.sentGifts.replace('%s', String(input.extras.sentGifts.length))}`)
+  lines.push('', `## ${sentGiftsTitle.replace('%s', String(input.extras.sentGifts.length))}`)
   if (input.extras.sentGifts.length === 0) {
     lines.push(t.noData)
   } else {
@@ -700,7 +767,7 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
   }
 
   /* 九、收礼流水 */
-  lines.push('', `## ${t.receivedGifts.replace('%s', String(input.extras.receivedGifts.length))}`)
+  lines.push('', `## ${receivedGiftsTitle.replace('%s', String(input.extras.receivedGifts.length))}`)
   if (input.extras.receivedGifts.length === 0) {
     lines.push(t.noData)
   } else {
@@ -719,7 +786,7 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
   const inNet = a.network.incoming.slice(0, 6)
   if (outNet.length > 0) {
     lines.push(
-      `${t.networkOut}: ` +
+      `${networkOutLabel}: ` +
         outNet
           .map((peer) => `${peer.name} ${compact(peer.diamonds)}${peer.diamonds > 0 ? ` ${t.coins}` : ` ${t.count}`}（${t.share} ${peer.share}%）`)
           .join(' · ')
@@ -727,7 +794,7 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
   }
   if (inNet.length > 0) {
     lines.push(
-      `${t.networkIn}: ` +
+      `${networkInLabel}: ` +
         inNet
           .map((peer) => `${peer.name} ${compact(peer.diamonds)}${peer.diamonds > 0 ? ` ${t.coins}` : ` ${t.count}`}（${t.share} ${peer.share}%）`)
           .join(' · ')
@@ -738,29 +805,42 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
   const material = lines.join('\n')
 
   /* 十一段：上一版画像（迭代时） */
+  const shapeText = t.shape
+    .map((line) =>
+      line
+        .replace('{{persona}}', host ? t.shapePersonaHost : t.shapePersonaViewer)
+        .replace('{{overview}}', host ? t.shapeOverviewHost : t.shapeOverviewViewer)
+        .replace('{{suggestions}}', host ? t.shapeSuggestionsHost : t.shapeSuggestionsViewer)
+    )
+    .join('\n')
+  const rules = (host ? [...t.rules, t.rulesHostExtra] : t.rules).map((rule, index) =>
+    `${index + 1}. ${rule.replace('{{language}}', languageName(input.language)).replace('{{samples}}', samplesShort)}`
+  )
   const header: string[] = [
-    t.role,
+    roleText,
     '',
-    t.task,
+    taskText,
     '',
     `### ${t.rulesTitle}`,
-    ...t.rules.map((rule, index) => `${index + 1}. ${rule.replace('{{language}}', languageName(input.language))}`),
+    ...rules,
     '',
     `### ${t.shapeTitle}`,
     '```',
-    ...t.shape,
+    shapeText,
     '```',
-    t.sectionsHint,
+    sectionsHint,
     t.sectionCount
   ]
   if (input.previous && (input.previous.raw || input.previous.report)) {
     header.push('', `### ${t.refineTitle}`, t.refine)
   }
-  header.push('', `### ${t.materialTitle}`, t.materialNote, material)
+  header.push('', `### ${t.materialTitle}`, t.materialNote)
+  if (host) header.push(t.hostNote)
+  header.push(material)
 
   const previousText = input.previous ? previousBlock(t, input.previous) : ''
   const user = previousText ? `${header.join('\n')}\n\n${previousText}` : header.join('\n')
-  const system = `${t.role}\n${t.sectionCount}`
+  const system = `${roleText}\n${t.sectionCount}`
 
   const interactions = portraitInteractions({
     chat: totals.chat,

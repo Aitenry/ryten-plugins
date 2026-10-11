@@ -11,6 +11,7 @@ import type {
   AiPortraitFailure,
   AiPortraitModel,
   AiPortraitResult,
+  AiPortraitRole,
   AiPortraitState,
   LiveSettings,
   UserDetail
@@ -22,6 +23,7 @@ import {
   deleteUserPortrait,
   getUserPortrait,
   saveUserPortrait,
+  userHostSignal,
   userLastSeenAnyRoom,
   userPortraitExtras,
   userStatsAnyRoom,
@@ -157,6 +159,7 @@ function toPortrait(row: Awaited<ReturnType<typeof getUserPortrait>>): AiPortrai
   return {
     key: row.key,
     userId: row.userId,
+    role: row.role === 'host' ? 'host' : 'viewer',
     version: row.version,
     providerId: row.providerId,
     providerName: row.providerName,
@@ -182,6 +185,44 @@ async function accountIdsOf(userId: string): Promise<string[]> {
   if (!id) return []
   const ids = await resolveAccountIds(id)
   return ids.length > 0 ? ids : [id]
+}
+
+/* --------------------------------------------------------------- 角色（观众 / 主播） */
+
+/** 「收到这么多条礼物」才够说明他是主播（观众被回礼一两次不算） */
+const HOST_GIFT_HITS = 2
+
+/** 外部传进来的角色参数：只有明确说 `host` / `viewer` 才信，其它（含 `null`）= 自动判定 */
+export function portraitRoleArg(value: unknown): AiPortraitRole | null {
+  return value === 'host' || value === 'viewer' ? value : null
+}
+
+/**
+ * 判定该按哪个角色分析（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开」）。
+ *
+ * 三条证据，从硬到软：
+ * 1. **本场正在麦上 / 是本房间主播**（调用方从 `recorder` 拿的运行态信号，最硬）；
+ * 2. **历史上在麦位表或房间主播里出现过**（`douyin_link_users.on_mic`，粘性列）——
+ *    这一条能救「现在没开播但过去当过主播」的人；
+ * 3. **礼物方向**：收到过 ≥2 条礼物、且收的抖币比送的多——主播靠收礼，观众靠送礼。
+ *    要求「收比送多」是因为观众也会被回礼，只看「收过礼」会把大方的老观众误判成主播。
+ *
+ * 判定**只用来定默认值**：弹窗上用户可以随时切成另一个角色（两种身份都当过的人很常见），
+ * 而且两侧的画像各存各的，切回去不用重新花钱。
+ */
+export async function detectPortraitRole(input: {
+  /** 这个人的全部账号 id（与材料同一份集合） */
+  ids: string[]
+  /** 运行态：此刻他在麦上、或他就是本房间主播 */
+  liveHost?: boolean
+}): Promise<AiPortraitRole> {
+  if (input.liveHost === true) return 'host'
+  if (input.ids.length === 0) return 'viewer'
+  const signal = await userHostSignal(input.ids).catch(() => null)
+  if (!signal) return 'viewer'
+  if (signal.onMic) return 'host'
+  if (signal.receivedGifts >= HOST_GIFT_HITS && signal.receivedDiamonds > signal.sentDiamonds) return 'host'
+  return 'viewer'
 }
 
 /** 跨房间合计（读缓存的指纹要用它；口径与 `userProfile` 的互动统计一致） */
@@ -217,6 +258,10 @@ function zeroTotals(): PortraitTotalsLite {
 /** 打开弹窗要的全部状态（缓存 + 数据侧现状 + 模型清单 + 是否在跑） */
 export async function aiPortraitState(input: {
   userId: string
+  /** 想看的角色（`null`/未给 = 用自动判定的那个） */
+  role?: AiPortraitRole | null
+  /** 运行态信号：此刻他在麦上、或他就是本房间主播 */
+  liveHost?: boolean
   settings: Pick<LiveSettings, 'portraitProviderId' | 'portraitDisableThinking'>
 }): Promise<AiPortraitState> {
   const userId = String(input.userId ?? '').trim()
@@ -224,18 +269,24 @@ export async function aiPortraitState(input: {
   if (!userId) {
     return {
       portrait: null,
+      role: 'viewer',
+      detectedRole: 'viewer',
       current: { fingerprint: '', interactions: 0 },
       running: false,
       models: await listPortraitModels(),
       selectedProviderId
     }
   }
-  const [identity, models] = await Promise.all([userIdentity(userId), listPortraitModels()])
-  const key = portraitKeyOf(identity.identityId, userId)
-  const [row, ids] = await Promise.all([getUserPortrait(key), accountIdsOf(userId)])
+  const [identity, ids, models] = await Promise.all([userIdentity(userId), accountIdsOf(userId), listPortraitModels()])
+  const detectedRole = await detectPortraitRole({ ids, liveHost: input.liveHost })
+  const role = input.role ?? detectedRole
+  const key = portraitKeyOf(identity.identityId, userId, role)
+  const row = await getUserPortrait(key)
   const { totals, lastSeen } = await totalsOf(ids)
   return {
     portrait: toPortrait(row),
+    role,
+    detectedRole,
     current: {
       fingerprint: portraitFingerprint({ ...totals, lastSeen }),
       interactions: portraitInteractions({ ...totals, lastSeen })
@@ -274,6 +325,10 @@ function describe(error: unknown): string {
 export async function generateAiPortrait(input: {
   userId: string
   webRid?: string
+  /** 要生成哪个角色的那一版（`null`/未给 = 用自动判定的那个） */
+  role?: AiPortraitRole | null
+  /** 运行态信号：此刻他在麦上、或他就是本房间主播 */
+  liveHost?: boolean
   /** 档案（由 hub 提供：静态字段的口径与弹窗上显示的那份完全一致） */
   profile: UserDetail | null
   settings: Pick<LiveSettings, 'portraitProviderId' | 'portraitDisableThinking'>
@@ -283,7 +338,9 @@ export async function generateAiPortrait(input: {
   if (!userId) return failure('no-data')
 
   const [identity, ids] = await Promise.all([userIdentity(userId), accountIdsOf(userId)])
-  const key = portraitKeyOf(identity.identityId, userId)
+  const detectedRole = await detectPortraitRole({ ids, liveHost: input.liveHost })
+  const role: AiPortraitRole = input.role ?? detectedRole
+  const key = portraitKeyOf(identity.identityId, userId, role)
   if (running.has(key)) return failure('busy')
 
   const cachedRow = await getUserPortrait(key)
@@ -351,6 +408,7 @@ export async function generateAiPortrait(input: {
 
   const prompt = buildPortraitPrompt({
     anchor: { userId, name: input.profile?.nickname ?? '' },
+    role,
     identity: identity.identityId > 0 ? identity : null,
     profile: input.profile,
     totals,
@@ -368,7 +426,8 @@ export async function generateAiPortrait(input: {
   const job: PortraitJob = { requestId, startedAt: now, controller, cancelled: false }
   running.set(key, job)
   logger.info(
-    `[douyin-link] AI 画像开始：第 ${(cachedRow?.version ?? 0) + 1} 版 · ${providerName || providerId}/${modelName || '?'} · ` +
+    `[douyin-link] AI 画像开始：${role === 'host' ? '主播' : '观众'} · 第 ${(cachedRow?.version ?? 0) + 1} 版 · ` +
+      `${providerName || providerId}/${modelName || '?'} · ` +
       `材料 ${prompt.chars.total} 字符（system ${prompt.chars.system} + user ${prompt.chars.user}）· ` +
       `互动 ${prompt.interactions} 条 · 弹幕样本 ${extras.recentChat.length} · 送礼样本 ${extras.sentGifts.length} · ` +
       `静默上限 ${Math.round(PORTRAIT_BUDGETS.stallMs / 1000)}s / 总上限 ${Math.round(PORTRAIT_BUDGETS.totalMs / 60000)}min`
@@ -380,6 +439,7 @@ export async function generateAiPortrait(input: {
     const portrait: AiPortrait = {
       key,
       userId,
+      role,
       version: (cachedRow?.version ?? 0) + 1,
       providerId,
       providerName,
@@ -396,6 +456,7 @@ export async function generateAiPortrait(input: {
       key,
       userId,
       identityId: identity.identityId,
+      role,
       version: portrait.version,
       providerId,
       providerName,
@@ -410,7 +471,7 @@ export async function generateAiPortrait(input: {
       generatedAt: portrait.generatedAt
     })
     logger.info(
-      `[douyin-link] AI 画像完成：第 ${portrait.version} 版 · ${text.length} 字符 · ` +
+      `[douyin-link] AI 画像完成：${role === 'host' ? '主播' : '观众'} · 第 ${portrait.version} 版 · ${text.length} 字符 · ` +
         `token ${inputTokens}/${outputTokens} · ${report ? '结构化成功' : '未按 JSON 回（按原文显示）'}`
     )
     return { ok: true, portrait }
@@ -441,19 +502,27 @@ export async function generateAiPortrait(input: {
  *
  * 为什么需要它：本地小模型一次可能跑十几分钟（实测 9B/Q4 约 21.6 token/s，4000 token 上限就是
  * 3 分钟起步；更慢的机器上更久），没有停止按钮的话用户只能干等。返回 `true` = 确实掐了一次。
+ *
+ * 为什么不收角色参数（0.15.32 起角色进了缓存键）：界面上的「停止」要**永远有效**，
+ * 而按人物前缀扫一遍运行中的任务既不用界面记住「我点的是哪一版」，也顺手覆盖了
+ * 「切到主播那一版之后忘了先停观众那一版」这种情况。
  */
 export async function cancelAiPortrait(userId: string): Promise<boolean> {
   const id = String(userId ?? '').trim()
   if (!id) return false
   // 与 generate 同一套缓存键口径：优先按画像 id 找（多账号的人几个号共用一次生成）
   const identity = await userIdentity(id).catch(() => null)
-  const key = portraitKeyOf(identity?.identityId ?? 0, id)
-  const job = running.get(key)
-  if (!job || job.cancelled) return false
-  job.cancelled = true
-  job.controller.abort()
-  logger.info(`[douyin-link] AI 画像收到停止请求（key=${key}，已写 ${job.writtenChars ?? 0} 字符）`)
-  return true
+  const identityId = identity?.identityId ?? 0
+  const prefix = identityId > 0 ? `identity:${identityId}:` : `user:${id}:`
+  let stopped = false
+  for (const [key, job] of running) {
+    if (!key.startsWith(prefix) || job.cancelled) continue
+    job.cancelled = true
+    job.controller.abort()
+    stopped = true
+    logger.info(`[douyin-link] AI 画像收到停止请求（key=${key}，已写 ${job.writtenChars ?? 0} 字符）`)
+  }
+  return stopped
 }
 
 /** 界面语言（拿不到就按中文：插件自己的界面词条里中文是主语言） */
@@ -565,10 +634,22 @@ function chunkText(chunk: unknown): string {
   return ''
 }
 
-/** 清掉某个人的 AI 画像（设置页/工装用；界面上的「重新生成」是覆盖写，不走这里） */
+/**
+ * 清掉某个人的 AI 画像（设置页/工装用；界面上的「重新生成」是覆盖写，不走这里）。
+ *
+ * 两个角色各有一版（缓存键里带角色），所以这里**两份都清**，返回清掉的行数——
+ * 只清一半会留下一个界面读得到、用户以为已经删了的旧版本。
+ */
 export async function clearAiPortrait(userId: string): Promise<number> {
-  const identity = await userIdentity(String(userId ?? '').trim())
-  return deleteUserPortrait(portraitKeyOf(identity.identityId, userId))
+  const id = String(userId ?? '').trim()
+  const identity = await userIdentity(id)
+  const keys = [
+    portraitKeyOf(identity.identityId, id, 'viewer'),
+    portraitKeyOf(identity.identityId, id, 'host')
+  ]
+  let removed = 0
+  for (const key of keys) removed += await deleteUserPortrait(key)
+  return removed
 }
 
 /** 插件停用时收摊（当前没有可取消的句柄，留个钩子给将来加「取消生成」） */

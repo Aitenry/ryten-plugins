@@ -93,6 +93,11 @@ export interface UserDeltaRow {
   fansClubLevel: number
   badges: string
   secUid: string
+  /**
+   * 本场**见过他在麦上**（含房间主播）→ 写进 `douyin_link_users.on_mic`（粘性，`OR` 合并）。
+   * AI 画像据此把主播与观众分开（用户 2026-10-13）。
+   */
+  onMic?: boolean
   delta: UserStats
   firstSeen: number
   lastSeen: number
@@ -518,6 +523,7 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             fansClubLevel: row.fansClubLevel,
             badges: row.badges,
             secUid: row.secUid,
+            onMic: row.onMic === true,
             chat: row.delta.chat,
             enter: row.delta.enter,
             likes: row.delta.like,
@@ -549,6 +555,8 @@ export async function upsertUserDeltas(rows: UserDeltaRow[]): Promise<void> {
             follows: sql`douyin_link_users.follows + EXCLUDED.follows`,
             gift: sql`douyin_link_users.gift + EXCLUDED.gift`,
             diamonds: sql`douyin_link_users.diamonds + EXCLUDED.diamonds`,
+            // 「见过他在麦上」是**粘性**的：一旦 true 永不回退（这一列只用来分清主播与观众）
+            onMic: sql`douyin_link_users.on_mic OR EXCLUDED.on_mic`,
             firstSeen: sql`LEAST(douyin_link_users.first_seen, EXCLUDED.first_seen)`,
             lastSeen: sql`GREATEST(douyin_link_users.last_seen, EXCLUDED.last_seen)`
           }
@@ -2672,12 +2680,68 @@ export async function userLastSeenAnyRoom(userIds: string[]): Promise<number> {
   })
 }
 
+/* ------------------------------------------------------------------- AI 画像角色 */
+
+/**
+ * 「这个人是不是主播」的**历史信号**（AI 画像的角色判定用，见 `main/portrait.ts` 的 `detectRole`）。
+ *
+ * 三条来自库里的事实：
+ * - `onMic`：我们在麦位表 / 房间主播里**见过他**（粘性列，最硬的证据）；
+ * - `receivedGifts` / `receivedDiamonds`：别人送给他的礼物（主播靠这个活着）；
+ * - `sentDiamonds`：他送出去的抖币（观众才买账）。
+ *
+ * 为什么不做成一次 SQL：三样来自两张表、口径也不同（一个是粘性布尔、两个是流水聚合），
+ * 分开查更好读；调用点在「打开弹窗 / 开始生成」这种低频路径上。
+ */
+export interface UserHostSignal {
+  /** 见过他在麦上（任一房间） */
+  onMic: boolean
+  /** 收到礼物的条数 */
+  receivedGifts: number
+  /** 收到的抖币 */
+  receivedDiamonds: number
+  /** 送出的抖币 */
+  sentDiamonds: number
+}
+
+export async function userHostSignal(userIds: string[]): Promise<UserHostSignal> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  const empty: UserHostSignal = { onMic: false, receivedGifts: 0, receivedDiamonds: 0, sentDiamonds: 0 }
+  if (ids.length === 0) return empty
+  await schemaReady
+  return withOrm('douyin-link.userHostSignal', async (db) => {
+    const micRows = await db
+      .select({ onMic: sql<boolean>`bool_or(${douyinLinkUsers.onMic})` })
+      .from(douyinLinkUsers)
+      .where(inArray(douyinLinkUsers.userId, ids))
+    const receivedRows = await db
+      .select({
+        hits: sql<number>`count(*)::int`,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.toUserId, ids), eq(douyinLinkMessages.kind, 'gift')))
+    const sentRows = await db
+      .select({ diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int` })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.userId, ids), eq(douyinLinkMessages.kind, 'gift')))
+    return {
+      onMic: micRows[0]?.onMic === true,
+      receivedGifts: receivedRows[0]?.hits ?? 0,
+      receivedDiamonds: receivedRows[0]?.diamonds ?? 0,
+      sentDiamonds: sentRows[0]?.diamonds ?? 0
+    }
+  })
+}
+
 /* ------------------------------------------------------------------ AI 画像缓存 */
 /** AI 画像的一行（主进程内部形状；渲染层拿到的是 shared/types 的 `AiPortrait`） */
 export interface UserPortraitRow {
   key: string
   userId: string
   identityId: number
+  /** 这一版分析的角色（`viewer` / `host`；见 `shared/types.ts` 的 `AiPortraitRole`） */
+  role: string
   version: number
   providerId: number
   providerName: string
@@ -2710,6 +2774,7 @@ export async function getUserPortrait(key: string): Promise<UserPortraitRow | nu
       key: row.portraitKey,
       userId: row.userId,
       identityId: row.identityId,
+      role: row.role,
       version: row.version,
       providerId: row.providerId,
       providerName: row.providerName,
@@ -2743,6 +2808,7 @@ export async function saveUserPortrait(row: UserPortraitRow): Promise<void> {
         portraitKey: row.key,
         userId: row.userId,
         identityId: row.identityId,
+        role: row.role,
         version: row.version,
         providerId: row.providerId,
         providerName: row.providerName,
@@ -2762,6 +2828,7 @@ export async function saveUserPortrait(row: UserPortraitRow): Promise<void> {
         set: {
           userId: row.userId,
           identityId: row.identityId,
+          role: row.role,
           version: row.version,
           providerId: row.providerId,
           providerName: row.providerName,

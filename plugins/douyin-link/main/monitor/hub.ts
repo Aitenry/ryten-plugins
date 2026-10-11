@@ -70,7 +70,8 @@ import {
   aiPortraitState as readAiPortraitState,
   cancelAiPortrait as cancelPortrait,
   disposePortrait,
-  generateAiPortrait as runAiPortrait
+  generateAiPortrait as runAiPortrait,
+  portraitRoleArg
 } from '../portrait'
 import { since, withTimeout } from '../util/deadline'
 import {
@@ -2964,9 +2965,18 @@ export class AnalyzerHub {
    * 实现在 `../portrait.ts`（那一份是「用宿主大模型生成画像」的整条链：证据打包 → 调模型 →
    * 落库缓存）。hub 只做两件它才知道的事：**把当前设置递过去**（用哪个模型）与**复用档案口径**
    * （`userProfile` 的静态字段合并，保证弹窗上与材料里是同一份资料）。
+   *
+   * `role` 由界面传（用户可以切观众 / 主播）；不传就由服务层按数据判定，
+   * 而运行态那条最硬的证据（「此刻他在麦上」）只有 hub 拿得到，所以从 recorder 递进去。
    */
-  async aiPortrait(userId: string): Promise<AiPortraitState> {
-    return readAiPortraitState({ userId: String(userId ?? ''), settings: this.settings })
+  async aiPortrait(userId: string, webRid = '', role?: string | null): Promise<AiPortraitState> {
+    const id = String(userId ?? '')
+    return readAiPortraitState({
+      userId: id,
+      role: portraitRoleArg(role),
+      liveHost: this.isHostOnAir(webRid, id),
+      settings: this.settings
+    })
   }
 
   /**
@@ -2974,17 +2984,21 @@ export class AnalyzerHub {
    *
    * `force = false` 时若已有缓存就直接回缓存——用户明确要求过「需要保存这个画像，
    * 不然每一次都要重新生成，会很亏 token」；只有点了「重新生成」才 `force = true`（版本号 +1，
-   * 并把上一版喂回提示词做迭代）。
+   * 并把上一版喂回提示词做迭代）。**版本号按角色各算各的**（缓存键里带角色）。
    */
   async generateAiPortrait(
     webRid: string,
     userId: string,
-    force = false
+    force = false,
+    role?: string | null
   ): Promise<AiPortraitResult> {
-    const profile = await this.userProfile(webRid, userId).catch(() => null)
+    const id = String(userId ?? '')
+    const profile = await this.userProfile(webRid, id).catch(() => null)
     return runAiPortrait({
-      userId: String(userId ?? ''),
+      userId: id,
       webRid: String(webRid ?? ''),
+      role: portraitRoleArg(role),
+      liveHost: this.isHostOnAir(webRid, id),
       profile,
       settings: this.settings,
       force
@@ -2999,6 +3013,17 @@ export class AnalyzerHub {
    */
   async cancelAiPortrait(userId: string): Promise<boolean> {
     return cancelPortrait(String(userId ?? ''))
+  }
+
+  /**
+   * 这个人**此刻是不是本场的主播**（AI 画像判定观众 / 主播的运行态证据）。
+   *
+   * 为什么由 hub 判断而不是服务层查库：麦位是**运行态**（`recorder.micSeats`），关掉应用就没了，
+   * 库里只有粘性的「见过他在麦上」；正在直播的人应该立刻按主播分析，不必等下一次落库。
+   */
+  private isHostOnAir(webRid: string, userId: string): boolean {
+    if (!webRid || !userId) return false
+    return this.states.get(webRid)?.recorder.isHostOnAir(userId) ?? false
   }
 
   /** 头像 → data URL（渲染层 CSP 不许外链图片，所以这一步在主进程做） */

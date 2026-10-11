@@ -15,7 +15,10 @@
  *    缺字段、彻底坏掉——六种形态都要有确定结果；
  * 6. **流式半成品**：写到一半时只认**已闭合**的字段，最后那个没写完的分节不许露头，
  *    而且后面的字段不许被前一个数组吞掉；
- * 7. **成本**：材料字符数（≈ token 预算）打出来，并断言不超过上限。
+ * 7. **成本**：材料字符数（≈ token 预算）打出来，并断言不超过上限；
+ * 8. **观众 / 主播两套**（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，
+ *    两者分开，现在都是按照用户的内容进行分析了」）：同一份数据换角色，**提问、分节标题、
+ *    建议对象都要跟着换**，而事实层（数字、样本）一个字都不能变；缓存键也要按角色分开。
  *
  * 跑法（仓库根目录；本工装直接编源码，不需要先 build）：
  *   node plugins/douyin-link/spike/ai-portrait-contract-check.mjs
@@ -205,6 +208,7 @@ function fixturePrompt(overrides = {}) {
   const data = fixtureData()
   return buildPortraitPrompt({
     anchor: { userId: 'anon:111111#dou2056511', name: '夜猫子小张' },
+    role: 'viewer',
     identity: {
       identityId: 7,
       name: '',
@@ -426,8 +430,15 @@ eq('建议数组也读到', fourth?.suggestions, ['固定时段点名', '别催�
 eq('收尾后与最终解析一致', JSON.stringify(normalizePortraitReport(partialPortraitReport(streamed[3]))), JSON.stringify(fourth))
 
 console.log('\n=== 10. 缓存键 / 指纹 / 互动量 / 设置读取')
-eq('绑定过账号用画像做键', portraitKeyOf(7, '2056511'), 'identity:7')
-eq('没绑定用 id 做键', portraitKeyOf(0, '2056511'), 'user:2056511')
+eq('绑定过账号用画像做键', portraitKeyOf(7, '2056511'), 'identity:7:viewer')
+eq('没绑定用 id 做键', portraitKeyOf(0, '2056511'), 'user:2056511:viewer')
+eq('主播那一版是另一个键（同一个人两套画像）', portraitKeyOf(7, '2056511', 'host'), 'identity:7:host')
+eq('没绑定的主播键', portraitKeyOf(0, '2056511', 'host'), 'user:2056511:host')
+check('观众与主播的键不同', portraitKeyOf(7, 'x', 'viewer') !== portraitKeyOf(7, 'x', 'host'))
+check(
+  '角色给脏值也当观众（不与主进程的「不认识就当没传」冲突：这里只是兜底）',
+  portraitKeyOf(7, 'x', undefined) === 'identity:7:viewer'
+)
 const sample = { chat: 42, enter: 9, like: 120, follow: 1, gift: 6, diamonds: 3200, lastSeen: NOW }
 eq('互动量 = 五类互动条数之和', portraitInteractions(sample), 178)
 eq('同一份数据指纹稳定', portraitFingerprint(sample), portraitFingerprint({ ...sample }))
@@ -445,7 +456,59 @@ eq('设置里选了 0 = null（跟随默认）', portraitProviderSetting({ portr
 eq('设置里选了 12 = 12', portraitProviderSetting({ portraitProviderId: 12 }), 12)
 has('Markdown 导出带标题与分节', reportToMarkdown(report), '## 说话风格')
 
-console.log('\n=== 11. 成本（材料字符数 ≈ 输入 token 预算）')
+console.log('\n=== 11. 主播那一版：换问题、换标题、不换事实')
+const host = fixturePrompt({ role: 'host' })
+/*
+ * 材料里有几个词两边都会出现（「主播」二字本身），所以断言分两层：
+ * 「只有主播那版才有」的句子，以及「事实层必须逐字相同」的那些数字。
+ */
+has('系统指令说的是主播', host.system, '擅长从主播的直播流水里读出')
+has('任务说的是这位主播（不是观众）', host.user, '为这位抖音直播间/语音房的**主播**写一份尽可能全面、可执行的主播画像')
+has('明说了不是把他当观众', host.user, '不是把他当观众')
+has('多了一条「他本人发的话」的硬性要求', host.user, '不要把观众的发言当成他的表现')
+has('写明房间播 / 语音房一场可能有多个主播', host.user, '房间播 / 语音房里同一场可能有多个主播')
+has('第七节换成「发言记录样本」', host.user, '七、发言记录样本（他本人在房间里发的话')
+has('收礼那一节点明这是他的收益', host.user, '九、收礼流水（别人送给他的，最近 1 条，新 → 旧，这是他的收益）')
+has('关系网按主播口径问（收入来源）', host.user, '送礼给他最多的人（他的主要收入来源）')
+has('关系网按主播口径问（主动维护）', host.user, '他送礼最多的人（他主动维护的关系）')
+has('角色说明写进材料（别把别人的行为算到他头上）', host.user, '这份材料分析的是**主播**本人')
+has('类型名按主播起（不是「夜聊型陪伴者」那种观众类型）', host.user, '主播类型名，4-10 字，你自己起')
+has('建议改成「直接对这位主播说」', host.user, '直接对这位主播说')
+has('分节角度换成直播风格 / 话术 / 收益结构', host.user, '直播风格与话术特征')
+not('观众那版不出现主播专属的类型名说明', material, '主播类型名')
+not('观众那版不出现主播专属的分节角度', material, '留人与转化手段')
+not('观众那版没有那句角色说明', material, '这份材料分析的是**主播**本人')
+not('观众那版的第七节还是「弹幕样本」', material, '发言记录样本')
+/*
+ * 换角色**不改事实**：同一份流水、同一批样本、同一批算法层数字，逐字相同。
+ * 这条是这次改动最容易做错的地方——「分开分析」很容易顺手把材料也换了一份。
+ */
+for (const fact of [
+  '弹幕 42',
+  '送出抖币 3200',
+  '收到抖币 500',
+  '深夜电台（880000000001）',
+  '比心 ×5（500 抖币） → 工装主播',
+  '大啤酒 ×2（500 抖币） ← 送礼的人',
+  '- [2026-10-13 21:28] [比心] 今晚唱得太好听了',
+  '昵称 夜猫子小张',
+  '同一个人，共 2 个',
+  '行为原型',
+  '材料生成时间：2026-10-13 21:30'
+]) {
+  has(`事实层逐字保留：${fact}`, host.user, fact)
+}
+eq('两个角色的分节数一样（同一套材料骨架）', (host.user.match(/\n## /g) ?? []).length, (material.match(/\n## /g) ?? []).length)
+check('两份提示词确实不同（不是只改了个标题）', host.user !== material)
+check('主播那版的成本仍在闸门内（多了一条规则与角色说明）', host.chars.total <= 30000, `实际 ${host.chars.total}`)
+console.log(`     主播版材料字符：system ${host.chars.system} + user ${host.chars.user} = ${host.chars.total}`)
+const hostEn = fixturePrompt({ role: 'host', language: 'en-US' })
+has('英文主播版：任务说的是主播', hostEn.user, '**streamer** profile')
+has('英文主播版：发言样本那一节换了标题', hostEn.user, '7. Message samples he himself posted')
+not('英文主播版里没有中文残留', hostEn.user, '主播类型名')
+not('英文观众版里没有主播专属角度', en.user, 'streaming style and scripting')
+
+console.log('\n=== 12. 成本（材料字符数 ≈ 输入 token 预算）')
 const chars = prompt.chars
 console.log(
   `     材料字符：system ${chars.system} + user ${chars.user} = ${chars.total}（约 ${Math.round(chars.total / 2)} token 量级）`

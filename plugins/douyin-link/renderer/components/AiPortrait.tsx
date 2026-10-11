@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Button, Modal, Tag } from 'antd'
+import { Button, Modal, Segmented, Tag } from 'antd'
 import { RiFileTextLine, RiQuillPenLine, RiRefreshLine, RiStopCircleLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AiPortrait,
   AiPortraitFailure,
   AiPortraitReport,
+  AiPortraitRole,
   AiPortraitState
 } from '../../shared/types'
 import { partialPortraitReport } from '../../shared/ai-portrait'
@@ -31,6 +32,11 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
  *    画像一节一节省出来，而不是贴半截 JSON、也不是对着转圈等一分钟；
  * 3. **数据变了要说**：生成时的互动量记在画像里，之后又攒了新数据就提示「可重新生成」，
  *    不装作画像永远新鲜；「重新生成」会把上一版喂回模型做**迭代**（版本号 +1）。
+ *
+ * 4. **观众与主播分开**（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，
+ *    两者分开，现在都是按照用户的内容进行分析了」）：弹窗上那枚「分析角色」分段控件默认落在
+ *    **数据判定的那个角色**上（服务层按「此刻在麦上 / 历史麦位 / 收礼方向」判定），用户随时可以改。
+ *    两种角色的材料与提问都不同，缓存也各存一份——切回去不重新花钱。
  */
 export function AiPortraitModal(props: {
   /** 档案静态字段按房间取（与弹窗上显示的那份口径一致）；大屏模式传空串 */
@@ -52,6 +58,15 @@ export function AiPortraitModal(props: {
   /** 看模型原文（结构化成功时也能看：它是这次生成的原始证据） */
   const [showRaw, setShowRaw] = useState(false)
   /**
+   * 当前在看哪个角色的那一版。
+   *
+   * `null`（还没读到状态）= 让主进程按数据判定；读到之后就是主进程回的那个角色。
+   * 用 ref 与 state 两份：state 驱动渲染，ref 给异步回调（`load` / 流式收尾）读当前值，
+   * 免得它们各自闭包住一份旧的角色。
+   */
+  const [role, setRole] = useState<AiPortraitRole>('viewer')
+  const roleRef = useRef<AiPortraitRole | null>(null)
+  /**
    * 只认「这一次生成」的增量。
    *
    * 主进程自己生成 requestId，界面事先不知道，所以：开始生成时打开闸门，**第一条增量**到了
@@ -60,18 +75,26 @@ export function AiPortraitModal(props: {
   const requestRef = useRef('')
   const acceptingRef = useRef(false)
 
+  /** 把一次状态回话落到界面上（角色、生成态、流式闸门一起对齐） */
+  const applyState = useCallback((next: AiPortraitState): void => {
+    setState(next)
+    roleRef.current = next.role
+    setRole(next.role)
+    acceptingRef.current = next.running
+    setGenerating(next.running)
+  }, [])
+
   /**
    * 拉一次状态。
    *
    * 主进程说「正在生成」时**把闸门打开**：别的窗口发起的那一次，我们接着看它的流
    * （`done` 到了会再调一次这个函数拿最终结果）；否则把生成态收掉。
+   * 角色沿用 `roleRef`（生成收尾后重新拉这一次，必须还是刚才那一版，不能跳回判定值）。
    */
   const load = useCallback(async (): Promise<void> => {
-    const next = await api.aiPortrait(props.userId)
-    setState(next)
-    acceptingRef.current = next.running
-    setGenerating(next.running)
-  }, [props.userId])
+    const next = await api.aiPortrait(props.userId, props.webRid, roleRef.current ?? undefined)
+    applyState(next)
+  }, [applyState, props.userId, props.webRid])
 
   useEffect(() => {
     let alive = true
@@ -80,6 +103,8 @@ export function AiPortraitModal(props: {
     setShowRaw(false)
     requestRef.current = ''
     acceptingRef.current = false
+    /** 换了人：角色回到「让主进程判定」（不清掉的话，上一个人是主播会让这个人一进来就是主播那版） */
+    roleRef.current = null
     /**
      * 没开（`userId` 为空）就**什么都不查**：弹窗是常驻挂载的（antd 只在第一次 open 后保留节点），
      * 空 id 也去问一次主进程，白跑一趟查询、还会在别的弹窗开着时留下一次无意义的通道调用
@@ -94,14 +119,10 @@ export function AiPortraitModal(props: {
     }
     setLoading(true)
     void api
-      .aiPortrait(props.userId)
+      .aiPortrait(props.userId, props.webRid)
       .then((next) => {
         if (!alive) return
-        setState(next)
-        if (next.running) {
-          acceptingRef.current = true
-          setGenerating(true)
-        }
+        applyState(next)
       })
       .catch(() => undefined)
       .finally(() => {
@@ -110,7 +131,33 @@ export function AiPortraitModal(props: {
     return () => {
       alive = false
     }
-  }, [props.userId])
+  }, [applyState, props.userId, props.webRid])
+
+  /**
+   * 切角色：**当场换控件，再去读那一版的缓存**（各存各的，切回去不重新花钱）。
+   *
+   * 生成过程中不允许切（控件那时是禁用的）：流式增量是一段纯文本，正看着 A 的流却切到 B，
+   * 那半截正文就会挂在 B 的标题下面——宁可不给切，也不要显示一个配错角色的画像。
+   */
+  const switchRole = useCallback(
+    (next: AiPortraitRole): void => {
+      if (generating || next === roleRef.current) return
+      roleRef.current = next
+      setRole(next)
+      setFailure(null)
+      setStreamed('')
+      setShowRaw(false)
+      requestRef.current = ''
+      acceptingRef.current = false
+      setLoading(true)
+      void api
+        .aiPortrait(props.userId, props.webRid, next)
+        .then((state) => applyState(state))
+        .catch(() => undefined)
+        .finally(() => setLoading(false))
+    },
+    [applyState, generating, props.userId, props.webRid]
+  )
 
   /** 流式增量：先认 id，再累积；`done` 到了就把最终结果拉一次 */
   useEffect(() => {
@@ -136,7 +183,7 @@ export function AiPortraitModal(props: {
       requestRef.current = ''
       acceptingRef.current = true
       void api
-        .aiPortraitGenerate(props.webRid, props.userId, force)
+        .aiPortraitGenerate(props.webRid, props.userId, force, roleRef.current ?? undefined)
         .then((result) => {
           acceptingRef.current = false
           if (!result.ok) {
@@ -259,6 +306,46 @@ export function AiPortraitModal(props: {
             </span>
           </div>
 
+          {/*
+            分析角色：默认落在**数据判定的那个角色**上（服务层按「此刻在麦上 / 历史麦位 / 收礼方向」
+            判定），用户可以改。生成过程中禁用——流式增量是一段纯文本，切了角色就会挂错标题。
+            分段控件上的 `data-rb-portrait-role` 是给工装定位用的（jsdom 里按文案找元素太脆）。
+          */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-[11px] leading-4 opacity-60">{t('douyin-link.users.aiRoleLabel')}</span>
+            <span data-rb-portrait-role={role}>
+              <Segmented
+                size="small"
+                value={role}
+                disabled={generating}
+                onChange={(value) => switchRole(value as AiPortraitRole)}
+                options={[
+                  {
+                    label: <span data-rb-portrait-role-option="viewer">{t('douyin-link.users.aiRoleViewer')}</span>,
+                    value: 'viewer'
+                  },
+                  {
+                    label: <span data-rb-portrait-role-option="host">{t('douyin-link.users.aiRoleHost')}</span>,
+                    value: 'host'
+                  }
+                ]}
+              />
+            </span>
+            {state ? (
+              <span
+                className="text-[11px] leading-4 opacity-50"
+                data-rb-portrait-role-detected={state.detectedRole}
+              >
+                {t('douyin-link.users.aiRoleDetected', { role: roleName(t, state.detectedRole) })}
+              </span>
+            ) : null}
+          </div>
+
+          {/* 还没生成过这一版时才解释「两个角色有什么不同」——有正文时版面留给正文 */}
+          {!loading && !generating && !portrait ? (
+            <span className="text-[11px] leading-4 opacity-50">{t('douyin-link.users.aiRoleHint')}</span>
+          ) : null}
+
           {/* 数据涨了就如实说：生成时记下的互动量 vs 现在的互动量 */}
           {portrait && !generating && gained > 0 ? (
             <span className="text-[11px] leading-4" style={{ color: palette.warn }}>
@@ -282,7 +369,7 @@ export function AiPortraitModal(props: {
             <>
               {generating ? <GeneratingLine t={t} chars={streamed.length} palette={palette} /> : null}
               {report ? (
-                <ReportView report={report} palette={palette} t={t} />
+                <ReportView report={report} role={role} palette={palette} t={t} />
               ) : generating ? null : portrait && portrait.raw ? (
                 /* 结构化失败（模型没按 JSON 回）：**不丢内容**，按原文显示 */
                 <>
@@ -297,6 +384,7 @@ export function AiPortraitModal(props: {
               ) : (
                 <EmptyState
                   t={t}
+                  role={role}
                   modelLabel={modelLabel}
                   hasModel={Boolean(modelLabel)}
                   onClick={() => generate(false)}
@@ -323,16 +411,27 @@ export function AiPortraitModal(props: {
   )
 }
 
+/** 角色名（分段控件、说明句与「数据判断」都用它，避免同一个词在两处写法不同） */
+function roleName(t: Translate, role: AiPortraitRole): string {
+  return role === 'host' ? t('douyin-link.users.aiRoleHost') : t('douyin-link.users.aiRoleViewer')
+}
+
 /** 还没生成过：把「会花 token、用哪个模型」说在点按钮之前 */
 function EmptyState(props: {
   t: Translate
+  /** 这一版分析的是谁（说明句按角色换：问观众和问主播不是同一件事） */
+  role: AiPortraitRole
   modelLabel: string
   hasModel: boolean
   onClick: () => void
 }): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-xs leading-5 opacity-75">{props.t('douyin-link.users.aiIntro')}</span>
+      <span className="text-xs leading-5 opacity-75">
+        {props.role === 'host'
+          ? props.t('douyin-link.users.aiIntroHost')
+          : props.t('douyin-link.users.aiIntroViewer')}
+      </span>
       <span className="text-[11px] leading-4 opacity-60">
         {props.hasModel
           ? props.t('douyin-link.users.aiWillUse', { model: props.modelLabel })
@@ -373,10 +472,12 @@ function GeneratingLine(props: { t: Translate; chars: number; palette: PluginPal
  */
 function ReportView(props: {
   report: AiPortraitReport
+  /** 主播那一版的建议是「直接对这位主播说怎么播」，标题也不同 */
+  role: AiPortraitRole
   palette: PluginPalette
   t: Translate
 }): React.JSX.Element {
-  const { report, palette, t } = props
+  const { report, role, palette, t } = props
   return (
     <div className="flex flex-col gap-3">
       {report.persona || report.headline ? (
@@ -429,7 +530,11 @@ function ReportView(props: {
 
       {report.suggestions.length > 0 ? (
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium">{t('douyin-link.users.aiSuggestionsTitle')}</span>
+          <span className="text-xs font-medium">
+            {role === 'host'
+              ? t('douyin-link.users.aiSuggestionsTitleHost')
+              : t('douyin-link.users.aiSuggestionsTitle')}
+          </span>
           {report.suggestions.map((item, index) => (
             <span key={index} className="flex items-start gap-1 text-[11px] leading-4 opacity-80">
               <span className="tabular-nums opacity-60">{index + 1}.</span>

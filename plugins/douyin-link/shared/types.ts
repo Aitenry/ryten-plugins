@@ -1100,6 +1100,21 @@ export interface UserAnalysis {
 /* ------------------------------------------------------------------- AI 画像 */
 
 /**
+ * 画像要分析的是**哪一侧**（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，
+ * 两者分开，现在都是按照用户的内容进行分析了」）。
+ *
+ * 同一个人在数据里可能是**两种完全不同的角色**，要问的问题根本不是一套：
+ *
+ * - `viewer` **观众**：他是谁、为什么留在这个直播间、消费与情感结构、该怎么维护他；
+ * - `host` **主播**：他的直播风格与话术、内容与才艺、怎么和观众互动、靠什么把人留住、
+ *   收益与连麦关系（语音房里常常一场有好几个主播，麦上发言是他的「工作输出」而不是观众的反馈）。
+ *
+ * 所以角色不只是换个标题：**材料侧重与提问都要换**，缓存也要分开（见 `portraitKeyOf`）。
+ * 界面默认用数据自动判定的那个角色，用户可以手动改（个播 / 房间播里同一个人两边都当过很常见）。
+ */
+export type AiPortraitRole = 'viewer' | 'host'
+
+/**
  * AI 画像的**一节**：小标题 + 若干条目（每条一句话）。
  *
  * 为什么让模型自己定小标题（而不是固定枚举）：确定性画像已经回答不了「他的语言风格像什么人、
@@ -1170,10 +1185,12 @@ export interface AiPortraitModelInfo {
  * 「这份画像是什么时候、用哪个模型、基于多少条互动生成的」以及**数据涨了没有**。
  */
 export interface AiPortrait extends AiPortraitModelInfo {
-  /** 缓存键（`identity:<id>` 或 `user:<id>`，见 shared/ai-portrait.ts） */
+  /** 缓存键（`identity:<id>:<role>` 或 `user:<id>:<role>`，见 shared/ai-portrait.ts） */
   key: string
   /** 画像锚点（弹窗上那个 id） */
   userId: string
+  /** 这一版是按哪个角色生成的（观众 / 主播） */
+  role: AiPortraitRole
   /** 版本号（第几次生成；每次重新生成 +1 —— 用户可以不断叠加着刷新它） */
   version: number
   /** 结构化报告（模型没按 JSON 回时为 null，此时正文在 `raw` 里） */
@@ -1210,8 +1227,12 @@ export type AiPortraitFailure = 'no-model' | 'model-failed' | 'busy' | 'no-data'
 
 /** 打开弹窗时要的全部状态（缓存 + 数据侧现状 + 模型清单 + 是否正在生成） */
 export interface AiPortraitState {
-  /** 已生成的画像（没生成过 = null） */
+  /** 已生成的画像（没生成过 = null）——按 `role` 取的那一版 */
   portrait: AiPortrait | null
+  /** 界面当前在看哪个角色那一版（用户可以切；两个角色各存各的缓存） */
+  role: AiPortraitRole
+  /** 数据侧自动判定的角色（界面用它做默认值） */
+  detectedRole: AiPortraitRole
   /** 当前数据侧的指纹与互动量（用来判断「要不要重新生成」） */
   current: { fingerprint: string; interactions: number }
   /** 现在有没有一次生成在跑（弹窗打开时若在跑，界面直接进流式态） */

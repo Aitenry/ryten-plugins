@@ -151,10 +151,12 @@ const REPORT = {
 
 const AI_REPORT_RAW = '```json\n' + JSON.stringify(REPORT, null, 1) + '\n```'
 
-/** 状态（工装逐段改它来验不同场景）；画像**按人存**，这样换人才不会串味 */
+/** 状态（工装逐段改它来验不同场景）；画像**按人 + 角色**存，这样换人和换角色都不会串味 */
 const state = {
-  /** userId → 已生成的画像 */
+  /** `${userId}:${role}` → 已生成的画像（与真插件同一口径：观众 / 主播各存一份） */
   portraits: {},
+  /** 主进程自动判定的角色（工装按人给） */
+  detected: {},
   current: { fingerprint: 'a:1', interactions: 178 },
   running: false,
   models: [{ id: 3, name: '工装供应商', model: 'workbench-model', isDefault: true }],
@@ -162,16 +164,24 @@ const state = {
   /** 生成回话（工装改它来验失败路径） */
   generateResult: null
 }
+const portraitKey = (userId, role) => `${userId}:${role ?? 'viewer'}`
 
 const calls = []
 /** 事件订阅：把回调存下来，工装自己推流式增量 */
 const listeners = new Map()
 
 /** 造一版成品（版本号由调用方给）：`generate` 与「挂住的生成」都用它 */
-function makePortrait(userId, version, fingerprint = state.current.fingerprint, interactions = state.current.interactions) {
+function makePortrait(
+  userId,
+  version,
+  fingerprint = state.current.fingerprint,
+  interactions = state.current.interactions,
+  role = 'viewer'
+) {
   return {
-    key: `user:${userId}`,
+    key: `user:${userId}:${role}`,
     userId,
+    role,
     version,
     providerId: 3,
     providerName: '工装供应商',
@@ -186,15 +196,34 @@ function makePortrait(userId, version, fingerprint = state.current.fingerprint, 
   }
 }
 
-function aiPortrait(userId) {
-  return { ...state, portrait: state.portraits[String(userId ?? '')] ?? null }
+/** 界面没指定角色时，主进程按数据判定（这里按人给一个固定答案） */
+const roleOf = (userId, role) =>
+  role === 'host' || role === 'viewer' ? role : (state.detected[String(userId ?? '')] ?? 'viewer')
+
+function aiPortrait(userId, _webRid, role) {
+  const id = String(userId ?? '')
+  const use = roleOf(id, role)
+  return {
+    ...state,
+    portrait: state.portraits[portraitKey(id, use)] ?? null,
+    role: use,
+    detectedRole: state.detected[id] ?? 'viewer'
+  }
 }
 
-/** 生成一版：默认回一份成功的画像（版本按这个人已有画像 +1） */
-function generate(_webRid, userId, force) {
+/** 生成一版：默认回一份成功的画像（版本按这个人**这个角色**已有画像 +1） */
+function generate(_webRid, userId, force, role) {
   if (state.generateResult) return state.generateResult
-  const key = String(userId ?? '')
-  const portrait = makePortrait(key, (state.portraits[key]?.version ?? 0) + 1)
+  const id = String(userId ?? '')
+  const use = roleOf(id, role)
+  const key = portraitKey(id, use)
+  const portrait = makePortrait(
+    id,
+    (state.portraits[key]?.version ?? 0) + 1,
+    state.current.fingerprint,
+    state.current.interactions,
+    use
+  )
   state.portraits[key] = portrait
   return Promise.resolve({ ok: true, portrait })
 }
@@ -246,9 +275,9 @@ const handlers = () => {
   map.set(`${PREFIX}gift-history`, () => ({ rows: [], total: 0 }))
   map.set(`${PREFIX}user-badges`, () => [])
   map.set(`${PREFIX}db-stats`, () => ({}))
-  map.set(`${PREFIX}ai-portrait`, (userId) => aiPortrait(userId))
+  map.set(`${PREFIX}ai-portrait`, (userId, webRid, role) => aiPortrait(userId, webRid, role))
   map.set(`${PREFIX}ai-portrait-models`, () => state.models)
-  map.set(`${PREFIX}ai-portrait-generate`, (webRid, userId, force) => generate(webRid, userId, force))
+  map.set(`${PREFIX}ai-portrait-generate`, (webRid, userId, force, role) => generate(webRid, userId, force, role))
   return map
 }
 
@@ -592,9 +621,9 @@ state.generateResult = new Promise((resolve) => {
 })
 await click(generateButton)
 eq(
-  '调用生成通道时带上了房间、人和 force=false',
+  '调用生成通道时带上了房间、人、force=false 与角色',
   calls.filter((entry) => entry.channel === `${PREFIX}ai-portrait-generate`).map((entry) => entry.args),
-  [[ROOM, USER.userId, false]]
+  [[ROOM, USER.userId, false, 'viewer']]
 )
 const push = async (delta) => {
   await act(async () => {
@@ -624,7 +653,7 @@ await settle(200)
 console.log('\n=== 4. 完成后：正文、证据、建议、局限、元信息都在')
 // 放行那次生成：回一份「主进程已落库」的成功结果（界面据此拉一次状态，拿到成品）
 const finishedPortrait = makePortrait(USER.userId, 2)
-state.portraits[USER.userId] = finishedPortrait
+state.portraits[portraitKey(USER.userId, 'viewer')] = finishedPortrait
 await act(async () => {
   finishGenerate({ ok: true, portrait: finishedPortrait })
   state.generateResult = null
@@ -679,7 +708,7 @@ check(
 has('缓存里仍然只有「重新生成」可点', switched.back, texts.users.aiRegenerate)
 
 console.log('\n=== 7. 数据涨了要提示；数据没变不提示；结构化失败按原文显示')
-const portraitOf = () => state.portraits[USER.userId]
+const portraitOf = () => state.portraits[portraitKey(USER.userId, 'viewer')]
 // 生成时记的互动量是 178，现在涨到 206 → 换人重载时要提示「可重新生成」
 state.current = { fingerprint: 'a:2', interactions: 206 }
 const grewText = (await switchToOtherThenBack()).back
@@ -696,7 +725,7 @@ const freshText = (await switchToOtherThenBack()).back
 not('从没生成过时不提示「可重新生成」', freshText, '又攒了')
 has('从没生成过时给空态', freshText, texts.users.aiGenerate)
 // 结构化失败：report 为 null、raw 有内容 → 按原文显示，不丢模型写的东西
-state.portraits[USER.userId] = { ...makePortrait(USER.userId, 1), report: null, raw: '模型今天没按 JSON 回，这是一整段散文式画像。' }
+state.portraits[portraitKey(USER.userId, 'viewer')] = { ...makePortrait(USER.userId, 1), report: null, raw: '模型今天没按 JSON 回，这是一整段散文式画像。' }
 const rawText = (await switchToOtherThenBack()).back
 has('结构化失败时说明一句', rawText, texts.users.aiUnstructured)
 has('原文照样显示（内容不丢）', rawText, '这是一整段散文式画像')
@@ -732,8 +761,8 @@ check('生成按钮被禁用', disabled?.disabled === true || disabled?.getAttri
 console.log('\n=== 10. 换人之后「数据已更新」的基准也跟着换（不是拿别人的数去比）')
 state.models = [{ id: 3, name: '工装供应商', model: 'workbench-model', isDefault: true }]
 state.portraits = {
-  [USER.userId]: makePortrait(USER.userId, 1, 'a:1', 178),
-  [OTHER.userId]: makePortrait(OTHER.userId, 3, 'a:9', 100)
+  [portraitKey(USER.userId, 'viewer')]: makePortrait(USER.userId, 1, 'a:1', 178),
+  [portraitKey(OTHER.userId, 'viewer')]: makePortrait(OTHER.userId, 3, 'a:9', 100)
 }
 // 现状是 a:2 / 206：小张（a:1/178）该提示 +28；别人（a:9/100）该按**他自己的**基准算 +106
 state.current = { fingerprint: 'a:2', interactions: 206 }
@@ -797,6 +826,97 @@ check(
   cancelledText.slice(0, 160)
 )
 state.generateResult = null
+
+console.log('\n=== 12. 观众 / 主播：默认落数据判定的那个角色，可手动切，两个角色各存一份')
+/*
+ * 用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开，
+ * 现在都是按照用户的内容进行分析了」。这一段钉三件事：
+ * ① 弹窗上有角色控件，默认值是**主进程判定的角色**（不是写死观众）；
+ * ② 切角色 = 换一份缓存与提示词（同一个人的两版互不覆盖），切回来直接读缓存、不再花钱；
+ * ③ 生成时把当前角色传下去（否则材料还是观众那套，等于没改）。
+ */
+state.models = [{ id: 3, name: '工装供应商', model: 'workbench-model', isDefault: true }]
+state.portraits = {}
+state.detected = { [USER.userId]: 'host' }
+state.current = { fingerprint: 'a:1', interactions: 178 }
+
+/** 分段控件：点它的单选 input（label 在 jsdom 里不一定带动 input，失败就重试） */
+const segmentedInput = (value) => {
+  const label = doc.querySelector(`[data-rb-portrait-role-option="${value}"]`)?.closest('label')
+  return label?.querySelector('input') ?? null
+}
+const currentRole = () => doc.querySelector('[data-rb-portrait-role]')?.getAttribute('data-rb-portrait-role')
+const switchRole = async (value) => {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await click(segmentedInput(value) ?? doc.querySelector(`[data-rb-portrait-role-option="${value}"]`))
+    if (currentRole() === value) return true
+  }
+  return false
+}
+
+const hostDefault = (await switchToOtherThenBack()).back
+has('角色控件在弹窗上', hostDefault, texts.users.aiRoleLabel)
+has(
+  '数据判定成主播时，默认就落在主播那一版',
+  hostDefault,
+  texts.users.aiRoleDetected.replace('{{role}}', texts.users.aiRoleHost)
+)
+eq('控件上的当前角色是主播', currentRole(), 'host')
+has('空态说明按主播口径写', hostDefault, '直播风格')
+not('空态说明不再用观众那段话', hostDefault, '为什么留在这里')
+
+calls.length = 0
+check('切到观众那一版', await switchRole('viewer'))
+eq(
+  '切角色时按角色重新查了状态',
+  calls.filter((entry) => entry.channel === `${PREFIX}ai-portrait`).map((entry) => entry.args[2]),
+  ['viewer']
+)
+const viewerEmpty = modalText()
+has('切过去是这一版的空态（还没生成过）', viewerEmpty, texts.users.aiGenerate)
+has(
+  '观众那一版的分段控件落在观众上',
+  viewerEmpty,
+  texts.users.aiRoleDetected.replace('{{role}}', texts.users.aiRoleHost)
+)
+
+/** 在观众这一版生成一次：传下去的角色必须是 viewer */
+state.detected[USER.userId] = 'viewer'
+await click(buttonByText(texts.users.aiGenerate))
+await settle(300)
+eq(
+  '观众那一版把 viewer 传给了主进程',
+  calls.filter((entry) => entry.channel === `${PREFIX}ai-portrait-generate`).map((entry) => entry.args[3]),
+  ['viewer']
+)
+eq('观众那一版落的是 <id>:viewer', state.portraits[portraitKey(USER.userId, 'viewer')]?.version, 1)
+
+/** 再切到主播那一版生成：两版并存、各自的版本号自己算 */
+state.detected[USER.userId] = 'host'
+calls.length = 0
+check('切到主播那一版', await switchRole('host'))
+has('主播那一版还是空态（与观众那一版互不覆盖）', modalText(), texts.users.aiGenerate)
+await click(buttonByText(texts.users.aiGenerate))
+await settle(300)
+eq(
+  '主播那一版把 host 传给了主进程',
+  calls.filter((entry) => entry.channel === `${PREFIX}ai-portrait-generate`).map((entry) => entry.args[3]),
+  ['host']
+)
+eq(
+  '两个角色各存一版（版本各自从 1 开始）',
+  [
+    state.portraits[portraitKey(USER.userId, 'viewer')]?.version,
+    state.portraits[portraitKey(USER.userId, 'host')]?.version
+  ],
+  [1, 1]
+)
+has('主播那一版生成完有成品（不是空态）', modalText(), texts.users.aiRegenerate)
+
+calls.length = 0
+check('切回观众那一版', await switchRole('viewer'))
+eq('切回来读的是缓存，没有再调模型', calls.some((entry) => entry.channel === `${PREFIX}ai-portrait-generate`), false)
+has('切回来直接显示观众那一版的成品', modalText(), '夜聊型陪伴者')
 
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项未通过`}`)
 process.exit(failures === 0 ? 0 : 1)

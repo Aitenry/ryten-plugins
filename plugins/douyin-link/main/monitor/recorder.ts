@@ -114,6 +114,12 @@ export class RoomRecorder {
   /** 麦位：用户 id → 麦位序号（1 起）。聊天室才有，重连后由推送刷新 */
   private micSeats = new Map<string, number>()
   /**
+   * **本场见过在麦上的人**（粘性，含房间主播）：写进 `douyin_link_users.on_mic`。
+   * 为什么单独记：麦位表会被下一次同步清掉（`micSeats.clear()`），而下麦的人也算主播；
+   * AI 画像据此把主播与观众分开（用户 2026-10-13）。
+   */
+  private everOnMic = new Set<string>()
+  /**
    * **收礼人推断的房间上下文**（见 `shared/gift-recipient.ts`）。
    *
    * 帧里不给收礼人时（个播一律不给，真库实测 4077/4077），落库前得补上，否则收礼物榜整张空着。
@@ -170,6 +176,10 @@ export class RoomRecorder {
       if (!id) return
       if (!this.micSeats.has(id)) this.micSeats.set(id, index + 1)
       this.notePresence(id, at)
+      // 「见过他在麦上」是**粘性**的：AI 画像据此把主播与观众分开（见 schema 的 on_mic 注释）。
+      // 只加进 everOnMic 还不够——这一行档案得真写进库，所以也排一次队（统计可能是 0）。
+      this.everOnMic.add(id)
+      this.pendingUsers.add(id)
     })
   }
 
@@ -187,7 +197,12 @@ export class RoomRecorder {
     if (!user?.id) return
     this.anchorId = user.id
     this.anchorName = user.nickname || this.anchorName
-    if (this.userMap.has(user.id)) return
+    // 房间主播也是「在麦上的人」：AI 画像据此把他判成主播（个播尤其只有这一条线索）
+    this.everOnMic.add(user.id)
+    if (this.userMap.has(user.id)) {
+      this.pendingUsers.add(user.id)
+      return
+    }
     this.userMap.set(user.id, {
       profile: { ...user, firstSeen: 0, lastSeen: 0, stats: emptyStats() },
       delta: emptyStats()
@@ -206,6 +221,18 @@ export class RoomRecorder {
   /** 某人的麦位序号（0 = 不在麦上） */
   seatOf(userId: string): number {
     return this.micSeats.get(userId) ?? 0
+  }
+
+  /**
+   * 这个人**此刻是不是本场的主播**（AI 画像的角色判定要用的运行态信号，见 `main/portrait.ts`）。
+   *
+   * 两条都算：在麦位上（房间播 / 语音房里一场可能好几个），或他就是本房间主播（个播常常
+   * 只有主播资料、没有麦位表）。这只是**当时**的状态，历史状态由库里的粘性列兜底。
+   */
+  isHostOnAir(userId: string): boolean {
+    const id = String(userId ?? '')
+    if (!id) return false
+    return this.micSeats.has(id) || (!!this.anchorId && this.anchorId === id)
   }
 
   /** 本场的在场清单（「在线观众」用；按最近出现倒序） */
@@ -457,7 +484,9 @@ export class RoomRecorder {
         secUid: entry.profile.secUid,
         delta: { ...delta },
         firstSeen: entry.profile.firstSeen,
-        lastSeen: entry.profile.lastSeen
+        lastSeen: entry.profile.lastSeen,
+        // 本场见过他在麦上（含房间主播）→ 落库时按 `on_mic OR EXCLUDED.on_mic` 记住（粘性）
+        onMic: this.everOnMic.has(id)
       })
       // 写过的增量清零（静态信息留着，下次他有新帧时再补空字段）
       entry.delta = emptyStats()

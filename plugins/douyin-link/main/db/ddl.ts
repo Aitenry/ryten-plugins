@@ -135,6 +135,7 @@ const DDL: string[] = [
      portrait_key  TEXT PRIMARY KEY,
      user_id       TEXT NOT NULL DEFAULT '',
      identity_id   BIGINT NOT NULL DEFAULT 0,
+     role          TEXT NOT NULL DEFAULT 'viewer',
      version       INTEGER NOT NULL DEFAULT 0,
      provider_id   INTEGER NOT NULL DEFAULT 0,
      provider_name TEXT NOT NULL DEFAULT '',
@@ -149,6 +150,14 @@ const DDL: string[] = [
      generated_at  DOUBLE PRECISION NOT NULL DEFAULT 0,
      updated_at    DOUBLE PRECISION NOT NULL DEFAULT 0
    )`,
+  /**
+   * AI 画像的**角色**（0.15.32 起）：`viewer` = 观众画像，`host` = 主播画像。
+   *
+   * 用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开」。
+   * 角色进了缓存键（`identity:<id>:<viewer|host>`），老库里 `identity:<id>` 那样的旧行自然过期，
+   * 不需要迁移内容；这条 ALTER 只保证**已有库**也有这一列（旧行按观众读）。
+   */
+  `ALTER TABLE douyin_link_user_portraits ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'viewer'`,
   /**
    * 礼物功能的列迁移（**幂等**，0.7.1 起）。
    *
@@ -175,6 +184,12 @@ const DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_room_order ON douyin_link_messages (web_rid, order_key)`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
+  /**
+   * **见过他在麦上**（0.15.32 起，粘性）：AI 画像要分清主播与观众（用户 2026-10-13）。
+   * 麦位是运行态（`recorder.micSeats`），关掉应用就没了，所以把「见过他在麦上」落成布尔列，
+   * 写入端只做 `on_mic OR EXCLUDED.on_mic`（一旦 true 不再回退）。
+   */
+  `ALTER TABLE douyin_link_users ADD COLUMN IF NOT EXISTS on_mic BOOLEAN NOT NULL DEFAULT FALSE`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
   `DROP INDEX IF EXISTS idx_douyin_link_user_room_diamonds`,

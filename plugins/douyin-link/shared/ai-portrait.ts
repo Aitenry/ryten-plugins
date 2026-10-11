@@ -1,6 +1,7 @@
 import type {
   AiPortraitEvidence,
   AiPortraitReport,
+  AiPortraitRole,
   AiPortraitSection
 } from './types'
 
@@ -46,11 +47,16 @@ export const PORTRAIT_LIMITS = {
  * 绑定过账号的人（`identityId > 0`）用**画像**做键：他的几个号共用一版 AI 画像——
  * 与 `userAnalysis`（跨账号合并）、礼物日历同一口径（用户 2026-10-10：「换个房间看同一个人结论不变」）。
  * 没绑定的就用 id 自己做键。绑/解绑会换键，旧的那一版留在库里（重新绑回来还能用）。
+ *
+ * **角色也在键里**（用户 2026-10-13：「应该是分析主播…和用户，两者分开」）：
+ * 同一个人既可能是麦上主播也可能是观众，两份画像的**材料与提问都不一样**，
+ * 所以 `user:7001:viewer` 与 `user:7001:host` 是两条独立缓存——切回去不必重新花钱。
  */
-export function portraitKeyOf(identityId: number, userId: string): string {
+export function portraitKeyOf(identityId: number, userId: string, role: AiPortraitRole = 'viewer'): string {
   const id = String(userId ?? '').trim()
-  if (identityId > 0) return `identity:${identityId}`
-  return `user:${id}`
+  const suffix = role === 'host' ? ':host' : ':viewer'
+  if (identityId > 0) return `identity:${identityId}${suffix}`
+  return `user:${id}${suffix}`
 }
 
 /** 指纹用的那几项（字段名与 `UserTotalsRow` / `UserAnalysisData` 对齐：`like` / `follow`） */

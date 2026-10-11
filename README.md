@@ -86,15 +86,18 @@ The AI portrait spends real money (one LLM call per generation), so its checks a
 Everything below runs the **real** code (prompt packing, report parsing, generation service, renderer bundle):
 
 ```bash
-# 1. prompt + parser contract, offline: what the model is told, what it may return, how bad replies are handled
+# 1. prompt + parser contract, offline: what the model is told, what it may return, how bad replies are
+#    handled, and that the viewer / host variants ask different questions over the *same* facts
 node plugins/douyin-link/spike/ai-portrait-contract-check.mjs
 
 # 2. the whole generation chain against a real PGlite copy, with a scripted model (streaming, caching,
-#    busy guard, no-model/no-data guards, failure must not destroy an existing portrait, provider fallback)
+#    busy guard, no-model/no-data guards, failure must not destroy an existing portrait, provider fallback,
+#    role detection — on mic / sticky on_mic / gift direction — and one cached portrait per role)
 node plugins/douyin-link/spike/ai-portrait-model-check.mjs "$env:TEMP\rbdb-copy"
 
 # 3. the real renderer bundle in jsdom: entry icon, no spending before the user clicks, live streaming,
-#    full report, cached reopen, "data grew" hint, all four failure texts, disabled button without a model
+#    full report, cached reopen, "data grew" hint, all four failure texts, disabled button without a model,
+#    and the role switch (defaults to the detected role, switches materials, one cache per role)
 node plugins/douyin-link/spike/ai-portrait-render-check.mjs
 
 # 4. ONE real model call on real data (opt in with --live; without it, dry-run and cost preview only)
@@ -115,6 +118,12 @@ fixes (52s, 2,114 chars of content with `think: false`).
 
 The live probe decrypts the host's provider API key (same PBKDF2 + AES-256-GCM derivation as
 `src/main/crypto/provider-key.ts`) from a **copy** of the database and prints counts, never the key.
+
+Hosts and viewers are profiled separately (2026-10-13: "hosts — solo shows and voice rooms with several
+hosts — and viewers must be analysed apart, right now everything is analysed as a viewer"). The role is
+**detected from data** (on mic right now, or ever seen on a mic seat in `douyin_link_users.on_mic`, or
+received ≥2 gifts worth more than the diamonds they sent), the modal defaults to it, and the user can
+override it — both roles keep their own cached portrait and their own version counter.
 
 ## Releasing
 

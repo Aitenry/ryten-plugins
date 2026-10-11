@@ -380,6 +380,16 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       aiButton: 'AI portrait (LLM)',
       aiTitle: 'AI portrait',
       aiScopeHint: 'LLM interpretation · all rooms combined',
+      /*
+       * Who is being analysed (2026-10-13: hosts and viewers must be profiled separately —
+       * the same log answers two different questions).
+       */
+      aiRoleLabel: 'Analysing',
+      aiRoleViewer: 'Viewer',
+      aiRoleHost: 'Streamer',
+      aiRoleDetected: 'data suggests: {{role}}',
+      aiRoleHint:
+        'Streamer profiles cover streaming style, scripting, interaction and revenue structure; viewer profiles cover spending motives and relationship stage. Both are stored separately, so switching back costs nothing.',
       aiModel: 'Model',
       aiVersion: 'v{{n}}',
       aiGeneratedAt: 'generated',
@@ -393,14 +403,17 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       aiThinking: 'Generating — the model is still thinking… (a small local model may reason silently for minutes)',
       aiWriting: 'Generating… ({{n}} characters so far)',
       aiStop: 'Stop',
-      aiIntro:
+      aiIntroViewer:
         'This portrait is written by an LLM: it receives the interaction numbers, the user\u2019s own comments, the gift stream and the behavioural traits the algorithm computed, and writes an interpretation of who this person is, why they stay and how to keep them. Each generation is stored, so opening this again costs nothing.',
+      aiIntroHost:
+        'This portrait is written by an LLM: it receives the streamer\u2019s own messages, the gift and revenue stream, the interaction structure and the behavioural traits the algorithm computed, and writes an interpretation of his streaming style, what keeps people in the room and where the revenue comes from. Each generation is stored, so opening this again costs nothing.',
       aiWillUse: 'Will use: {{model}} (change it in the plugin settings)',
       aiNoModel: 'No model available yet: configure an LLM provider in Settings → Models first',
       aiGenerate: 'Generate portrait',
       aiUnstructured: 'The model did not answer in the structured format this time; here is its raw output:',
       aiEvidenceTitle: 'Key evidence',
       aiSuggestionsTitle: 'Retention advice',
+      aiSuggestionsTitleHost: 'Streaming advice',
       aiCaveatsTitle: 'Data limits',
       aiFooter:
         'The factual layer (interaction stats, Big Five proxy, emotion mix) comes from this plugin\u2019s deterministic algorithm and is independent of the interpretation in this dialog, which the LLM wrote from the same material.',

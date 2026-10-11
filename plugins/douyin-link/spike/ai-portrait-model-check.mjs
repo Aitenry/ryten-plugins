@@ -17,7 +17,10 @@
  *  7. 互动太少 → `no-data`（不花钱）；一个可用供应商都没有 → `no-model`（不花钱）；
  *  8. 模型报错 → `model-failed`，而且**已有的画像不被毁**（只有成功才落库）；
  *  9. 流式增量真的推给了界面（分片拼起来 == 模型原文）；
- * 10. 选模型链：设置里指定的 > 宿主默认 > 已启用第一个（指定的那个被删/禁用时要能回落）。
+ * 10. 选模型链：设置里指定的 > 宿主默认 > 已启用第一个（指定的那个被删/禁用时要能回落）；
+ * 11. **观众 / 主播两套**（用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，
+ *     两者分开」）：角色判定（在麦上 / 历史麦位 / 收礼方向）、粘性 `on_mic`、
+ *     两个角色各存一版且各自递增版本、切角色不重算、`cancel` 与 `clear` 覆盖两个角色。
  *
  * 跑法（仓库根目录）：
  *   # A 段（自造数据）总是跑：
@@ -295,6 +298,8 @@ const DAY = 86400000
 const ROOM = '880000000001'
 const USER = '2056511'
 const ANON_USER = 'anon:111111#dou2056511'
+/** 收礼方向的人（主播的画像键带 `:viewer` / `:host` 后缀，工装里统一用这个拼） */
+const keyOf = (userId, role = 'viewer') => `user:${userId}:${role}`
 
 /** 值转 SQL 字面量：一律用 dollar-quoted 字符串，免去引号转义（工装数据里有中文与 emoji） */
 const q = (value) => `$dy$${String(value).replace(/\$dy\$/g, '')}$dy$`
@@ -355,6 +360,7 @@ const stateBefore = await portrait.aiPortraitState({ userId: USER, settings: { p
 eq('还没有画像', stateBefore.portrait, null)
 check('当前数据侧的互动量 > 0', stateBefore.current.interactions > 0, JSON.stringify(stateBefore.current))
 eq('回话里带上选中的模型 id', stateBefore.selectedProviderId, 3)
+eq('默认角色 = 数据判定：观众（他没在麦上、也没收过礼）', [stateBefore.role, stateBefore.detectedRole], ['viewer', 'viewer'])
 eq('此时没有在生成', stateBefore.running, false)
 eq('一个模型都没调用过', modelPlan.calls.length, 0)
 
@@ -400,7 +406,7 @@ has('材料里带上房间名', promptText, '深夜电台（880000000001）')
 has('材料里带上档案静态字段', promptText, '地区 杭州')
 check('第一次生成没有「上一版」这一段', !promptText.includes('上一版画像'), '')
 
-const storedRow = await mapper.getUserPortrait(`user:${USER}`)
+const storedRow = await mapper.getUserPortrait(keyOf(USER))
 check('真的写进了 douyin_link_user_portraits', storedRow !== null)
 eq('库里标了结构化', storedRow?.structured, true)
 eq('库里存的是可解析的报告 JSON', JSON.parse(storedRow?.report ?? '{}').persona, '夜聊型陪伴者')
@@ -424,7 +430,7 @@ const secondPrompt = (modelPlan.calls[1] ?? []).map((message) => message.content
 has('第二次材料里有「上一版画像」这一段', secondPrompt, '上一版画像（第 1 版）')
 has('上一版的内容真的带上了', secondPrompt, '他习惯用夸唱开场')
 has('写明这是迭代而不是从零开始', secondPrompt, '这是一次迭代（不是从零开始）')
-eq('库里版本也更新成 2', (await mapper.getUserPortrait(`user:${USER}`))?.version, 2)
+eq('库里版本也更新成 2', (await mapper.getUserPortrait(keyOf(USER)))?.version, 2)
 
 console.log('\n=== 6. 流式增量真的推给了界面')
 const chunks = sent.filter((entry) => entry.channel === 'plugin:douyin-link:portrait')
@@ -472,7 +478,7 @@ const budgetBackup = { ...portrait.PORTRAIT_BUDGETS }
 // 1.1 秒：够快，而且消息里会说「1 秒没有任何输出」（文案按秒取整）
 portrait.PORTRAIT_BUDGETS.stallMs = 1100
 portrait.PORTRAIT_BUDGETS.totalMs = 60_000
-const beforeStall = await mapper.getUserPortrait(`user:${USER}`)
+const beforeStall = await mapper.getUserPortrait(keyOf(USER))
 modelPlan.mode = 'hang'
 modelPlan.calls.length = 0
 const stalled = await portrait.generateAiPortrait({ userId: USER, webRid: ROOM, profile: null, settings: {}, force: true })
@@ -481,7 +487,7 @@ has('失败文案说清「多少秒没有任何输出」', stalled.detail, '1 �
 has('失败文案给出「已写多少字」', stalled.detail, '已写 0 字符')
 has('失败文案给出本地模型的成因提示', stalled.detail, '本地模型')
 eq('静默超时后 running 归位（不会卡住）', (await portrait.aiPortraitState({ userId: USER, settings: {} })).running, false)
-eq('静默超时**没有**毁掉已有画像', (await mapper.getUserPortrait(`user:${USER}`))?.version, beforeStall?.version)
+eq('静默超时**没有**毁掉已有画像', (await mapper.getUserPortrait(keyOf(USER)))?.version, beforeStall?.version)
 
 // ② 用户点「停止」：假模型挂着，调 cancel
 modelPlan.calls.length = 0
@@ -491,7 +497,7 @@ eq('停止请求找到了在跑的那一次', await portrait.cancelAiPortrait(US
 const cancelled = await toCancel
 eq('停下来是 cancelled（不是错误）', [cancelled.ok, cancelled.reason], [false, 'cancelled'])
 eq('停止之后 running 归位', (await portrait.aiPortraitState({ userId: USER, settings: {} })).running, false)
-eq('停下来也没有毁掉已有画像', (await mapper.getUserPortrait(`user:${USER}`))?.version, beforeStall?.version)
+eq('停下来也没有毁掉已有画像', (await mapper.getUserPortrait(keyOf(USER)))?.version, beforeStall?.version)
 eq('没有在跑的时候再点停止 → false', await portrait.cancelAiPortrait(USER), false)
 modelPlan.mode = 'ok'
 portrait.PORTRAIT_BUDGETS.stallMs = budgetBackup.stallMs
@@ -523,12 +529,12 @@ await portrait.generateAiPortrait({ userId: USER, webRid: ROOM, profile: null, s
 eq('指定的 5 可用 → 就用 5', globalThis.__DY_BUILT_PROVIDERS__, [5])
 
 console.log('\n=== 10. 模型报错：如实报错，且**已有的画像不被毁**')
-const beforeFail = await mapper.getUserPortrait(`user:${USER}`)
+const beforeFail = await mapper.getUserPortrait(keyOf(USER))
 modelPlan.mode = 'throw'
 const failed = await portrait.generateAiPortrait({ userId: USER, webRid: ROOM, profile: null, settings: {}, force: true })
 eq('失败原因是 model-failed', [failed.ok, failed.reason], [false, 'model-failed'])
 has('失败明细里带上了模型的原话', failed.detail, 'HTTP 500')
-const afterFail = await mapper.getUserPortrait(`user:${USER}`)
+const afterFail = await mapper.getUserPortrait(keyOf(USER))
 eq('已有画像原样保留（版本没动）', afterFail?.version, beforeFail?.version)
 eq('已有画像内容也没变', afterFail?.raw, beforeFail?.raw)
 const errorState = await portrait.aiPortraitState({ userId: USER, settings: {} })
@@ -542,19 +548,201 @@ await portrait.generateAiPortrait({ userId: ANON_USER, webRid: ROOM, profile: nu
 const anonPrompt = (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n')
 check('材料里没有 anon: 前缀', !anonPrompt.includes('anon:'), '')
 has('材料里是脱壳后的抖音 id', anonPrompt, '用户 id dou2056511')
-check('匿名的人也真的落库了', (await mapper.getUserPortrait(`user:${ANON_USER}`)) !== null)
+check('匿名的人也真的落库了', (await mapper.getUserPortrait(keyOf(ANON_USER))) !== null)
 
-console.log('\n=== 12. 清数据：AI 画像也在清掉的那一批里')
-const cleared = await mapper.deleteUserPortrait(`user:${USER}`)
+console.log('\n=== 12. 观众 / 主播：判定、两套缓存、两套提示词')
+/*
+ * 这一段的三个工装人物，正好覆盖角色判定的三条证据：
+ * - `HOST`：我们在麦位表里见过他（`on_mic`）**且**收过礼——最像主播的那种；
+ * - `HEUR`：没进过麦位表，但收礼方向明显（收的比送的多）——靠礼物方向判定；
+ * - `USER`：只送礼的普通观众（上面已经验过 → viewer）。
+ */
+const HOST = '2056888'
+const HEUR = '2056777'
+const GIVER = '2056123'
+await seedUser(HOST, { messages: SEED_MESSAGES.slice(0, 6), name: '工装主播小美' })
+await seedUser(HEUR, {
+  messages: [
+    { kind: 'chat', content: '大家晚上好呀', atMs: NOW - 2 * 3600000 },
+    { kind: 'chat', content: '今天播到几点呀', atMs: NOW - 3 * 3600000 }
+  ],
+  name: '收礼的人'
+})
+/** 收礼方向：别人送给他们的礼物（`to_user_id` 才是收礼人） */
+async function seedReceivedGift(toUserId, { atMs, content, count, diamonds }) {
+  await rawQuery(
+    `insert into douyin_link_messages (web_rid, session_id, kind, user_id, user_name, content, count, diamonds, to_user_id, to_user_name, order_key, at_ms) values (` +
+      `${q(ROOM)}, 1, 'gift', ${q(GIVER)}, ${q('送礼的观众')}, ${q(content)}, ${count}, ${diamonds}, ${q(toUserId)}, ${q('收礼人')}, '', ${atMs})`
+  )
+}
+await seedReceivedGift(HOST, { atMs: NOW - 3 * 3600000, content: '大啤酒', count: 3, diamonds: 900 })
+await seedReceivedGift(HOST, { atMs: NOW - 5 * 3600000, content: '比心', count: 4, diamonds: 400 })
+await seedReceivedGift(HEUR, { atMs: NOW - 4 * 3600000, content: '小心心', count: 2, diamonds: 200 })
+await seedReceivedGift(HEUR, { atMs: NOW - 6 * 3600000, content: '花花', count: 1, diamonds: 100 })
+/** 这一场我们见过他在麦位表里 → 写进粘性列（真实写入端是 recorder 的 `takeUserDeltas`） */
+await rawQuery(`update douyin_link_users set on_mic = true where user_id = ${q(HOST)}`)
+
+const hostSignal = await mapper.userHostSignal([HOST])
+eq('主播信号：见过在麦上', hostSignal.onMic, true)
+eq('主播信号：收礼按条数算', hostSignal.receivedGifts, 2)
+eq('角色判定：历史在麦上 → 主播', await portrait.detectPortraitRole({ ids: [HOST] }), 'host')
+eq('角色判定：只有收礼方向像主播 → 主播', await portrait.detectPortraitRole({ ids: [HEUR] }), 'host')
+eq('角色判定：只送礼的观众 → 观众', await portrait.detectPortraitRole({ ids: [USER] }), 'viewer')
+eq(
+  '角色判定：此刻在麦上（运行态，库里还没痕迹）→ 主播',
+  await portrait.detectPortraitRole({ ids: ['2056999'], liveHost: true }),
+  'host'
+)
+eq('角色参数：中文「主播」不认识 → 当没传（自动判定）', portrait.portraitRoleArg('主播'), null)
+eq('角色参数：明确的 host 就认', portrait.portraitRoleArg('host'), 'host')
+eq('角色参数：undefined → null', portrait.portraitRoleArg(undefined), null)
+/*
+ * 粘性：同一场之后又有一批增量说「这一帧没见他在麦上」，`on_mic` 也不能被改回 false
+ * （写入端是 `on_mic OR EXCLUDED.on_mic`）。这条要是坏了，主播画像会在下一批落库后突然变回观众。
+ */
+await mapper.upsertUserDeltas([
+  {
+    webRid: ROOM,
+    userId: HOST,
+    displayId: '',
+    nickname: '工装主播小美',
+    gender: 0,
+    signature: '',
+    city: '',
+    avatar: '',
+    following: 0,
+    follower: 0,
+    honorLevel: 0,
+    fansClubLevel: 0,
+    badges: '[]',
+    secUid: '',
+    onMic: false,
+    delta: { chat: 1, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 },
+    firstSeen: NOW,
+    lastSeen: NOW
+  }
+])
+eq('on_mic 是粘性的（见过一次就不回退）', (await mapper.userHostSignal([HOST])).onMic, true)
+
+const hostState = await portrait.aiPortraitState({ userId: HOST, webRid: ROOM, settings: {} })
+eq('打开弹窗默认落到主播那一版', [hostState.role, hostState.detectedRole], ['host', 'host'])
+eq('主播那一版还没生成过', hostState.portrait, null)
+globalThis.__DY_BUILT_PROVIDERS__ = []
+modelPlan.calls.length = 0
+const hostPortrait = await portrait.generateAiPortrait({
+  userId: HOST,
+  webRid: ROOM,
+  profile: null,
+  settings: {},
+  force: false
+})
+check('主播那一版生成成功', hostPortrait.ok === true, JSON.stringify(hostPortrait))
+eq(
+  '落在 <id>:host 那一行，版本从 1 开始',
+  [hostPortrait.portrait?.key, hostPortrait.portrait?.role, hostPortrait.portrait?.version],
+  [keyOf(HOST, 'host'), 'host', 1]
+)
+const hostPromptText = (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n')
+has('主播那一版问的是主播的问题', hostPromptText, '主播类型名，4-10 字，你自己起')
+has('主播那一版的发言那一节换了标题', hostPromptText, '发言记录样本')
+has('主播那一版写明了不是把他当观众', hostPromptText, '不是把他当观众')
+eq('库里那一行也标了角色', (await mapper.getUserPortrait(keyOf(HOST, 'host')))?.role, 'host')
+
+/*
+ * 同一个人切到观众：**另一行**、版本也从 1 开始（两个角色的版本各算各的）。
+ * 用户 2026-10-13 的原话是「两者分开」——所以这里必须真的是两份材料，不是同一份换个标题。
+ */
+modelPlan.calls.length = 0
+const hostAsViewer = await portrait.generateAiPortrait({
+  userId: HOST,
+  webRid: ROOM,
+  role: 'viewer',
+  profile: null,
+  settings: {},
+  force: false
+})
+eq(
+  '观众那一版是另一行，版本也自己的 1',
+  [hostAsViewer.portrait?.key, hostAsViewer.portrait?.role, hostAsViewer.portrait?.version],
+  [keyOf(HOST, 'viewer'), 'viewer', 1]
+)
+const viewerPromptText = (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n')
+has('观众那一版问的是观众的问题', viewerPromptText, '人物类型名，4-10 字，你自己起')
+check('两份提示词确实不是同一份（分开分析的重点）', viewerPromptText !== hostPromptText, '')
+eq(
+  '两行同时在库里',
+  [
+    (await mapper.getUserPortrait(keyOf(HOST, 'host'))) !== null,
+    (await mapper.getUserPortrait(keyOf(HOST, 'viewer'))) !== null
+  ],
+  [true, true]
+)
+
+modelPlan.calls.length = 0
+const hostAgain = await portrait.generateAiPortrait({
+  userId: HOST,
+  webRid: ROOM,
+  role: 'host',
+  profile: null,
+  settings: {},
+  force: false
+})
+eq('切回主播那一版读的是缓存（不重新花钱）', [hostAgain.portrait?.version, modelPlan.calls.length], [1, 0])
+
+modelPlan.calls.length = 0
+const hostV2 = await portrait.generateAiPortrait({
+  userId: HOST,
+  webRid: ROOM,
+  role: 'host',
+  profile: null,
+  settings: {},
+  force: true
+})
+eq('主播那一版重新生成 → 版本 2', hostV2.portrait?.version, 2)
+eq('观众那一版不受影响，还是第 1 版', (await mapper.getUserPortrait(keyOf(HOST, 'viewer')))?.version, 1)
+has(
+  '主播版迭代时喂回去的是上一版主播画像',
+  (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n'),
+  '上一版画像（第 1 版）'
+)
+
+/*
+ * 「停止」与「清画像」都不带角色参数：停止按**人物前缀**扫正在跑的任务（切过角色也不会漏），
+ * 清画像两个角色一起清（只清一半会留下一个界面读得到、用户以为删掉的旧版本）。
+ */
+modelPlan.mode = 'hang'
+modelPlan.calls.length = 0
+const toCancelHost = portrait.generateAiPortrait({
+  userId: HOST,
+  webRid: ROOM,
+  role: 'host',
+  profile: null,
+  settings: {},
+  force: true
+})
+await new Promise((resolve) => setTimeout(resolve, 80))
+eq('停止不必说角色（按人物前缀找在跑的那一次）', await portrait.cancelAiPortrait(HOST), true)
+const stoppedHost = await toCancelHost
+eq('主播那一版的停止也是 cancelled', [stoppedHost.ok, stoppedHost.reason], [false, 'cancelled'])
+modelPlan.mode = 'ok'
+eq('清画像：两个角色都清', await portrait.clearAiPortrait(HOST), 2)
+eq(
+  '清完两个角色都读不到',
+  [await mapper.getUserPortrait(keyOf(HOST, 'host')), await mapper.getUserPortrait(keyOf(HOST, 'viewer'))],
+  [null, null]
+)
+
+console.log('\n=== 13. 清数据：AI 画像也在清掉的那一批里')
+const cleared = await mapper.deleteUserPortrait(keyOf(USER))
 eq('删掉一行', cleared, 1)
-eq('删完读不到', await mapper.getUserPortrait(`user:${USER}`), null)
+eq('删完读不到', await mapper.getUserPortrait(keyOf(USER)), null)
 await rawQuery('delete from douyin_link_user_portraits')
 eq('表可以整表清空（purge 走的就是这个）', (await rowsOf('select count(*)::int as n from douyin_link_user_portraits'))[0].n, 0)
 
 /* ------------------------------------------------- B 段：真库副本（可选） */
 
 if (realDbDir && existsSync(join(realDbDir, 'PG_VERSION'))) {
-  console.log('\n=== 13. 真库副本：真人的材料长什么样')
+  console.log('\n=== 14. 真库副本：真人的材料长什么样')
   // 先把自造库那一路关掉（PGlite 没有跨进程锁，同一时刻只该有一个客户端开着）
   await closeOrm()
   process.env.DY_PGLITE_DIR = realDbDir
@@ -602,6 +790,81 @@ if (realDbDir && existsSync(join(realDbDir, 'PG_VERSION'))) {
     console.log(`     真人材料字符：${realPrompt.length}（约 ${Math.round(realPrompt.length / 2)} token 量级）`)
     check('真材料规模在预算内（<= 30000 字符）', realPrompt.length <= 30000, `实际 ${realPrompt.length}`)
     has('真材料里有「互动结构」那一节', realPrompt, '互动结构')
+
+    /*
+     * 真库上的**迁移与角色判定**（这一段的副本是从旧版应用那里复制来的：
+     * 它本来既没有 `douyin_link_users.on_mic`，也没有 `douyin_link_user_portraits.role`）。
+     *
+     * 两件事必须在真库上验，因为它们是这次改动里唯一会碰**已有数据**的地方：
+     * ① `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 真的把列加出来了（老库不会因为缺列而写不进去）；
+     * ② 角色判定真的按库里的信号走（不是永远返回观众）——拿收礼最多的一批人逐条比对。
+     */
+    const columnsOf = async (table) =>
+      (
+        await realOrm.rawQuery(
+          `select column_name from information_schema.columns where table_name = $dy$${table}$dy$`
+        )
+      ).rows.map((row) => row.column_name)
+    const userColumns = await columnsOf('douyin_link_users')
+    const portraitColumns = await columnsOf('douyin_link_user_portraits')
+    has('真库上迁移出了 douyin_link_users.on_mic', userColumns.join(','), 'on_mic')
+    has('真库上迁移出了 douyin_link_user_portraits.role', portraitColumns.join(','), 'role')
+    const onMicRows = (await realOrm.rawQuery(`select count(*)::int as n from douyin_link_users where on_mic`)).rows[0].n
+    console.log(
+      `     真库里 on_mic 为真的档案行：${onMicRows}（老库刚加列时通常是 0：麦位是运行态信息，历史没有回填）`
+    )
+
+    const receivers = (
+      await realOrm.rawQuery(
+        `select to_user_id, count(*)::int as n, coalesce(sum(diamonds), 0)::int as d from douyin_link_messages ` +
+          `where kind = 'gift' and to_user_id <> '' group by to_user_id order by d desc, n desc limit 20`
+      )
+    ).rows
+    let hostCount = 0
+    let mismatch = ''
+    for (const row of receivers) {
+      const ids = [row.to_user_id]
+      const signal = await real.mapper.userHostSignal(ids)
+      const detected = await realPortrait.detectPortraitRole({ ids })
+      const byRule =
+        signal.onMic || (signal.receivedGifts >= 2 && signal.receivedDiamonds > signal.sentDiamonds)
+          ? 'host'
+          : 'viewer'
+      if (detected !== byRule && !mismatch) {
+        mismatch = `${row.to_user_id} 判成 ${detected}，但库里的信号是 ${JSON.stringify(signal)}`
+      }
+      if (detected === 'host') hostCount += 1
+    }
+    console.log(
+      `     真库收礼最多的 ${receivers.length} 人里，按「在麦记录 / 收礼方向」判成主播的：${hostCount} 人`
+    )
+    check('真库上角色判定与库里的信号逐条一致（说明它真的在读库，不是写死观众）', mismatch === '', mismatch)
+    if (receivers.length > 0) {
+      const first = receivers[0]
+      const state = await realPortrait.aiPortraitState({ userId: first.to_user_id, webRid: '', settings: {} })
+      eq(
+        `真库收礼最多的人（${first.to_user_id}，${first.n} 条 / ${first.d} 抖币）打开弹窗的默认角色与判定一致`,
+        state.role,
+        state.detectedRole
+      )
+      console.log(`     他的默认角色：${state.role}（detectedRole=${state.detectedRole}）`)
+    }
+    /*
+     * 端到端那一条：**真人的材料**用的是不是**他这个角色**的那一套提问。
+     * 这正是用户报的那个 bug 的反面（「现在都是按照用户的内容进行分析了」）——
+     * 所以要在真库上按人核对，而不是只在工装合成数据上核对。
+     */
+    const chatterState = await realPortrait.aiPortraitState({ userId: top.user_id, webRid: '', settings: {} })
+    const expectsHostPrompt = chatterState.role === 'host'
+    console.log(
+      `     互动最多的那位（${top.user_id}，${top.n} 条弹幕）默认角色：${chatterState.role}` +
+        `（收礼方向是判定依据之一，纯观众不会因为话多被判成主播）`
+    )
+    check(
+      `真库互动最多那位的材料用的是「${expectsHostPrompt ? '主播' : '观众'}」那一套提问`,
+      realPrompt.includes(expectsHostPrompt ? '主播类型名' : '人物类型名'),
+      expectsHostPrompt ? '材料里找不到「主播类型名」（说明没按主播口径问）' : '材料里找不到「人物类型名」（说明没按观众口径问）'
+    )
   }
 } else if (realDbDir) {
   console.error(`真库目录不像 PGlite 数据目录：${realDbDir}`)
