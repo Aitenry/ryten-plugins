@@ -14,6 +14,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type {
   AnalyzerSnapshot,
   DanmakuItem,
+  DanmakuKind,
   DayRecordRow,
   FailureInfo,
   LiveSettings,
@@ -100,6 +101,41 @@ function mergeFeed(older: DanmakuItem[], current: DanmakuItem[]): DanmakuItem[] 
   const seen = new Set(current.map((item) => item.id))
   const head = older.filter((item) => !seen.has(item.id))
   return [...head, ...current].slice(-FEED_CAP)
+}
+
+/**
+ * 「状态类提示」——**描述此刻状态、不是消息流水**的三类：直播状态（`control`）、
+ * 房间级提示（`system`）、当前在线人数（`stats`）。
+ *
+ * 它们的特点：
+ * - **不入库**（只有弹幕/进场/点赞/关注/礼物落库），所以库里的历史救不回它们；
+ * - `DanmakuFeed` 把它们**钉在列表上方**固定显示（各自只留最新几条）——也就是说，
+ *   留在列表里的它们会被理解成「现在的状态」。
+ */
+const STATE_NOTICE_KINDS: DanmakuKind[] = ['control', 'system', 'stats']
+
+/**
+ * 丢掉列表里的状态类提示（消息流水一条不动）。
+ *
+ * 用在哪：**换监控会话**的时候（见下面那个 effect）——上一次会话的「直播已结束」、
+ * 上一次的在线人数，在新的会话里都是过期信息：主进程那边 `recorder.begin()` 已经把内存里的
+ * 最近消息清掉了，渲染层这份却是一路累加下来的（用户 2026-10-11 反馈：重连之后弹幕都正常，
+ * 顶上还钉着一条「直播已结束」）。
+ */
+function dropStateNotices(items: DanmakuItem[]): DanmakuItem[] {
+  return items.filter((item) => !STATE_NOTICE_KINDS.includes(item.kind))
+}
+
+/**
+ * 把主进程给的「最近消息」转成列表要的顺序。
+ *
+ * 主进程那份是**「新 → 旧」**（`hub.snapshot()` 与 `recentFor()` 都 `reverse()` 过，见
+ * `AnalyzerSnapshot.recent` 的注释），而实时列表是**旧 → 新往下排、新消息追加在末尾**
+ * （`DanmakuFeed` 自动滚到底、推送批次也是往后接的）。不转这一次，
+ * 「刚打开页面 / 切房间」那一眼看到的顺序就是反的——最旧的顶在最上面。
+ */
+function ascendingFeed(recent: DanmakuItem[]): DanmakuItem[] {
+  return [...recent].reverse()
 }
 
 /** 本地日期串 `YYYY-MM-DD`（与主进程 `dayRecords` 的分天口径一致） */
@@ -288,7 +324,7 @@ export default function Page(): React.JSX.Element {
     if (next.activeRoom && next.recent.length > 0) {
       setItemsByRoom((previous) => {
         const map = new Map(previous)
-        map.set(next.activeRoom, next.recent)
+        map.set(next.activeRoom, ascendingFeed(next.recent))
         return map
       })
     }
@@ -375,6 +411,47 @@ export default function Page(): React.JSX.Element {
       }),
     []
   )
+
+  /**
+   * **换监控会话就把过期的状态类提示清掉**（用户 2026-10-11：「重连的时候，还显示直播已结束的
+   * 文案，但是确实重新连接了，弹幕都是正常的」）。
+   *
+   * 为什么会留着：下播时服务端推一条 `WebcastControlMessage`（界面上一行「直播已结束」），
+   * 它被钉在实时列表上方；主播重开播 → 主进程开了**新会话**（`recorder.begin()` 清掉它自己那份
+   * 最近消息），可渲染层这份列表是**一路累加**的，那条提示没人清 → 弹幕都正常了，顶上还说「已结束」。
+   *
+   * 两条口径：
+   * - 只在**新会话真的开起来**时清（`sessionId > 0`）：下播那一刻 `sessionId` 会先归 0，
+   *   那时候正该留着「直播已结束」给用户看；
+   * - 只清 `control`/`system`/`stats` 三类**状态提示**，弹幕/进场/点赞/关注/礼物一条都不动
+   *   （「内容不会消失」——那些还能从库里翻回来）。
+   */
+  const sessionSeenRef = useRef<Map<string, number>>(new Map())
+  useEffect(() => {
+    const seen = sessionSeenRef.current
+    const next = new Map<string, number>()
+    const restarted: string[] = []
+    for (const room of rooms) {
+      next.set(room.webRid, room.sessionId)
+      const before = seen.get(room.webRid)
+      if (before !== undefined && before !== room.sessionId && room.sessionId > 0) restarted.push(room.webRid)
+    }
+    sessionSeenRef.current = next
+    if (restarted.length === 0) return
+    setItemsByRoom((previous) => {
+      let changed = false
+      const map = new Map(previous)
+      for (const webRid of restarted) {
+        const list = map.get(webRid)
+        if (!list || list.length === 0) continue
+        const kept = dropStateNotices(list)
+        if (kept.length === list.length) continue
+        map.set(webRid, kept)
+        changed = true
+      }
+      return changed ? map : previous
+    })
+  }, [rooms])
 
   /** 计数心跳：原地改那个房间的计数（不重拉快照） */
   useEffect(
@@ -470,7 +547,7 @@ export default function Page(): React.JSX.Element {
       setItemsByRoom((previous) => {
         const map = new Map(previous)
         const older = [...stored.rows].reverse() as DanmakuItem[]
-        map.set(webRid, mergeFeed(older, map.get(webRid) ?? recent))
+        map.set(webRid, mergeFeed(older, map.get(webRid) ?? ascendingFeed(recent)))
         return map
       })
       setUsersByRoom((previous) => {
