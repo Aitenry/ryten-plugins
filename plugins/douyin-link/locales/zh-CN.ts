@@ -398,8 +398,9 @@ export const DouyinLinkZhCN = {
       aiShowRaw: '看原文',
       aiHideRaw: '收起原文',
       aiLoading: '读取中…',
-      aiThinking: '正在生成，模型还在思考…',
+      aiThinking: '正在生成，模型还在思考…（本地小模型可能会先静默推理几分钟）',
       aiWriting: '正在生成…（已写 {{n}} 字）',
+      aiStop: '停止',
       aiIntro:
         '这份画像由大模型写：它拿到的是这个人的互动数据、弹幕原话、礼物流水与算法算出的行为特征，写出的是一段「他是什么样的人、为什么留在这里、该怎么维护」的解读。生成一次会保存下来，下次打开直接用（不重复花钱）。',
       aiWillUse: '将使用：{{model}}（在插件设置里可换）',
@@ -415,6 +416,7 @@ export const DouyinLinkZhCN = {
       aiErrorModelFailed: '模型调用失败：{{detail}}',
       aiErrorBusy: '这个人正在生成中，稍等一下再试',
       aiErrorNoData: '这个人的互动太少，还不够写一份画像（先多观察一会儿）',
+      aiErrorCancelled: '已停止生成（本地小模型较慢时可以换个更快的模型）',
       aiErrorBridge: '主进程没有响应（插件可能还在装载，或已被停用）',
       aiErrorGeneric: '生成失败：{{detail}}',
       /* 互动结构（五类互动全量：弹幕 / 进场 / 点赞 / 关注 / 礼物） */
@@ -703,6 +705,10 @@ export const DouyinLinkZhCN = {
         '「用户档案 → AI 画像」用哪个模型来写。这里列的就是你已经在「设置 → 模型」里配好的供应商（只列启用的），选一个更省钱或更强的都行；还没选过时用宿主的默认模型，下拉里显示的就是实际会用的那一个。生成结果会存进数据库，不会重复花钱。',
       portraitModelDefault: '宿主默认',
       portraitModelEmpty: '还没有配置任何大模型供应商（先到「设置 → 模型」里加一个）',
+      /* 「关掉本地模型的思考」：本地思考型小模型会把输出预算烧在推理上，正文一个字都不出 */
+      portraitNoThinkLabel: '关掉本地模型的思考',
+      portraitNoThinkHint:
+        '只在用本地思考型模型（Ollama 的 qwen3 这类）时才需要打开：它会把整份输出预算烧在推理上，正文一个字都不写——本机实测同一份材料，不关思考是「190 秒 / 15,890 字推理 / 正文 0 字」，关掉是「52 秒 / 2114 字正文」。打开后生成时会下发 think: false（只对认这个参数的供应商生效，其它供应商不受影响）。',
       cleanupNow: '立即清理',
       importExportLabel: '数据备份（导入 / 导出）',
       importExportHint:

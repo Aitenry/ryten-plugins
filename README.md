@@ -101,7 +101,17 @@ node plugins/douyin-link/spike/ai-portrait-render-check.mjs
 Copy-Item "$env:APPDATA\ryten-bench\RytenBenchDB" "$env:TEMP\rbdb-copy" -Recurse
 node plugins/douyin-link/spike/ai-portrait-live.mjs "$env:TEMP\rbdb-copy"
 node plugins/douyin-link/spike/ai-portrait-live.mjs "$env:TEMP\rbdb-copy" --live
+# local Ollama needs no API key, and it should be measured before blaming the plugin:
+node plugins/douyin-link/spike/ai-portrait-live.mjs "$env:TEMP\rbdb-copy" --live --provider=35 --no-think
+node plugins/douyin-link/spike/ai-portrait-local-probe.mjs --model=qwen3.5-9b-32k:latest --max-tokens=512
 ```
+
+That local probe settled the 2026-10-13 "small local model aborts" report: on this machine the 9B Q4
+model runs at **21.6 tok/s** and the provider's output cap is 4000 tokens, so a full portrait needs about
+three minutes — longer than the 180-second wall clock the plugin used to enforce. It also showed that a
+reasoning model (qwen3.5) burns the whole output budget on thinking and writes **zero** characters of
+content (190s, 15,890 chars of reasoning), which is what the "turn thinking off for local models" setting
+fixes (52s, 2,114 chars of content with `think: false`).
 
 The live probe decrypts the host's provider API key (same PBKDF2 + AES-256-GCM derivation as
 `src/main/crypto/provider-key.ts`) from a **copy** of the database and prints counts, never the key.

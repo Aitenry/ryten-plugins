@@ -502,10 +502,15 @@ const buttonByTitle = (title) => buttons().find((button) => button.getAttribute(
  * （最小复现脚本已确认同样的 antd 结构在 jsdom 里不会被点穿），不是产品行为——所以这里不掩盖它，
  * 而是**每次点完都核对结果、不对就再点一次**，让断言仍然打在真产物上。
  */
+/**
+ * AI 画像那一层的正文（**只认 z ≥ 1300 那一个**）。
+ *
+ * 不能只看「最上面那个弹窗」：AI 画像关着时最上面是用户档案，它的正文非空，
+ * 于是「弹窗开没开」这个判据会永远为真（第一版就是这么误判的，导致后面一串断言打在档案上）。
+ */
 const aiBodyText = () => {
-  const all = modals().sort((a, b) => a.z - b.z)
-  const top = all[all.length - 1]
-  return (top?.wrap.querySelector('.ant-modal-body')?.textContent ?? '').trim()
+  const wrap = modals().find((entry) => entry.z >= 1300)?.wrap
+  return (wrap?.querySelector('.ant-modal-body')?.textContent ?? '').trim()
 }
 const rankRowByName = (name) =>
   [...doc.querySelectorAll('.ant-card-body *')].find(
@@ -738,5 +743,60 @@ has('别人那一版按他自己的基准算增量（+106，不是小张的 +28�
 not('换到别人时不拿小张的基准来提示', b, '又攒了 28 条互动')
 
 rmSync(workDir, { recursive: true, force: true })
+console.log('\n=== 11. 本地小模型要慢得起：生成中有「停止」、停下来不算错误、模型名不重复')
+/*
+ * 用户 2026-10-13 报「小模型会报错，本地的 ollama 模型」之后加的三件事：
+ * ① 生成中给「停止」（本地 9B 实测约 3 分钟起步，光等不行）；
+ * ② 「停止」的回话是 `cancelled`，界面用**中性文案**，不是红字报错；
+ * ③ 本地 Ollama 的供应商名常常就是模型名（`qwen3.5-9b-32k:latest`），
+ *    头部别写成「A · A」。
+ */
+state.portraits = {}
+state.models = [{ id: 3, name: 'qwen3.5-9b-32k:latest', model: 'qwen3.5-9b-32k:latest', isDefault: true }]
+state.current = { fingerprint: 'a:1', interactions: 178 }
+/** 挂住的那次生成：点「停止」之后由工装放行成 `cancelled`（就是主进程真实收尾的样子） */
+let finishStop = null
+state.generateResult = new Promise((resolve) => {
+  finishStop = resolve
+})
+// 换人重载（点上一个人再点回来）：直接 openUserByName(USER) 在「本来就在他这一页」时不会重载
+await switchToOtherThenBack()
+// 空态里点「生成画像」把它推进「生成中」（生成中才该出现「停止」）
+const generateButton2 = buttonByText(texts.users.aiGenerate)
+await click(generateButton2)
+await settle(200)
+const stopOpened = modalText()
+has('生成中给的是「停止」按钮', stopOpened, texts.users.aiStop)
+not('生成中不显示「重新生成」', stopOpened, texts.users.aiRegenerate)
+has('生成中的等待文案提了本地模型可能久等', stopOpened, '本地小模型')
+has('模型名与供应商名相同时只写一遍（不出现 A · A）', stopOpened, 'qwen3.5-9b-32k:latest')
+not('不出现重复的模型名', stopOpened, 'qwen3.5-9b-32k:latest · qwen3.5-9b-32k:latest')
+
+calls.length = 0
+await click(buttonByText(texts.users.aiStop))
+eq(
+  '点「停止」调的是 ai-portrait-cancel，带的是这个人的 id',
+  calls.filter((entry) => entry.channel === `${PREFIX}ai-portrait-cancel`).map((entry) => entry.args[0]),
+  [USER.userId]
+)
+
+// 主进程以 cancelled 收尾（界面此时才落定：停止不是错误）
+await act(async () => {
+  finishStop({ ok: false, reason: 'cancelled' })
+  state.generateResult = null
+})
+await settle(250)
+// jsdom 里 React 的 portal 事件重放有时会把刚点的那一层顺带关掉：这里按需再开一次，让断言打在真产物上
+if (!aiBodyText()) await openAi()
+const cancelledText = modalText()
+has('停下来有一行中性文案', cancelledText, texts.users.aiErrorCancelled)
+not('停下来不写「生成失败」', cancelledText, '生成失败')
+check(
+  '停下来之后回到「生成画像」空态（可以随时再来一次）',
+  cancelledText.includes(texts.users.aiGenerate),
+  cancelledText.slice(0, 160)
+)
+state.generateResult = null
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项未通过`}`)
 process.exit(failures === 0 ? 0 : 1)

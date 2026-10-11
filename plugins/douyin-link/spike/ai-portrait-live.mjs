@@ -40,6 +40,13 @@ const live = args.includes('--live')
 const dbDir = (args.find((arg) => !arg.startsWith('--')) ?? process.env.DY_DB_DIR ?? '').replace(/^\/([A-Za-z]:)/, '$1')
 const wantUser = (args.find((arg) => arg.startsWith('--user=')) ?? '').replace('--user=', '')
 const wantProvider = Number((args.find((arg) => arg.startsWith('--provider=')) ?? '').replace('--provider=', '')) || 0
+/**
+ * `--no-think`：按设置页那个开关的样子下发 `think: false`。
+ *
+ * 本地思考型模型（Ollama 的 qwen3 这类）会把整个输出预算烧在推理上、正文一个字都不出——
+ * 本机实测同一份材料：不关思考 190 秒 / 15,890 字推理 / 正文 0 字，关了 52 秒 / 2114 字正文。
+ */
+const noThink = args.includes('--no-think')
 
 function resolvePglite() {
   const candidates = [
@@ -119,6 +126,16 @@ writeFileSync(
     `      if (!config) throw new Error('工装：没找到供应商 ' + providerId)\n` +
     `      globalThis.__DY_USED_PROVIDER__ = config.id\n` +
     `      const kind = String(config.provider || '').toLowerCase()\n` +
+    `      // 本地 Ollama：宿主那套是 ChatOllama（baseUrl 不带 /v1），而且**不需要 api_key**\n` +
+    `      if (kind === 'ollama') {\n` +
+    `        const mod = await import(process.env.DY_LANGCHAIN_OLLAMA)\n` +
+    `        return new mod.ChatOllama({\n` +
+    `          model: config.model,\n` +
+    `          streaming: true,\n` +
+    `          ...(config.base_url ? { baseUrl: config.base_url } : {}),\n` +
+    `          ...(config.max_tokens ? { numPredict: config.max_tokens } : {})\n` +
+    `        })\n` +
+    `      }\n` +
     `      const base = { model: config.model, apiKey: config.api_key, streaming: true, maxRetries: 0 }\n` +
     `      if (kind === 'anthropic' || (config.extra_config && config.extra_config.api_format === 'anthropic')) {\n` +
     `        const mod = await import(process.env.DY_LANGCHAIN_ANTHROPIC)\n` +
@@ -200,6 +217,7 @@ process.env.DY_LANGCHAIN_OPENAI = pathToFileURL(join(HOST_NODE_MODULES, '@langch
 process.env.DY_LANGCHAIN_ANTHROPIC = pathToFileURL(
   join(HOST_NODE_MODULES, '@langchain', 'anthropic', 'dist', 'index.js')
 ).href
+process.env.DY_LANGCHAIN_OLLAMA = pathToFileURL(join(HOST_NODE_MODULES, '@langchain', 'ollama', 'dist', 'index.js')).href
 
 /* ------------------------------------------------------- 真库里的供应商配置 */
 
@@ -256,8 +274,11 @@ globalThis.__DY_PROVIDERS__ = rows.map((row) => {
   }
 })
 
-const usable = globalThis.__DY_PROVIDERS__.filter((item) => item.is_enabled && item.api_key)
-check('真库里至少有一个可用的供应商（密钥解密成功）', usable.length > 0, `${usable.length} 个可用`)
+/** 本地 Ollama 不需要 api_key；云端供应商必须有（否则就是没配好） */
+const usable = globalThis.__DY_PROVIDERS__.filter(
+  (item) => item.is_enabled && (item.api_key || String(item.provider).toLowerCase() === 'ollama')
+)
+check('真库里至少有一个可用的供应商（云端要密钥、本地 ollama 免密钥）', usable.length > 0, `${usable.length} 个可用`)
 
 /** 挑一个供应商：`--provider` 指定 > 宿主默认 > 第一个可用的 */
 const chosen = wantProvider
@@ -305,7 +326,12 @@ if (!live) {
   console.log(`  缓存里已有画像：${state.portrait ? `第 ${state.portrait.version} 版（${state.portrait.model}）` : '没有'}`)
   console.log(`  当前数据侧：互动 ${state.current.interactions} 条 · 指纹 ${state.current.fingerprint}`)
   console.log(`  可选模型清单：${state.models.map((m) => `${m.id}:${m.model}`).join(' / ') || '（空）'}`)
-  console.log(`  清单里有没有泄露 api_key：${JSON.stringify(state.models).includes(chosen.api_key) ? '**有（事故）**' : '没有'}`)
+  console.log(
+    `  清单里有没有泄露 api_key：${
+      // 空密钥要跳过：`includes('')` 恒为真（本地 ollama 没有密钥，第一版就在这里误报了一次事故）
+      !chosen.api_key ? '（本地供应商没有密钥，跳过）' : JSON.stringify(state.models).includes(chosen.api_key) ? '**有（事故）**' : '没有'
+    }`
+  )
   await closeOrm()
   rmSync(workDir, { recursive: true, force: true })
   process.exit(failures === 0 ? 0 : 1)
@@ -317,7 +343,7 @@ const result = await portrait.generateAiPortrait({
   userId: top.user_id,
   webRid: '',
   profile: null,
-  settings: { portraitProviderId: chosen.id },
+  settings: { portraitProviderId: chosen.id, portraitDisableThinking: noThink },
   force: true
 })
 const elapsed = Date.now() - started

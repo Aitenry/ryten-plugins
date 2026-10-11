@@ -242,13 +242,36 @@ export default function Settings(): React.JSX.Element {
               loading={portraitModels === null}
               value={portraitModelId}
               onChange={(value) => void save({ portraitProviderId: Number(value) })}
-              options={(portraitModels ?? []).map((model) => ({
-                value: model.id,
-                label: `${model.name || model.model}（${model.model}）${
-                  model.isDefault ? ` · ${t('douyin-link.settingsPage.portraitModelDefault')}` : ''
-                }`
-              }))}
+              options={(portraitModels ?? []).map((model) => {
+                /**
+                 * 本地 Ollama 的供应商常常就用模型名命名（`qwen3.5-9b-32k:latest`），
+                 * 那时 `名字（模型）` 会写成「A（A）」——相同就只写一遍。
+                 */
+                const name = model.name || model.model
+                const title = name === model.model ? model.model : `${name}（${model.model}）`
+                return {
+                  value: model.id,
+                  label: `${title}${model.isDefault ? ` · ${t('douyin-link.settingsPage.portraitModelDefault')}` : ''}`
+                }
+              })}
               notFoundContent={t('douyin-link.settingsPage.portraitModelEmpty')}
+            />
+          </span>
+        </Row>
+
+        {/*
+          「关掉本地模型的思考」（用户 2026-10-13 报本地 ollama 模型报错之后加的）。
+          实测数字写在 hint 里：思考型小模型会把输出预算全烧在推理上，正文一个字都不出。
+        */}
+        <Row
+          label={t('douyin-link.settingsPage.portraitNoThinkLabel')}
+          hint={t('douyin-link.settingsPage.portraitNoThinkHint')}
+        >
+          <span data-rb-portrait-nothink="" className="inline-flex">
+            <Switch
+              size="small"
+              checked={settings?.portraitDisableThinking === true}
+              onChange={(value) => void save({ portraitDisableThinking: value })}
             />
           </span>
         </Row>

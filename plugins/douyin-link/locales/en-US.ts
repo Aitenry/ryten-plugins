@@ -390,8 +390,9 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       aiShowRaw: 'Show raw',
       aiHideRaw: 'Hide raw',
       aiLoading: 'Loading…',
-      aiThinking: 'Generating — the model is still thinking…',
+      aiThinking: 'Generating — the model is still thinking… (a small local model may reason silently for minutes)',
       aiWriting: 'Generating… ({{n}} characters so far)',
+      aiStop: 'Stop',
       aiIntro:
         'This portrait is written by an LLM: it receives the interaction numbers, the user\u2019s own comments, the gift stream and the behavioural traits the algorithm computed, and writes an interpretation of who this person is, why they stay and how to keep them. Each generation is stored, so opening this again costs nothing.',
       aiWillUse: 'Will use: {{model}} (change it in the plugin settings)',
@@ -407,6 +408,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       aiErrorModelFailed: 'Model call failed: {{detail}}',
       aiErrorBusy: 'A generation for this user is already running, try again in a moment',
       aiErrorNoData: 'Not enough interactions from this user to write a portrait yet (keep watching for a while)',
+      aiErrorCancelled: 'Generation stopped (a small local model can be slow — try a faster one)',
       aiErrorBridge: 'The main process did not respond (the plugin may still be loading or has been disabled)',
       aiErrorGeneric: 'Generation failed: {{detail}}',
       /* Interaction mix (all five kinds: chat / joins / likes / follows / gifts) */
@@ -695,6 +697,10 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
         'Which model writes the AI portrait in a user profile. The list is what you already configured in Settings → Models (enabled providers only), so pick whichever is cheaper or stronger; until you pick one, the host default model is used, and the dropdown always shows the one that will actually run. Results are stored in the database — you are never charged twice for the same portrait.',
       portraitModelDefault: 'host default',
       portraitModelEmpty: 'No LLM provider is configured yet (add one in Settings → Models)',
+      /* "Turn thinking off for local models": a small local reasoning model burns the whole output budget */
+      portraitNoThinkLabel: 'Turn thinking off for local models',
+      portraitNoThinkHint:
+        'Only needed with a local reasoning model (Ollama qwen3 and friends): it spends the entire output budget on reasoning and never writes a single word of the portrait. Measured on this machine with the same material: thinking on = 190s, 15,890 characters of reasoning, 0 characters of content; thinking off = 52s and 2,114 characters of content. When on, generation sends think: false, which only affects providers that understand it.',
       cleanupNow: 'Clean up now',
       importExportLabel: 'Data backup (import / export)',
       importExportHint:

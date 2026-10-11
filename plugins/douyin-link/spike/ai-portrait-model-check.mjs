@@ -230,10 +230,28 @@ const modelPlan = {
   release: null
 }
 globalThis.__DY_FAKE_MODEL__ = () => ({
-  async stream(messages) {
+  async stream(messages, options) {
     modelPlan.calls.push(messages)
     if (modelPlan.mode === 'throw') throw new Error('工装：模型今天不干了（HTTP 500）')
-    if (modelPlan.mode === 'hang') await new Promise((resolve) => (modelPlan.release = resolve))
+    /*
+     * `hang` = 一个字都不吐（模拟本地模型长时间思考 / 卡住）。
+     *
+     * **必须跟着 signal 走**：真 LangChain 收到 abort 会抛出来结束这个流，
+     * 假模型要是不理 signal，插件的看门狗就算把 controller.abort() 了，这个 await 也永远不返回
+     * ——工装会直接挂住（第一版就是这样：测静默超时时整个脚本卡死）。
+     */
+    if (modelPlan.mode === 'hang') {
+      await new Promise((resolve, reject) => {
+        modelPlan.release = resolve
+        const signal = options?.signal
+        if (!signal) return
+        if (signal.aborted) {
+          reject(new Error('This operation was aborted'))
+          return
+        }
+        signal.addEventListener('abort', () => reject(new Error('This operation was aborted')), { once: true })
+      })
+    }
     const text = modelPlan.raw
     const size = Math.ceil(text.length / modelPlan.chunks)
     const parts = []
@@ -362,6 +380,16 @@ eq('指纹与现状一致', first.portrait?.fingerprint, stateBefore.current.fin
 check(`生成耗时 ${Date.now() - started}ms（假模型，只是记一下）`, true)
 
 const promptText = (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n---\n')
+/**
+ * `DY_DUMP_PROMPT=<文件>`：把**这一份真材料**写到文件里。
+ *
+ * 用途：拿它去量本地模型的真实速度（`spike/ai-portrait-local-probe.mjs`）——
+ * 「本地小模型会不会超时」这种问题必须先量出「这份提示词它要跑多久」，不能靠推理。
+ */
+if (process.env.DY_DUMP_PROMPT) {
+  writeFileSync(process.env.DY_DUMP_PROMPT, promptText, 'utf8')
+  console.log(`  （材料已写到 ${process.env.DY_DUMP_PROMPT}：${promptText.length} 字符）`)
+}
 check('模型只被调用了一次', modelPlan.calls.length === 1, `实际 ${modelPlan.calls.length}`)
 eq('模型是从设置指定的供应商建的', globalThis.__DY_BUILT_PROVIDERS__, [3])
 has('材料里带上这个人的真弹幕原话', promptText, '今晚唱得太好听了')
@@ -425,6 +453,49 @@ check(
   '生成结束后 running 归位',
   (await portrait.aiPortraitState({ userId: USER, settings: {} })).running === false
 )
+
+/*
+ * 7b. 时间预算（2026-10-13 用户报「小模型会报错，本地的 ollama 模型」之后的定版）。
+ *
+ * 原来是一根 **180 秒墙钟硬超时**：本机实测本地 9B/Q4 是 21.6 token/s、那条 Ollama 的输出上限
+ * 4000 token ⇒ 4000 / 21.6 ≈ 185 秒，**刚好越过 180**：模型还在正常出字，先被我掐了，用户看到
+ * 「模型调用失败：This operation was aborted」。所以现在改「静默超时 + 宽松总上限」，并且可停止。
+ * 这里既有**默认值守卫**（别再被人悄悄收紧回去），也有两条真路径：
+ *   ① 静默超时（把预算调小 + 让假模型一个字都不吐）→ 失败文案必须说清「多少秒没有输出」；
+ *   ② 用户点停止 → `cancelled`，且**已有画像不被毁**。
+ */
+console.log('\n=== 7b. 静默超时与「停止」（本地模型要慢得起）')
+eq('默认预算：静默 5 分钟', portrait.PORTRAIT_BUDGETS.stallMs, 5 * 60_000)
+eq('默认预算：总上限 30 分钟（配合「停止」按钮，不再是一根 180 秒的墙钟）', portrait.PORTRAIT_BUDGETS.totalMs, 30 * 60_000)
+
+const budgetBackup = { ...portrait.PORTRAIT_BUDGETS }
+// 1.1 秒：够快，而且消息里会说「1 秒没有任何输出」（文案按秒取整）
+portrait.PORTRAIT_BUDGETS.stallMs = 1100
+portrait.PORTRAIT_BUDGETS.totalMs = 60_000
+const beforeStall = await mapper.getUserPortrait(`user:${USER}`)
+modelPlan.mode = 'hang'
+modelPlan.calls.length = 0
+const stalled = await portrait.generateAiPortrait({ userId: USER, webRid: ROOM, profile: null, settings: {}, force: true })
+eq('静默不动 → 失败（model-failed）', [stalled.ok, stalled.reason], [false, 'model-failed'])
+has('失败文案说清「多少秒没有任何输出」', stalled.detail, '1 秒没有任何输出')
+has('失败文案给出「已写多少字」', stalled.detail, '已写 0 字符')
+has('失败文案给出本地模型的成因提示', stalled.detail, '本地模型')
+eq('静默超时后 running 归位（不会卡住）', (await portrait.aiPortraitState({ userId: USER, settings: {} })).running, false)
+eq('静默超时**没有**毁掉已有画像', (await mapper.getUserPortrait(`user:${USER}`))?.version, beforeStall?.version)
+
+// ② 用户点「停止」：假模型挂着，调 cancel
+modelPlan.calls.length = 0
+const toCancel = portrait.generateAiPortrait({ userId: USER, webRid: ROOM, profile: null, settings: {}, force: true })
+await new Promise((resolve) => setTimeout(resolve, 80))
+eq('停止请求找到了在跑的那一次', await portrait.cancelAiPortrait(USER), true)
+const cancelled = await toCancel
+eq('停下来是 cancelled（不是错误）', [cancelled.ok, cancelled.reason], [false, 'cancelled'])
+eq('停止之后 running 归位', (await portrait.aiPortraitState({ userId: USER, settings: {} })).running, false)
+eq('停下来也没有毁掉已有画像', (await mapper.getUserPortrait(`user:${USER}`))?.version, beforeStall?.version)
+eq('没有在跑的时候再点停止 → false', await portrait.cancelAiPortrait(USER), false)
+modelPlan.mode = 'ok'
+portrait.PORTRAIT_BUDGETS.stallMs = budgetBackup.stallMs
+portrait.PORTRAIT_BUDGETS.totalMs = budgetBackup.totalMs
 
 console.log('\n=== 8. no-data / no-model：都要在花钱之前挡住')
 modelPlan.calls.length = 0
@@ -513,6 +584,12 @@ if (realDbDir && existsSync(join(realDbDir, 'PG_VERSION'))) {
     })
     check(`真库里互动最多的那个人（${top.user_id}，${top.n} 条弹幕）能生成`, result.ok === true, JSON.stringify(result))
     const realPrompt = (modelPlan.calls[0] ?? []).map((message) => message.content).join('\n')
+    // 真材料导出：量本地模型的真实耗时就用这一份（-real 后缀，与工装合成那份区分开）
+    if (process.env.DY_DUMP_PROMPT) {
+      const file = `${process.env.DY_DUMP_PROMPT.replace(/\.txt$/, '')}-real.txt`
+      writeFileSync(file, realPrompt, 'utf8')
+      console.log(`  （真材料已写到 ${file}：${realPrompt.length} 字符）`)
+    }
     const sample = (await realOrm.rawQuery(
       `select content from douyin_link_messages where kind = 'chat' and user_id = $dy$${top.user_id}$dy$ and content <> '' order by at_ms desc limit 3`
     )).rows

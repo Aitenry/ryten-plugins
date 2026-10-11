@@ -54,16 +54,43 @@ import {
 export const AI_PORTRAIT_EVENT = 'plugin:douyin-link:portrait'
 
 /**
- * 一次生成的硬超时。
+ * 一次生成的**时间预算**（2026-10-13 用户报「小模型会报错，本地的 ollama 模型」之后改的口径）。
  *
- * 宿主那层已经关掉了 LangChain 自带的重试（`INNER_RETRIES_DISABLED`，见 provider/service.ts），
- * 所以卡住就是卡住：超过这个时间直接 abort，把失败如实报给界面（而不是让弹窗永远转圈）。
- * 3 分钟足够一份 4-7 节的画像写完（实测常在 20-60 秒）。
+ * 原来是「180 秒墙钟硬超时」，对本地模型是错的：本机实测 qwen3.5-9b-32k（Q4_K_M，Ollama 本机）
+ * **21.6 token/s**、前置处理 2~20 秒，而这条供应商的输出上限是 4000 token
+ * ⇒ 4000 / 21.6 ≈ 185 秒，**刚好越过 180 秒**：模型还在正常出字，先被我掐了
+ * （用户看到的就是「模型调用失败：This operation was aborted」——AbortController 的原文）。
+ *
+ * 所以改成两个口径：
+ * - `stallMs`：**多久没有任何输出**才算卡住。思考型模型会静默好几分钟——LangChain 的 Ollama
+ *   只转发 `content`、`thinking` 帧被丢掉（见 @langchain/ollama 的 `convertOllamaStream`），
+ *   所以「安静」不等于「死了」，静默门槛必须给宽；
+ * - `totalMs`：一次生成的墙钟上限，给得很宽（本地小模型就是慢），界面随时可以点「停止」。
+ *
+ * 工装可以把这两个数调小来验超时与取消路径（`ai-portrait-model-check.mjs` 就是这么做的）。
  */
-const PORTRAIT_TIMEOUT_MS = 180_000
+export const PORTRAIT_BUDGETS = {
+  /** 静默多久算卡住：本地模型可能长时间思考，给到 5 分钟 */
+  stallMs: 5 * 60_000,
+  /** 一次生成的总上限：30 分钟（配合界面上的「停止」按钮） */
+  totalMs: 30 * 60_000
+}
 
-/** 正在跑的那一次（按缓存键去重） */
-const running = new Map<string, { requestId: string; startedAt: number }>()
+/** 一次生成的任务句柄（去重 + 看门狗 + 停止都靠它） */
+interface PortraitJob {
+  requestId: string
+  startedAt: number
+  controller: AbortController
+  /** 用户点了「停止」 */
+  cancelled: boolean
+  /** 已经被写出来的正文字符数（失败/停止时如实报给日志与用户） */
+  writtenChars?: number
+  /** 我们主动中止时的原因（比 AbortError 的原文有用得多） */
+  abortReason?: string
+}
+
+/** 正在跑的那一次（按缓存键去重；「停止」靠这里的 controller 真正掐断底层请求） */
+const running = new Map<string, PortraitJob>()
 
 let seq = 0
 
@@ -190,7 +217,7 @@ function zeroTotals(): PortraitTotalsLite {
 /** 打开弹窗要的全部状态（缓存 + 数据侧现状 + 模型清单 + 是否在跑） */
 export async function aiPortraitState(input: {
   userId: string
-  settings: Pick<LiveSettings, 'portraitProviderId'>
+  settings: Pick<LiveSettings, 'portraitProviderId' | 'portraitDisableThinking'>
 }): Promise<AiPortraitState> {
   const userId = String(input.userId ?? '').trim()
   const selectedProviderId = portraitProviderSetting(input.settings)
@@ -249,7 +276,7 @@ export async function generateAiPortrait(input: {
   webRid?: string
   /** 档案（由 hub 提供：静态字段的口径与弹窗上显示的那份完全一致） */
   profile: UserDetail | null
-  settings: Pick<LiveSettings, 'portraitProviderId'>
+  settings: Pick<LiveSettings, 'portraitProviderId' | 'portraitDisableThinking'>
   force?: boolean
 }): Promise<AiPortraitResult> {
   const userId = String(input.userId ?? '').trim()
@@ -307,6 +334,20 @@ export async function generateAiPortrait(input: {
   const config = await providerService.getConfig(providerId).catch(() => null)
   const modelName = String(config?.model ?? '')
   const providerName = String(config?.name ?? '')
+  /**
+   * 「关掉本地模型的思考」（设置页开关，默认关）：只对**支持 `think` 的模型**生效
+   * （`@langchain/ollama` 建出来的实例上有这个属性；别的供应商没有 → 原样不动）。
+   *
+   * 为什么不默认关：`think` 是 Ollama 的原生参数，关掉等于**改了模型的行为**，
+   * 而且老版本 Ollama / 非思考型模型遇到它会不会报错我们没法在本机全部验到——
+   * 所以做成用户显式打开，并把实测数字写在设置页说明里。
+   */
+  const disableThinking = input.settings.portraitDisableThinking === true
+  const thinkingHolder = model as unknown as { think?: boolean }
+  if (disableThinking && 'think' in thinkingHolder && thinkingHolder.think !== false) {
+    thinkingHolder.think = false
+    logger.info(`[douyin-link] AI 画像：按设置下发 think=false（关掉本地模型的思考）`)
+  }
 
   const prompt = buildPortraitPrompt({
     anchor: { userId, name: input.profile?.nickname ?? '' },
@@ -323,15 +364,18 @@ export async function generateAiPortrait(input: {
   })
 
   const requestId = `p${(seq += 1)}`
-  running.set(key, { requestId, startedAt: now })
+  const controller = new AbortController()
+  const job: PortraitJob = { requestId, startedAt: now, controller, cancelled: false }
+  running.set(key, job)
   logger.info(
     `[douyin-link] AI 画像开始：第 ${(cachedRow?.version ?? 0) + 1} 版 · ${providerName || providerId}/${modelName || '?'} · ` +
       `材料 ${prompt.chars.total} 字符（system ${prompt.chars.system} + user ${prompt.chars.user}）· ` +
-      `互动 ${prompt.interactions} 条 · 弹幕样本 ${extras.recentChat.length} · 送礼样本 ${extras.sentGifts.length}`
+      `互动 ${prompt.interactions} 条 · 弹幕样本 ${extras.recentChat.length} · 送礼样本 ${extras.sentGifts.length} · ` +
+      `静默上限 ${Math.round(PORTRAIT_BUDGETS.stallMs / 1000)}s / 总上限 ${Math.round(PORTRAIT_BUDGETS.totalMs / 60000)}min`
   )
 
   try {
-    const { text, inputTokens, outputTokens } = await streamPortrait(model, prompt, requestId)
+    const { text, inputTokens, outputTokens } = await streamPortrait(model, prompt, requestId, job)
     const report = parsePortraitReport(text)
     const portrait: AiPortrait = {
       key,
@@ -371,13 +415,45 @@ export async function generateAiPortrait(input: {
     )
     return { ok: true, portrait }
   } catch (error) {
-    const detail = describe(error)
-    logger.warn(`[douyin-link] AI 画像失败：${detail}`)
+    /**
+     * 失败如实分三类（用户 2026-10-13 报的就是第一类，原文只有一句
+     * 「This operation was aborted」，谁也看不出为什么）：
+     * - **用户点了「停止」** → `cancelled`（界面用一行中性文案，不当错误吓人）；
+     * - **静默超时 / 总超时** → 带上真实秒数、已经写了多少字，以及本地模型的成因提示；
+     * - 其它 → 模型/网络原话。
+     */
+    if (job.cancelled) {
+      logger.info(`[douyin-link] AI 画像已被用户停止（已写 ${job.writtenChars ?? 0} 字符）`)
+      return failure('cancelled')
+    }
+    const elapsedSec = Math.round((Date.now() - job.startedAt) / 1000)
+    const detail = job.abortReason ?? describe(error)
+    logger.warn(`[douyin-link] AI 画像失败（${elapsedSec}s）：${detail}`)
     return failure('model-failed', detail)
   } finally {
     running.delete(key)
     broadcast(AI_PORTRAIT_EVENT, { requestId, delta: '', done: true } satisfies AiPortraitChunk)
   }
+}
+
+/**
+ * 停止某个人的生成（界面上的「停止」按钮）→ 掐断底层请求。
+ *
+ * 为什么需要它：本地小模型一次可能跑十几分钟（实测 9B/Q4 约 21.6 token/s，4000 token 上限就是
+ * 3 分钟起步；更慢的机器上更久），没有停止按钮的话用户只能干等。返回 `true` = 确实掐了一次。
+ */
+export async function cancelAiPortrait(userId: string): Promise<boolean> {
+  const id = String(userId ?? '').trim()
+  if (!id) return false
+  // 与 generate 同一套缓存键口径：优先按画像 id 找（多账号的人几个号共用一次生成）
+  const identity = await userIdentity(id).catch(() => null)
+  const key = portraitKeyOf(identity?.identityId ?? 0, id)
+  const job = running.get(key)
+  if (!job || job.cancelled) return false
+  job.cancelled = true
+  job.controller.abort()
+  logger.info(`[douyin-link] AI 画像收到停止请求（key=${key}，已写 ${job.writtenChars ?? 0} 字符）`)
+  return true
 }
 
 /** 界面语言（拿不到就按中文：插件自己的界面词条里中文是主语言） */
@@ -401,11 +477,31 @@ function safeLanguage(): string {
 async function streamPortrait(
   model: BaseChatModel,
   prompt: { system: string; user: string },
-  requestId: string
+  requestId: string,
+  job: PortraitJob
 ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const { SystemMessage, HumanMessage } = await import('@langchain/core/messages')
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), PORTRAIT_TIMEOUT_MS)
+  const controller = job.controller
+  /**
+   * 看门狗（**替代原来的 180 秒墙钟硬超时**，见 `PORTRAIT_BUDGETS` 的注释）：
+   * 每收到一段就重新计时，所以「模型只是慢 / 在长时间思考」不会被误杀，
+   * 只有**真的不再吐字**才中止；总墙上限另算，给得很宽。
+   */
+  let stallTimer: ReturnType<typeof setTimeout> | null = null
+  const armStall = (): void => {
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      job.abortReason =
+        `模型已经 ${Math.max(1, Math.round(PORTRAIT_BUDGETS.stallMs / 1000))} 秒没有任何输出（已写 ${job.writtenChars ?? 0} 字符），已中止` +
+        `。本地模型长时间思考、或输出上限太大时常见；可换更快的模型，或在供应商高级参数里关掉思考（think: false）`
+      controller.abort()
+    }, PORTRAIT_BUDGETS.stallMs)
+  }
+  armStall()
+  const totalTimer = setTimeout(() => {
+    job.abortReason = `模型 ${Math.round(PORTRAIT_BUDGETS.totalMs / 60000)} 分钟还没写完，已中止`
+    controller.abort()
+  }, PORTRAIT_BUDGETS.totalMs)
   let text = ''
   let inputTokens = 0
   let outputTokens = 0
@@ -415,6 +511,8 @@ async function streamPortrait(
       { signal: controller.signal }
     )
     for await (const chunk of stream) {
+      // 收到分片 = 「还活着」（思考型模型的 thinking 帧会被 LangChain 丢掉，所以真卡住时连帧都没有）
+      armStall()
       const delta = chunkText(chunk)
       const usage = (chunk as { usage_metadata?: { input_tokens?: number; output_tokens?: number } }).usage_metadata
       if (usage) {
@@ -423,13 +521,31 @@ async function streamPortrait(
       }
       if (!delta) continue
       text += delta
+      job.writtenChars = text.length
       broadcast(AI_PORTRAIT_EVENT, { requestId, delta, done: false } satisfies AiPortraitChunk)
     }
   } finally {
-    clearTimeout(timer)
+    if (stallTimer) clearTimeout(stallTimer)
+    clearTimeout(totalTimer)
   }
-  if (!text.trim()) throw new Error('模型没有返回任何内容')
-  if (controller.signal.aborted) throw new Error(`模型超过 ${Math.round(PORTRAIT_TIMEOUT_MS / 1000)} 秒没有写完，已中止`)
+  if (job.cancelled) throw new Error('已停止')
+  if (controller.signal.aborted) {
+    throw new Error(job.abortReason ?? `模型在 ${Math.round((Date.now() - job.startedAt) / 1000)} 秒后中止`)
+  }
+  if (!text.trim()) {
+    /**
+     * **一个字正文都没有**：2026-10-13 实测本机 Ollama 的 qwen3.5-9b-32k 正是这样——
+     * 4000 token 的输出预算全烧在推理上（15,890 字思考），正文为空，花了 190 秒。
+     * 有 token 消耗 ⇒ 这几乎一定就是思考吃掉了预算，所以把「怎么救」直接写进失败原因，
+     * 不要只说一句「模型没有返回任何内容」让用户去猜。
+     */
+    throw new Error(
+      outputTokens > 0
+        ? `模型输出了 ${outputTokens} 个 token，但**正文一个字都没有**：思考型模型（qwen3 这类）把输出预算全用在推理上了。` +
+          `到「设置 → 抖音直播分析器 → 关掉本地模型的思考」打开开关即可（同一份材料实测：190 秒 0 字 → 52 秒 2114 字）`
+        : '模型没有返回任何内容'
+    )
+  }
   return { text, inputTokens, outputTokens }
 }
 

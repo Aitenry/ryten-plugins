@@ -481,6 +481,18 @@ check('归一化把非法值收敛成 null（0 / 负数 / 字符串）', [
   normalizeSettings({ portraitProviderId: -3 }).portraitProviderId,
   normalizeSettings({ portraitProviderId: '42' }).portraitProviderId
 ], [null, null, null])
+/* 「关掉本地模型的思考」也是同一类字段：四个地方要一起改，这里直测归一化那一步 */
+check('兜底设置里「关思考」默认 false', FALLBACK_SETTINGS.portraitDisableThinking, false)
+check(
+  '归一化保留「关思考」开关',
+  normalizeSettings({ portraitDisableThinking: true }).portraitDisableThinking,
+  true
+)
+check(
+  '归一化把非布尔值当成默认值（不是「真值就开」）',
+  [normalizeSettings({ portraitDisableThinking: 'yes' }).portraitDisableThinking, normalizeSettings({}).portraitDisableThinking],
+  [false, false]
+)
 
 const providerA = { id: 41, name: '工装供应商A', model: 'model-a', isDefault: true }
 const providerB = { id: 42, name: '工装供应商B', model: 'model-b', isDefault: false }
@@ -592,6 +604,21 @@ portraitModels = []
 snapshotPortraitId = null
 await remount()
 check('没有可用供应商时下拉是空的（不显示任何名字）', Boolean(selectedModelText()), false)
+
+/* 「关掉本地模型的思考」开关：默认关、能打开、存下去的是布尔（用户 2026-10-13 报本地模型之后加的） */
+const noThinkSwitch = () =>
+  dom.window.document.querySelector('[data-rb-portrait-nothink] .ant-switch') ??
+  dom.window.document.querySelector('[data-rb-portrait-nothink] button')
+check('「关掉本地模型的思考」这一行渲染出来了', Boolean(noThinkSwitch()), true)
+check('默认是关的（不动模型）', noThinkSwitch()?.classList.contains('ant-switch-checked'), false)
+calls.length = 0
+await act(async () => {
+  noThinkSwitch()?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, button: 0 }))
+})
+await settle()
+const noThinkSet = setCalls().at(-1)
+check('打开它会把 portraitDisableThinking=true 存下去', noThinkSet?.args?.[0]?.portraitDisableThinking, true)
+check('打开之后控件显示为开', noThinkSwitch()?.classList.contains('ant-switch-checked'), true)
 
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项失败`)
 rmSync(workDir, { recursive: true, force: true })

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Modal, Tag } from 'antd'
-import { RiFileTextLine, RiQuillPenLine, RiRefreshLine } from '@remixicon/react'
+import { RiFileTextLine, RiQuillPenLine, RiRefreshLine, RiStopCircleLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type {
   AiPortrait,
@@ -151,19 +151,37 @@ export function AiPortraitModal(props: {
     [load, props.userId, props.webRid]
   )
 
+  /**
+   * 「停止」：掐断正在跑的那一次（本地小模型一次可能跑十几分钟，光等不行）。
+   *
+   * 不做乐观更新：主进程那次生成会以 `cancelled` 收尾，`generate()` 的回话拿到它就置失败行——
+   * 于是界面上「正在生成」的转圈与文案都由**同一条真回话**驱动，不会出现两边说法不一致。
+   */
+  const stop = useCallback((): void => {
+    void api.aiPortraitCancel(props.userId).catch(() => undefined)
+  }, [props.userId])
+
   const portrait = state?.portrait ?? null
   // 生成中优先显示流里的半成品（它才是最“新”的），否则显示缓存/刚拿到的成品
   const partial = generating && streamed ? partialPortraitReport(streamed) : null
   const report = partial ?? portrait?.report ?? null
+  /**
+   * 模型标签：`供应商名 · 模型名`；**两者相同时只写一遍**——本地 Ollama 的供应商常常就用模型名
+   * 命名（用户 2026-10-13 的截图里那行是 `qwen3.5-9b-32k:latest · qwen3.5-9b-32k:latest`）。
+   */
+  const modelTextOf = (name: string, model: string): string => {
+    const left = String(name ?? '').trim()
+    const right = String(model ?? '').trim()
+    if (left && right) return left === right ? right : `${left} · ${right}`
+    return left || right
+  }
   const modelLabel = ((): string => {
     if (!state) return ''
-    if (portrait && portrait.model) {
-      return portrait.providerName ? `${portrait.providerName} · ${portrait.model}` : portrait.model
-    }
+    if (portrait && portrait.model) return modelTextOf(portrait.providerName, portrait.model)
     const selected = state.models.find((entry) => entry.id === state.selectedProviderId)
     const fallback = selected ?? state.models.find((entry) => entry.isDefault) ?? state.models[0]
     if (!fallback) return ''
-    return fallback.name ? `${fallback.name} · ${fallback.model}` : fallback.model
+    return modelTextOf(fallback.name, fallback.model)
   })()
   const gained = portrait ? Math.max(0, (state?.current.interactions ?? 0) - portrait.interactions) : 0
 
@@ -214,25 +232,30 @@ export function AiPortraitModal(props: {
               </span>
             </div>
             <span className="flex shrink-0 items-center gap-2">
-              {portrait && !generating ? (
-                <Button
-                  size="small"
-                  icon={<RiFileTextLine size={13} />}
-                  onClick={() => setShowRaw((open) => !open)}
-                >
-                  {showRaw ? t('douyin-link.users.aiHideRaw') : t('douyin-link.users.aiShowRaw')}
+              {/* 生成中：只能「停止」（本地小模型一次可能跑十几分钟，光等不行）；
+                  生成结束后：才是「看原文 / 重新生成」 */}
+              {generating ? (
+                <Button size="small" icon={<RiStopCircleLine size={13} />} onClick={stop}>
+                  {t('douyin-link.users.aiStop')}
                 </Button>
-              ) : null}
-              {portrait ? (
-                <Button
-                  size="small"
-                  loading={generating}
-                  icon={<RiRefreshLine size={13} />}
-                  onClick={() => generate(true)}
-                >
-                  {t('douyin-link.users.aiRegenerate')}
-                </Button>
-              ) : null}
+              ) : (
+                <>
+                  {portrait ? (
+                    <Button
+                      size="small"
+                      icon={<RiFileTextLine size={13} />}
+                      onClick={() => setShowRaw((open) => !open)}
+                    >
+                      {showRaw ? t('douyin-link.users.aiHideRaw') : t('douyin-link.users.aiShowRaw')}
+                    </Button>
+                  ) : null}
+                  {portrait ? (
+                    <Button size="small" icon={<RiRefreshLine size={13} />} onClick={() => generate(true)}>
+                      {t('douyin-link.users.aiRegenerate')}
+                    </Button>
+                  ) : null}
+                </>
+              )}
             </span>
           </div>
 
@@ -243,8 +266,12 @@ export function AiPortraitModal(props: {
             </span>
           ) : null}
 
+          {/* 失败 / 已停止：**停止不算错误**，用中性文案与中性色，别把用户的主动操作涂成红的 */}
           {failure ? (
-            <span className="text-xs leading-5" style={{ color: palette.down }}>
+            <span
+              className="text-xs leading-5"
+              style={{ color: failure.reason === 'cancelled' ? palette.axis : palette.down }}
+            >
               {failureText(t, failure.reason, failure.detail)}
             </span>
           ) : null}

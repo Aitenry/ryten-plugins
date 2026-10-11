@@ -231,6 +231,8 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:ai-portrait': (userId?: string) => hub.aiPortrait(String(userId ?? '')),
     'plugin:douyin-link:ai-portrait-generate': (webRid?: string, userId?: string, force?: boolean) =>
       hub.generateAiPortrait(String(webRid ?? ''), String(userId ?? ''), force === true),
+    // 停止这次生成（本地小模型一次可能跑十几分钟，光等不行）；回 `true` = 确实掐了一次
+    'plugin:douyin-link:ai-portrait-cancel': (userId?: string) => hub.cancelAiPortrait(String(userId ?? '')),
     'plugin:douyin-link:ai-portrait-models': () => listPortraitModels(),
     /*
      * 档案里「送礼 / 收礼」点开的**每日收益日历**（跨全部直播间，一个月一次）。

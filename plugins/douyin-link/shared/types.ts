@@ -550,6 +550,15 @@ export interface LiveSettings {
    * 但默认值仍然跟着宿主走 —— 与 harness 的后台任务同一条解析链（默认供应商 → 第一个启用的）。
    */
   portraitProviderId?: number | null
+  /**
+   * 生成 AI 画像时**关掉模型的思考**（下发 `think: false`，只有支持它的本地供应商认这个参数）。
+   *
+   * 为什么需要（2026-10-13 实测）：本地 Ollama 的 qwen3.5-9b-32k 把**整个输出预算**都烧在推理上——
+   * 同一份材料、4000 token 上限：不关思考是「190 秒 / 15,890 字推理 / **正文 0 字**」，
+   * 关了是「52 秒 / 2114 字正文」；而且 LangChain 的 Ollama 只转发 `content`，
+   * 思考期间界面一个字都收不到。默认 `false`（不动模型），用户在设置页显式打开才下发。
+   */
+  portraitDisableThinking?: boolean
 }
 
 /** 房间列表里的累计统计（概览页签的 KPI 卡片与对比页签） */
@@ -1191,8 +1200,13 @@ export interface AiPortraitModel {
   isDefault: boolean
 }
 
-/** 生成失败的原因（机器码在主进程、文案在渲染层） */
-export type AiPortraitFailure = 'no-model' | 'model-failed' | 'busy' | 'no-data'
+/**
+ * 生成失败的原因（机器码在主进程、文案在渲染层）。
+ *
+ * `cancelled` 是**用户自己点「停止」**：不算错误，界面给一行中性文案（本地小模型一次可能跑十几分钟，
+ * 没有停止按钮只能干等——2026-10-13 加）。
+ */
+export type AiPortraitFailure = 'no-model' | 'model-failed' | 'busy' | 'no-data' | 'cancelled'
 
 /** 打开弹窗时要的全部状态（缓存 + 数据侧现状 + 模型清单 + 是否正在生成） */
 export interface AiPortraitState {

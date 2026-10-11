@@ -68,6 +68,7 @@ import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
 import {
   aiPortraitState as readAiPortraitState,
+  cancelAiPortrait as cancelPortrait,
   disposePortrait,
   generateAiPortrait as runAiPortrait
 } from '../portrait'
@@ -284,7 +285,13 @@ export const DEFAULT_SETTINGS: LiveSettings = {
    * 所有内容都需要永久存储」）。以前默认 7 天，礼物榜/历史翻到 7 天前就没了。
    * 想要自动瘦身的人可以在设置里填天数（> 0 才清理）。
    */
-  retentionDays: 0
+  retentionDays: 0,
+  /**
+   * 「AI 画像」用哪个模型 / 要不要关掉本地模型的思考（2026-10-13）。
+   * 两个都是**可选**字段：老设置文件里没有它们，读出来就是 undefined（= 跟随宿主默认模型、不动思考）。
+   */
+  portraitProviderId: null,
+  portraitDisableThinking: false
 }
 
 const idleDanmaku = (): DanmakuStatus => ({ phase: 'off', failure: null, since: 0, received: 0 })
@@ -763,6 +770,10 @@ export class AnalyzerHub {
       const value = patch.portraitProviderId
       next.portraitProviderId =
         typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null
+    }
+    // 「关掉本地模型的思考」：布尔开关，落库照旧（生成时由 main/portrait.ts 下发给模型）
+    if (typeof patch.portraitDisableThinking === 'boolean') {
+      next.portraitDisableThinking = patch.portraitDisableThinking
     }
     this.settings = next
     for (const state of this.states.values()) state.recorder.setCap(next.maxItems)
@@ -2978,6 +2989,16 @@ export class AnalyzerHub {
       settings: this.settings,
       force
     })
+  }
+
+  /**
+   * 「AI 画像」：**停止**当前那次生成（界面上的「停止」按钮）。
+   *
+   * 本地小模型一次可能跑十几分钟（实测 9B/Q4 约 21.6 token/s、4000 token 输出上限 ⇒ 3 分钟起步），
+   * 没有这个入口用户只能干等。返回 `true` = 确实掐了一次。
+   */
+  async cancelAiPortrait(userId: string): Promise<boolean> {
+    return cancelPortrait(String(userId ?? ''))
   }
 
   /** 头像 → data URL（渲染层 CSP 不许外链图片，所以这一步在主进程做） */

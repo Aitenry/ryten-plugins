@@ -125,7 +125,9 @@ export const FALLBACK_SETTINGS: LiveSettings = {
   resumeOnStart: true,
   retentionDays: 7,
   /** 没选过 = null（用宿主的默认模型）；设置页会把「实际会用的那一个」显示出来 */
-  portraitProviderId: null
+  portraitProviderId: null,
+  /** 默认不动模型（关思考要用户显式打开：它只对支持 `think` 的本地供应商有意义） */
+  portraitDisableThinking: false
 }
 
 /**
@@ -162,7 +164,8 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
     portraitProviderId:
       typeof providerId === 'number' && Number.isFinite(providerId) && providerId > 0
         ? Math.round(providerId)
-        : null
+        : null,
+    portraitDisableThinking: bool(value.portraitDisableThinking, fallback.portraitDisableThinking ?? false)
   }
 }
 
@@ -398,7 +401,8 @@ export const AI_PORTRAIT_FAILURES: AiPortraitFailure[] = [
   'no-model',
   'model-failed',
   'busy',
-  'no-data'
+  'no-data',
+  'cancelled'
 ]
 
 function normalizeAiPortraitModel(value: unknown): AiPortraitModel | null {
@@ -736,6 +740,12 @@ export const api = {
       .map((entry) => normalizeAiPortraitModel(entry))
       .filter((entry): entry is AiPortraitModel => entry !== null)
   },
+  /**
+   * 「AI 画像」：**停止**正在跑的那一次（本地小模型一次可能跑十几分钟，光等不行）。
+   * 回 `true` = 确实掐了一次；`false` = 那一刻没有在跑的生成（已经结束或本来就没开）。
+   */
+  aiPortraitCancel: async (userId: string): Promise<boolean> =>
+    (await invoke(`${PREFIX}ai-portrait-cancel`, userId)) === true,
   /**
    * 档案里「送礼 / 收礼」点开的**每日收益日历**：这个人一个月的逐日送礼/收礼抖币
    * （跨全部直播间），外加有记录的月份清单与回的是哪个月。
