@@ -11,6 +11,11 @@ import type {
 } from '../../shared/types'
 import { analyzeChat, type ChatTextSignals } from './text'
 import type { EmotionKey } from './lexicon'
+/**
+ * 夹逼与对数归一化、以及消费评分用的参考量级，都来自 `shared/score.ts`：
+ * 弹幕行那行小字（消费评分）与这里必须**逐字同源**，不然同一个人两处显示不一样。
+ */
+import { clamp01, logNorm, GIFT_AVG_FULL_COINS, SPEND_FULL_COINS } from '../../shared/score'
 
 /**
  * 用户画像的**纯算法**模块（无 DB / 无 electron 依赖，方便单测与复用）。
@@ -113,21 +118,6 @@ export interface UserAnalysisData {
 
 /** 互动太少就不出画像（样本不够时「画像」只是噪声） */
 const MIN_INTERACTIONS = 5
-
-/** 把任意数值夹到 0-1 */
-function clamp01(value: number): number {
-  if (!Number.isFinite(value)) return 0
-  if (value <= 0) return 0
-  if (value >= 1) return 1
-  return value
-}
-
-/** 对数归一化：`log10(1+v) / log10(1+max)`——长尾计数的标准压缩方式 */
-function logNorm(value: number, max: number): number {
-  const v = Math.max(0, value)
-  const m = Math.max(1, max)
-  return clamp01(Math.log10(1 + v) / Math.log10(1 + m))
-}
 
 /** 机器键 → PascalCase 后缀（`connection` → `Connection`），用于拼动态 i18n 键 */
 function pascal(key: string): string {
@@ -277,8 +267,8 @@ function derive(data: UserAnalysisData, now: number): Derived {
 
   const total = interactions > 0 ? interactions : 1
   const signals: Signals = {
-    spend: logNorm(monetary, 100000),
-    avgGift: logNorm(avgGift, 2000),
+    spend: logNorm(monetary, SPEND_FULL_COINS),
+    avgGift: logNorm(avgGift, GIFT_AVG_FULL_COINS),
     chat: logNorm(data.chat, 300),
     enter: logNorm(data.enter, 100),
     activity: logNorm(interactions, 1000),

@@ -762,6 +762,63 @@ export async function getUsersAnyRoom(userIds: string[]): Promise<Map<string, Us
   return out
 }
 
+/**
+ * 一批用户的**跨房间入场次数合计**（实时列表行首要显示「入场 N 次」）。
+ *
+ * 为什么是跨房间：用户 2026-10-11 明确要求这几个数是「这个人」的，不是「这个房间里」的
+ * —— 直播场景里同一个人会在好几个房间来回进。
+ */
+export async function enterTotalsByUser(userIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const ids = [...new Set(userIds.filter((id) => id.length > 0))]
+  if (ids.length === 0) return out
+  await schemaReady
+  await withOrm('douyin-link.enterTotals', async (db) => {
+    for (let index = 0; index < ids.length; index += MSG_CHUNK) {
+      const slice = ids.slice(index, index + MSG_CHUNK)
+      const rows = await db
+        .select({
+          userId: douyinLinkUsers.userId,
+          total: sql<number>`coalesce(sum(${douyinLinkUsers.enter}), 0)::int`
+        })
+        .from(douyinLinkUsers)
+        .where(inArray(douyinLinkUsers.userId, slice))
+        .groupBy(douyinLinkUsers.userId)
+      for (const row of rows) out.set(row.userId, row.total)
+    }
+  })
+  return out
+}
+
+/**
+ * **今天**（`dayStart` 之后）每个人送出的抖币合计，跨全部直播间（主进程「今日消费」账本的补种）。
+ *
+ * 只统计 `kind = 'gift'` 且 `diamonds > 0` 的行；`dayStart` 由主进程按**本地自然日**算好传进来
+ * （与 `dayRecords` 的分天口径一致：本地 00:00）。
+ */
+export async function todayGiftTotals(dayStart: number): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  await schemaReady
+  return withOrm('douyin-link.todayGiftTotals', async (db) => {
+    const rows = await db
+      .select({
+        userId: douyinLinkMessages.userId,
+        total: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.kind, 'gift'),
+          gte(douyinLinkMessages.atMs, dayStart),
+          ne(douyinLinkMessages.userId, '')
+        )
+      )
+      .groupBy(douyinLinkMessages.userId)
+    for (const row of rows) if (row.total > 0) out.set(row.userId, row.total)
+    return out
+  })
+}
+
 export async function clearUsers(webRid = ''): Promise<void> {
   await schemaReady
   await withOrm('douyin-link.clearUsers', async (db) => {

@@ -116,6 +116,38 @@ export interface UserProfile extends UserInfo {
 }
 
 /**
+ * 实时列表里「人物那一截」要显示的几个数（用户 2026-10-11 要求：弹幕与进场两种行前面要显示
+ * 等级、消费评分、入场次数、今天消费）。
+ *
+ * 口径（用户当时拍板）：
+ * - **等级** = 抖音原生的荣誉等级（`honorLevel`，0 = 还没解析到）；粉丝团等级一并带上备用；
+ * - **消费评分** = **本房间累计**，算法与画像里的「消费力」同一套（见 `shared/score.ts`）；
+ * - **入场次数** = **跨全部直播间**的进场次数合计；
+ * - **今日消费** = **跨全部直播间**、本地自然日 00:00 起送出的抖币合计。
+ *
+ * 为什么由主进程算：跨房间的合计渲染层手上没有（它只有本房间的档案 map），
+ * 而「今日」还得按天切分——这些都在主进程一次查完，见 `AnalyzerHub.userBadges`。
+ */
+export interface UserBadge {
+  userId: string
+  /** 荣誉等级（抖音原生；0 = 还没解析到） */
+  honorLevel: number
+  /** 粉丝团等级（0 = 无） */
+  fansClubLevel: number
+  /** 消费评分 0-100（本房间累计；与画像「消费力」同一算法） */
+  spendScore: number
+  /** 算消费评分用的两个原值：本房间累计送出抖币 / 送礼次数 */
+  diamonds: number
+  giftCount: number
+  /** 跨全部直播间的入场次数合计 */
+  enterTotal: number
+  /** 今日（本地自然日）跨全部直播间送出的抖币 */
+  todayDiamonds: number
+  /** 库里有没有这个人的档案行（false = 只有本场数据，数字还在长） */
+  fromStore: boolean
+}
+
+/**
  * 神秘人的**真实资料**（我们库里藏着一个 id 都查不到的那种）。
  *
  * 与 `UserProfile` 不同：这份不是「我们观察到的」，而是拿用户 id 去抖音的 web 端

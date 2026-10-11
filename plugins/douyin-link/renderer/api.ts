@@ -42,6 +42,7 @@ import type {
   UserAnalysisPeer,
   UserAnalysisScore,
   UserBatch,
+  UserBadge,
   UserIdentity,
   UserProfile,
   UserRankPage,
@@ -575,6 +576,16 @@ export const api = {
   identityRename: async (userId: string, name: string): Promise<UserIdentity | null> => {
     const raw = await invoke(`${PREFIX}identity-rename`, userId, name)
     return isRecord(raw) ? ((raw as unknown as UserIdentity) ?? null) : null
+  },
+  /**
+   * 实时列表行首那截「人物信息」：等级 / 消费评分 / 入场次数 / 今日消费。
+   *
+   * 一次一批 id（界面按「可见行 + 新到的消息批」攒，1 秒节流一次）：跨房间的入场合计与
+   * 「今天消费」只有主进程手上才有，逐个查会把宿主的 PGlite 拖住（见 hub.userBadges）。
+   */
+  userBadges: async (webRid: string, userIds: string[]): Promise<UserBadge[]> => {
+    if (!webRid || userIds.length === 0) return []
+    return asList<UserBadge>(await invoke(`${PREFIX}user-badges`, webRid, userIds))
   },
   /** 某个人送过的礼物（按礼物名聚合；用户榜悬停时按需查） */
   userGifts: async (webRid: string, userId: string): Promise<GiftBreakdownRow[]> =>

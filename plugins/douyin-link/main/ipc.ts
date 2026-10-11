@@ -204,6 +204,12 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 改画像名（空 = 退回主账号昵称）
     'plugin:douyin-link:identity-rename': (userId?: string, name?: string) =>
       hub.renameIdentity(String(userId ?? ''), String(name ?? '')),
+    // 实时列表行首那截「人物信息」：等级 / 消费评分 / 入场次数 / 今日消费（批量，按可见行攒 id）
+    'plugin:douyin-link:user-badges': (webRid?: string, userIds?: string[]) =>
+      hub.userBadges(
+        String(webRid ?? ''),
+        Array.isArray(userIds) ? userIds.map((id) => String(id ?? '')) : []
+      ),
     // 某个人送过的礼物（用户榜悬停看明细）
     'plugin:douyin-link:user-gifts': (webRid?: string, userId?: string) =>
       hub.userGifts(String(webRid ?? ''), String(userId ?? '')),

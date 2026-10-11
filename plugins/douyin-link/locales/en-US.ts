@@ -255,6 +255,16 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       control: 'status',
       system: 'system'
     },
+    /**
+     * The per-person strip in front of a live-feed row (chat / join rows):
+     * level · spend score · joins · spent today.
+     */
+    feed: {
+      badgeLevel: 'Lv{{n}}',
+      badgeSpend: 'spend {{n}}',
+      badgeEnter: 'joins {{n}}',
+      badgeToday: 'today {{n}}'
+    },
     lines: {
       member: 'joined the room',
       like: 'liked the stream',

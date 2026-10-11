@@ -153,6 +153,15 @@ const DDL: string[] = [
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS gift INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE douyin_link_minutes ADD COLUMN IF NOT EXISTS diamonds INTEGER NOT NULL DEFAULT 0`,
   `DROP INDEX IF EXISTS idx_douyin_link_user_room_diamonds`,
+  /**
+   * 「按人跨房间」的两个查询（0.15.13：实时列表行首的等级/消费评分/入场次数/今日消费）：
+   * - `douyin_link_users (user_id)`：跨房间把某个人的档案行一次捞出来（入场次数合计、本房间档案）；
+   * - `douyin_link_messages (user_id, at_ms DESC)`：跨房间按人 + 时间范围筛（「今天消费」的补种）。
+   *
+   * 已有的是 `(web_rid, user_id)` 与 `(web_rid, at_ms)` 那几条——**房间在前**，按人查用不上。
+   */
+  `CREATE INDEX IF NOT EXISTS idx_douyin_link_user_id ON douyin_link_users (user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_douyin_link_msg_user_time ON douyin_link_messages (user_id, at_ms DESC)`,
   `DROP TABLE IF EXISTS douyin_link_gifts`
 ]
 

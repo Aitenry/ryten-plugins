@@ -37,6 +37,7 @@ import {
   type RoomTick,
   type SummaryPush,
   type UserAnalysis,
+  type UserBadge,
   type UserIdentity,
   type UserInfo,
   type UserProfile,
@@ -55,6 +56,8 @@ import type { RoomResolveResult } from '../douyin/room'
 import { fetchUserProfile, revealMysteryProfile } from '../douyin/mystery'
 import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
+import { TodaySpend } from './today-spend'
+import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
 import { isAnonymousName } from '../../shared/anonymous'
@@ -203,6 +206,9 @@ const ENRICH_CONCURRENCY = 2
 const ENRICH_FAIL_COOLDOWN_MS = 10 * 60 * 1000
 /** 保留期清理的节流 */
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+/** 一次最多给多少个 id 算「行首那截人物信息」（界面按可见行 + 新到的消息批攒，1 秒一次） */
+const BADGE_ROWS_CAP = 400
 
 /**
  * 「补档案」跑没跑过的标记（`douyin_link_meta` 的键，见 `repairUserRowsOnce`）。
@@ -1489,6 +1495,8 @@ export class AnalyzerHub {
         await store.insertMessages(messages)
         await store.bumpMinutes(minutes)
         await store.upsertUserDeltas(users)
+        // 这一批的礼物抖币进「今日消费」账本（实时列表行首要显示，见 userBadges）
+        this.noteTodaySpend(messages)
         this.addFlushedDeltas(state, messages)
         // 此刻数据才真正在库里：概览要看到的就是这一份，标脏让实时推送重算
         this.markSummaryDirty(state.webRid)
@@ -2531,6 +2539,74 @@ export class AnalyzerHub {
   }
 
   /**
+   * 实时列表行首那几个数（用户 2026-10-11：「弹幕 tab 的用户和进场的用户前面的人物要显示
+   * 等级，消费评分，入场次数，今天消费」）。
+   *
+   * 一次查一批 id（界面按可见行 + 新到的消息批攒 id，1 秒节流一次），口径：
+   * - **等级**（荣誉/粉丝团）、**消费评分**（本房间累计，算法同画像的「消费力」）：本房间档案行；
+   *   还没落库的新人退回本场数字（`fromStore = false`，几秒后就会被 flush 补上）；
+   * - **入场次数**：跨全部直播间合计（`enterTotalsByUser`）；
+   * - **今日消费**：跨全部直播间、本地自然日（`todaySpend` 账本，见 `ensureTodaySpend`）。
+   */
+  async userBadges(webRid: string, userIds: string[]): Promise<UserBadge[]> {
+    const ids = [...new Set(userIds.map((id) => String(id ?? '').trim()).filter((id) => /^\d{4,}$/.test(id)))]
+    if (ids.length === 0) return []
+    const capped = ids.slice(0, BADGE_ROWS_CAP)
+    await this.ensureTodaySpend()
+    const [stored, enterTotals] = await Promise.all([
+      webRid ? store.getUsers(webRid, capped) : Promise.resolve(new Map<string, UserRankRow>()),
+      store.enterTotalsByUser(capped)
+    ])
+    const state = this.states.get(webRid)
+    return capped.map((id) => {
+      const row = stored.get(id)
+      const session = state?.recorder.profile(id)
+      const diamonds = row?.stats.diamonds ?? session?.stats.diamonds ?? 0
+      const giftCount = row?.stats.gift ?? session?.stats.gift ?? 0
+      return {
+        userId: id,
+        honorLevel: Math.max(row?.honorLevel ?? 0, session?.honorLevel ?? 0),
+        fansClubLevel: Math.max(row?.fansClubLevel ?? 0, session?.fansClubLevel ?? 0),
+        spendScore: spendScore(diamonds, giftCount),
+        diamonds,
+        giftCount,
+        // 跨房间的合计：库里那一列（这个 id 在所有房间的 enter 之和）；查不到就退回本场进场数
+        enterTotal: enterTotals.get(id) ?? session?.stats.enter ?? 0,
+        todayDiamonds: this.todaySpend.get(id),
+        fromStore: Boolean(row)
+      }
+    })
+  }
+
+  /**
+   * 「今日消费」账本（跨全部直播间、按本地自然日）：内存累加 + 换天/启动时从库里补种。
+   *
+   * 为什么不每次查库、以及两个入口的口径，见 `./today-spend.ts` 的注释。
+   */
+  private todaySpend = new TodaySpend()
+
+  /** 补种（进程刚起来 / 刚换天时跑一次；库里的合计是权威） */
+  private async ensureTodaySpend(): Promise<void> {
+    const day = String(localDayStart())
+    this.todaySpend.roll(day)
+    if (this.todaySpend.seeded) return
+    try {
+      this.todaySpend.seed(await store.todayGiftTotals(Number(day)))
+    } catch (error) {
+      logger.warn('[douyin-link] 今日消费补种失败（先用内存里的增量）:', describe(error))
+      // 标记成已补种：否则每次问都重试一次，失败会一直打库
+      this.todaySpend.seed(new Map())
+    }
+  }
+
+  /** 落库之后把这一批的礼物抖币加进「今日消费」（跨房间共用一本账） */
+  private noteTodaySpend(rows: MessageRow[]): void {
+    if (rows.length === 0) return
+    this.todaySpend.roll(String(localDayStart()))
+    this.todaySpend.note(rows)
+  }
+
+  /**
    * 「在线观众」：把三条来源合起来（见 `shared/types` 的 PresenceRow 注释）。
    *
    * 排序（面板直接按这个顺序渲染）：**麦上按麦位序排最前**（他们是房间里最核心的一群人），
@@ -2868,4 +2944,15 @@ function sumDiamonds(row: RoomSeriesRow): number {
 function describe(error: unknown): string {
   if (error instanceof Error) return error.message.slice(0, 160)
   return String(error).slice(0, 160)
+}
+
+/**
+ * 本地自然日的起点（ms）：`floor((at + 本地偏移) / 一天) * 一天 - 本地偏移`。
+ *
+ * 与库里的分天口径**同一套**（`mapper.dayRecords` / `uniqueMinutes` 都用本地偏移再取整）——
+ * 界面上的「今天」与这里的「今日消费」必须是同一天，不然跨零点那会儿数字会对不上。
+ */
+function localDayStart(at = Date.now()): number {
+  const offset = -new Date().getTimezoneOffset() * 60000
+  return Math.floor((at + offset) / 86400000) * 86400000 - offset
 }

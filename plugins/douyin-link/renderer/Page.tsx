@@ -22,6 +22,7 @@ import type {
   MysteryReveal,
   RoomRuntime,
   UserAnalysis,
+  UserBadge,
   UserIdentity,
   UserProfile
 } from '../shared/types'
@@ -90,6 +91,11 @@ const MODE_SWITCH_CSS = `
  */
 const FEED_PAGE = 300
 const FEED_CAP = 5000
+
+/** 一次最多问多少个人物信息（主进程那边同样有上限；超出的下一批继续） */
+const BADGE_BATCH = 200
+/** 热用户（正在说话的人）的刷新节流：同一个 id 这么久之内不重复问 */
+const BADGE_REFRESH_MS = 5000
 
 /**
  * 合并两段弹幕（老的在前、新的在后），按 `id` 去重——库里的历史与内存里的实时段会有重叠。
@@ -167,6 +173,20 @@ export default function Page(): React.JSX.Element {
   const [settings, setSettings] = useState<LiveSettings | null>(null)
   const [itemsByRoom, setItemsByRoom] = useState<Map<string, DanmakuItem[]>>(() => new Map())
   const [usersByRoom, setUsersByRoom] = useState<Map<string, Map<string, UserProfile>>>(() => new Map())
+  /**
+   * 行首人物信息的缓存（按房间）：`userId → UserBadge`（等级 / 消费评分 / 入场次数 / 今日消费）。
+   *
+   * 只有主进程拿得到跨房间的合计与「今天」的切分，所以这里是**按需批量拉**：
+   * - 新到一批消息 → 把这批的发送者记进待查集合（正在说话的人最该有最新数字）；
+   * - 实时列表把「现在画出来的行」报上来（`onVisibleUsers`）→ 没查过的补进去；
+   * - 攒 400ms 发一次请求（**不轮询**：没人进待查集合就一个请求都不发）。
+   */
+  const [badgesByRoom, setBadgesByRoom] = useState<Map<string, Map<string, UserBadge>>>(() => new Map())
+  const badgePending = useRef<Map<string, Set<string>>>(new Map())
+  /** `${webRid}:${userId}` → 上一次入队/查询的时刻（热用户的刷新节流，见 `queueBadges`） */
+  const badgeAt = useRef<Map<string, number>>(new Map())
+  const badgeTimer = useRef<number | null>(null)
+  const badgeInFlight = useRef(false)
   const [usersReloadKey, setUsersReloadKey] = useState(0)
   const [tab, setTab] = useState<TabKey>('overview')
   /** 视图模式：直播间（单房间页签）/ 数据大屏（跨房间聚合）；切换按钮在左栏「全部停止」旁 */
@@ -310,6 +330,109 @@ export default function Page(): React.JSX.Element {
     setRange(next)
   }, [])
 
+  /**
+   * 把一批 id 记进「待查人物信息」并排一次请求（400ms 合并：一条弹幕一批推送会带几十个人，
+   * 逐个查就是几十次 IPC）。
+   *
+   * 两种入队语义（这是成本的关键）：
+   * - `refresh = true`（**新到消息的发送者**）：正在说话的人数字最容易变（尤其是「今日消费」），
+   *   所以即便已经查过也要重查——但同一个 id **5 秒内不重复**（`BADGE_REFRESH_MS`），
+   *   否则热房间里每秒几十个人就能把主进程的查询排满；
+   * - `refresh = false`（**列表里滚出来的人**）：只是补空缺，查过的就不再问。
+   */
+  const queueBadges = useCallback(
+    (webRid: string, ids: string[], refresh: boolean): void => {
+      if (!webRid || ids.length === 0) return
+      const known = badgesByRoom.get(webRid)
+      const pending = badgePending.current.get(webRid) ?? new Set<string>()
+      const now = Date.now()
+      let added = false
+      for (const id of ids) {
+        if (!id || pending.has(id)) continue
+        const key = `${webRid}:${id}`
+        const at = badgeAt.current.get(key) ?? 0
+        if (refresh) {
+          if (now - at < BADGE_REFRESH_MS) continue
+        } else if (known?.has(id)) {
+          continue
+        }
+        pending.add(id)
+        badgeAt.current.set(key, now)
+        added = true
+      }
+      if (!added) return
+      badgePending.current.set(webRid, pending)
+      if (badgeTimer.current !== null) return
+      badgeTimer.current = window.setTimeout(() => {
+        badgeTimer.current = null
+        void flushBadges()
+      }, 400)
+    },
+    // flushBadges 只读 ref（见下），所以这里不必把它列进依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [badgesByRoom]
+  )
+
+  /**
+   * 把待查集合里**一个房间的一批**（最多 `BADGE_BATCH`）问回来；还有剩的就再排一次。
+   *
+   * 一次只发一个房间：界面同一时刻只看一个房间的列表，跨房间的合计由主进程在
+   * `userBadges` 里一起算（那里才是「跨全部直播间」的口径）。
+   */
+  const flushBadges = useCallback(async (): Promise<void> => {
+    if (badgeInFlight.current) {
+      // 上一次还没回来：等它结束再排一次（不然会同时对同一个 id 发两遍）
+      if (badgeTimer.current === null) {
+        badgeTimer.current = window.setTimeout(() => {
+          badgeTimer.current = null
+          void flushBadges()
+        }, 400)
+      }
+      return
+    }
+    let target = ''
+    let ids: string[] = []
+    for (const [webRid, pending] of badgePending.current) {
+      if (pending.size === 0) continue
+      target = webRid
+      ids = [...pending].slice(0, BADGE_BATCH)
+      for (const id of ids) pending.delete(id)
+      break
+    }
+    if (!target || ids.length === 0) return
+    badgeInFlight.current = true
+    try {
+      const rows = await api.userBadges(target, ids)
+      if (rows.length > 0) {
+        setBadgesByRoom((previous) => {
+          const map = new Map(previous)
+          const table = new Map(map.get(target) ?? [])
+          for (const row of rows) table.set(row.userId, row)
+          map.set(target, table)
+          return map
+        })
+      }
+    } catch {
+      /* 主进程没回话：这一批不显示那截信息，行本身照常渲染；下一批消息会再排 */
+    } finally {
+      badgeInFlight.current = false
+    }
+    if (badgeTimer.current === null) {
+      badgeTimer.current = window.setTimeout(() => {
+        badgeTimer.current = null
+        void flushBadges()
+      }, 400)
+    }
+  }, [])
+
+  /** 实时列表报上来的「现在画出来的行是谁」：没查过的补进待查集合（查过的不再问） */
+  const onVisibleUsers = useCallback(
+    (ids: string[]): void => {
+      if (activeRoom) queueBadges(activeRoom, ids, false)
+    },
+    [activeRoom, queueBadges]
+  )
+
   /* ------------------------------------------------------- 初始与推送 */
 
   const applySnapshot = useCallback((raw: AnalyzerSnapshot): void => {
@@ -408,8 +531,14 @@ export default function Page(): React.JSX.Element {
           map.set(batch.webRid, list)
           return map
         })
+        // 顺手把这一批的发送者排进「人物信息」待查队列：正在说话的人数字最容易变（refresh = true）
+        queueBadges(
+          batch.webRid,
+          batch.items.map((item) => item.userId),
+          true
+        )
       }),
-    []
+    [queueBadges]
   )
 
   /**
@@ -815,6 +944,8 @@ export default function Page(): React.JSX.Element {
                 kinds={settings?.kinds ?? ['chat', 'member', 'like', 'social', 'gift', 'stats', 'control']}
                 autoScroll={settings?.autoScroll ?? true}
                 users={users}
+                badges={badgesByRoom.get(activeRoom)}
+                onVisibleUsers={onVisibleUsers}
                 onOpenUser={setOpenUser}
                 onLoadEarlier={loadEarlier}
                 loadingEarlier={earlierByRoom.get(activeRoom)?.loading ?? false}

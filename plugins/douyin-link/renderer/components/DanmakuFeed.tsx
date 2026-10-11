@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Segmented, Tooltip } from 'antd'
 import { RiArrowDownLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine, RiGiftLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
-import type { DanmakuItem, DanmakuKind, UserProfile } from '../../shared/types'
+import type { DanmakuItem, DanmakuKind, UserBadge, UserProfile } from '../../shared/types'
 import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
 import { UserAvatar } from './UserAvatar'
 
@@ -52,6 +52,16 @@ export function DanmakuFeed(props: {
   autoScroll: boolean
   /** userId → 档案（点昵称看详情要用） */
   users: Map<string, UserProfile>
+  /**
+   * userId → 行首那截人物信息（等级 / 消费评分 / 入场次数 / 今日消费），由 `Page` 按可见行
+   * 从主进程批量取（见 `api.userBadges`）。取不到的人这一截不显示，行本身照常渲染。
+   */
+  badges?: Map<string, UserBadge>
+  /**
+   * 报一次「现在画出来的这些行是谁」：`Page` 拿它去补那截人物信息
+   * （一批 id 一次查，不轮询；见 `Page` 里的 `noteBadgeIds`）。
+   */
+  onVisibleUsers?: (ids: string[]) => void
   onOpenUser: (userId: string) => void
   /**
    * 往库里再翻一页更早的消息（列表顶部的「加载更早」）。
@@ -104,6 +114,17 @@ export function DanmakuFeed(props: {
   const lastId = visible.length > 0 ? visible[visible.length - 1].id : 0
   if (atBottom && lastId > seenIdRef.current) seenIdRef.current = lastId
   const pending = visible.filter((item) => item.id > seenIdRef.current).length
+
+  /**
+   * 把「现在画出来的这些行是谁」报给上层：它拿这批 id 去主进程补行首那截人物信息
+   * （等级 / 消费评分 / 入场次数 / 今日消费）。**不是轮询**——只在可见集合变化时报一次，
+   * 上层再按 id 去重（已经查过的不会再问）。
+   */
+  useEffect(() => {
+    if (!props.onVisibleUsers) return
+    const ids = [...new Set(visible.map((item) => item.userId).filter(Boolean))]
+    if (ids.length > 0) props.onVisibleUsers(ids)
+  }, [visible, props.onVisibleUsers])
 
   useEffect(() => {
     const box = boxRef.current
@@ -247,6 +268,7 @@ export function DanmakuFeed(props: {
                 webRid={props.webRid}
                 palette={palette}
                 user={item.userId ? props.users.get(item.userId) : undefined}
+                badge={item.userId ? props.badges?.get(item.userId) : undefined}
                 onOpenUser={props.onOpenUser}
               />
             ))}
@@ -272,11 +294,21 @@ function DanmakuRow(props: {
   webRid: string
   palette: PluginPalette
   user?: UserProfile
+  /** 行首那截人物信息（等级/消费评分/入场次数/今日消费）；主进程还没回话时是 undefined */
+  badge?: UserBadge
   onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { item, palette, user } = props
   const accent = kindColor(item.kind, palette)
+
+  /**
+   * 行首那截人物信息只在**弹幕与进场**两类行上出现（用户 2026-10-11 的要求）。
+   *
+   * 关注/点赞/礼物那几行本来就有自己的重点（礼物还有金额那一列），再塞四个数字就成了噪声；
+   * 数据由 `Page` 批量从主进程取（跨房间的入场合计与今日消费只有主进程有，见 `api.userBadges`）。
+   */
+  const showPersonStats = (item.kind === 'chat' || item.kind === 'member') && Boolean(props.badge)
 
   /**
    * 紧凑行 vs 卡片行：聊天/人数/状态本来就是紧凑行；**没有发送者的礼物**（点歌）也走紧凑行——
@@ -307,6 +339,7 @@ function DanmakuRow(props: {
                   </span>
                 </Tooltip>
               ) : null}
+              {showPersonStats && props.badge ? <PersonStats badge={props.badge} t={t} /> : null}
               {item.user ? <span className="opacity-60">：</span> : null}
               <span>{item.text}</span>
             </>
@@ -369,6 +402,7 @@ function DanmakuRow(props: {
             <span className="opacity-70"> </span>
           </>
         ) : null}
+        {showPersonStats && props.badge ? <PersonStats badge={props.badge} t={t} /> : null}
         <span className="opacity-70">{lineText(t, item)}</span>
       </span>
       {/*
@@ -431,6 +465,36 @@ export function giftRecipientText(
 export function formatDiamonds(value: number): string {
   if (value >= 10000) return `${Math.round(value / 1000) / 10}万`
   return String(value)
+}
+
+/**
+ * 行首那截人物信息：**等级 · 消费评分 · 入场次数 · 今日消费**（用户 2026-10-11 的要求）。
+ *
+ * 版式取舍：
+ * - 数字用 `tabular-nums` 对齐（不用等宽字体：等宽只该给拉丁与数字，这里的标签是中文）；
+ * - 单位与标签压到 10px、透明度 60%，让昵称与正文仍是这一行的主角；
+ * - 0 值**照实显示 0**（「入场 0 次」「今日 0」都是真信息：这个人还没进过场 / 今天没花钱），
+ *   只有「还没取到这个人」（`badge` 缺失）时整截才不画——不编数字，也不显示「—」占位。
+ */
+function PersonStats(props: {
+  badge: UserBadge
+  t: (key: string, options?: Record<string, unknown>) => string
+}): React.JSX.Element {
+  const { badge, t } = props
+  return (
+    <span
+      className="ml-1 shrink-0 text-[10px] leading-4 opacity-60"
+      style={{ fontVariantNumeric: 'tabular-nums' }}
+    >
+      {badge.honorLevel > 0 ? <span>{t('douyin-link.feed.badgeLevel', { n: badge.honorLevel })}</span> : null}
+      <span> · </span>
+      <span>{t('douyin-link.feed.badgeSpend', { n: badge.spendScore })}</span>
+      <span> · </span>
+      <span>{t('douyin-link.feed.badgeEnter', { n: badge.enterTotal })}</span>
+      <span> · </span>
+      <span>{t('douyin-link.feed.badgeToday', { n: formatDiamonds(badge.todayDiamonds) })}</span>
+    </span>
+  )
 }
 
 /** 悬停昵称时的速览（等级/粉丝团/关注数，明细点开看） */

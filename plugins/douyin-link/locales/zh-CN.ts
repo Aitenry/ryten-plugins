@@ -265,6 +265,16 @@ export const DouyinLinkZhCN = {
       control: '直播状态',
       system: '系统'
     },
+    /**
+     * 实时列表行首那截人物信息（弹幕 / 进场两种行上）：等级 · 消费评分 · 入场次数 · 今日消费。
+     * 数字一律走 `tabular-nums` 对齐；`{{n}}` 由界面格式化（抖币万以上折成「1.2万」）。
+     */
+    feed: {
+      badgeLevel: 'Lv{{n}}',
+      badgeSpend: '消费 {{n}}',
+      badgeEnter: '进场 {{n}}',
+      badgeToday: '今日 {{n}}'
+    },
     lines: {
       member: '进入了直播间',
       like: '点了赞',
