@@ -6,10 +6,59 @@ import type { ChartOption } from '../lib/echarts'
  */
 interface ChartInstance {
   setOption: (option: ChartOption, opts?: { notMerge?: boolean; lazyUpdate?: boolean }) => void
+  getOption: () => unknown
   resize: () => void
   dispose: () => void
   on: (event: string, handler: (params: unknown) => void) => void
   off: (event: string, handler?: (params: unknown) => void) => void
+}
+
+/** 图例组件在我们这份 option 里的形状（`selected` = 用户点掉了哪些系列） */
+type LegendLike = { selected?: Record<string, boolean> } & Record<string, unknown>
+
+/**
+ * 读「用户点掉了哪些系列」。
+ *
+ * ECharts 把图例的开关状态维护在**实例的 option** 里（点一下图例 → `legend.selected` 变），
+ * 所以这里直接从实例读，不用自己记事件（也就不会被调用方传进来的 `onEvents` 顶掉监听）。
+ */
+export function readLegendSelected(chart: ChartInstance): Record<string, boolean> | null {
+  try {
+    const current = chart.getOption() as { legend?: LegendLike | LegendLike[] } | undefined
+    const legend = Array.isArray(current?.legend) ? current.legend[0] : current?.legend
+    const selected = legend?.selected
+    return selected && typeof selected === 'object' ? { ...selected } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把上一次的图例选择写回新 option。
+ *
+ * **为什么必须有**（用户 2026-10-11）：「概览 → 分钟趋势，点图例，过一会被重置了」。
+ * 原因是这张图每 2 秒收到一次 `summary` 推送、每次都用 `notMerge: true` 整体替换 option
+ * （见下面第三个 useEffect），而 `notMerge` 会把图例的开关状态一起清掉 —— 用户点掉「点赞」，
+ * 两秒后自己又亮了。同样的坑 `dataZoom` 已经单独处理过（见 MetricsPanel 里那段注释），
+ * 图例没有；放在这里统一兜住，所有图表（分钟趋势、日内走势…）都不用再各自记一遍。
+ */
+export function applyLegendSelection(
+  option: ChartOption,
+  selected: Record<string, boolean> | null
+): ChartOption {
+  if (!selected || Object.keys(selected).length === 0) return option
+  const mergeOne = (item: ChartOption): ChartOption => {
+    const raw = item as unknown as { legend?: LegendLike | LegendLike[] }
+    if (!raw.legend) return item
+    const list = Array.isArray(raw.legend) ? raw.legend : [raw.legend]
+    const merged = list.map((legend) => ({
+      ...legend,
+      // 新 option 里显式写了的优先（现在的调用方都不写 selected，所以就是原样还原用户的选择）
+      selected: { ...selected, ...(legend.selected ?? {}) }
+    }))
+    return { ...item, legend: Array.isArray(raw.legend) ? merged : merged[0] } as ChartOption
+  }
+  return (Array.isArray(option) ? (option as ChartOption[]).map(mergeOne) : mergeOne(option)) as ChartOption
 }
 
 export interface EChartProps {
@@ -69,7 +118,7 @@ export function EChart(props: EChartProps): React.JSX.Element {
       }
       observer = new ResizeObserver(resize)
       observer.observe(node)
-      chart.setOption(optionRef.current, { notMerge: true })
+      chart.setOption(applyLegendSelection(optionRef.current, readLegendSelected(chart)), { notMerge: true })
       applyEvents(chart, eventsRef.current)
       resize()
     })
@@ -87,7 +136,13 @@ export function EChart(props: EChartProps): React.JSX.Element {
     if (!chart) return
     const themeChanged = themeRef.current !== themeKey
     themeRef.current = themeKey
-    chart.setOption(option, { notMerge: themeChanged ? true : notMerge })
+    /**
+     * 推送把新 option 送进来时，**先读出用户在图上做过的事**（现在是图例的开关状态）再整体替换：
+     * 这一行就是「点了图例过一会儿被重置」的修复（见 `applyLegendSelection` 的注释）。
+     */
+    chart.setOption(applyLegendSelection(option, readLegendSelected(chart)), {
+      notMerge: themeChanged ? true : notMerge
+    })
   }, [option, notMerge, themeKey])
 
   // 事件变化：重新挂监听
