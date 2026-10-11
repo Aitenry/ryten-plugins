@@ -692,9 +692,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       /* The model behind "AI portrait" (uses the host's own providers; harness reads the same list) */
       portraitModelLabel: 'AI portrait model',
       portraitModelHint:
-        'Which model writes the AI portrait in a user profile. Defaults to following the host default model (the same resolution chain the AI assistant uses for background tasks); the list is what you already configured in Settings → Models, so pick whichever is cheaper or stronger. Results are stored in the database — you are never charged twice for the same portrait.',
-      portraitModelFollow: 'Follow the default model',
-      portraitModelDefault: 'default',
+        'Which model writes the AI portrait in a user profile. The list is what you already configured in Settings → Models (enabled providers only), so pick whichever is cheaper or stronger; until you pick one, the host default model is used, and the dropdown always shows the one that will actually run. Results are stored in the database — you are never charged twice for the same portrait.',
+      portraitModelDefault: 'host default',
       portraitModelEmpty: 'No LLM provider is configured yet (add one in Settings → Models)',
       cleanupNow: 'Clean up now',
       importExportLabel: 'Data backup (import / export)',

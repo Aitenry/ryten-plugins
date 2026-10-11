@@ -105,6 +105,18 @@ export default function Settings(): React.JSX.Element {
     return t('douyin-link.settingsPage.cookieAnonymous', { missing: health.missing.join(' / ') })
   })()
 
+  /**
+   * 「AI 画像模型」下拉里显示哪一个：**存过的就用存过的**，没存过就用**宿主默认**
+   * （没有默认就是已启用的第一个）—— 与主进程 `resolveProviderId` 的回退链一致，
+   * 所以「显示的」就是「下一次生成实际会用的」。
+   */
+  const portraitModelId = ((): number | undefined => {
+    const stored = settings?.portraitProviderId
+    if (typeof stored === 'number' && stored > 0) return stored
+    const models = portraitModels ?? []
+    return (models.find((model) => model.isDefault) ?? models[0])?.id
+  })()
+
   /** 取消（用户按了取消）与失败用的是同一个提示位，靠 message 键区分 */
   const runExport = (): void => {
     setBusy('export')
@@ -209,30 +221,36 @@ export default function Settings(): React.JSX.Element {
 
         {/*
           「AI 画像」用哪个模型（用户 2026-10-13：「设置页指定模型」）。
-          默认 = 跟随宿主默认模型（与 harness 的后台任务同一条解析链）；这里只列**已启用**的供应商，
-          值传 0 = 清成「跟随默认」。清单由主进程给（**不含 api_key**）。
+          只列**已启用**的供应商（清单由主进程给，**不含 api_key**）；**不再有「跟随默认模型」那个选项**
+          （用户 2026-10-13：「不要有默认模型选项」）—— 没选过时下拉直接显示**实际会用的那一个**
+          （宿主默认，没有默认就是第一个启用），选谁就存谁，所见即所用。
+          `· 宿主默认` 只是个标记（AI 助手后台任务用的就是它），不是可选项。
         */}
         <Row
           label={t('douyin-link.settingsPage.portraitModelLabel')}
           hint={t('douyin-link.settingsPage.portraitModelHint')}
         >
-          <Select
-            size="small"
-            style={{ width: 360 }}
-            loading={portraitModels === null}
-            value={settings?.portraitProviderId ?? 0}
-            onChange={(value) => void save({ portraitProviderId: value === 0 ? null : Number(value) })}
-            options={[
-              { value: 0, label: t('douyin-link.settingsPage.portraitModelFollow') },
-              ...(portraitModels ?? []).map((model) => ({
+          {/*
+            `data-rb-portrait-model`：给工装一个**稳定钩子**（antd 6 的 Select 内部结构换过名字：
+            `.ant-select-selector` → `.ant-select-content`，而页面上有两个 Select，
+            按类名取会抓错那一个多选）。仓库里可滚区/可点块也是这么标的（`data-rb-scroll` 等）。
+          */}
+          <span data-rb-portrait-model="" className="inline-flex">
+            <Select
+              size="small"
+              style={{ width: 360 }}
+              loading={portraitModels === null}
+              value={portraitModelId}
+              onChange={(value) => void save({ portraitProviderId: Number(value) })}
+              options={(portraitModels ?? []).map((model) => ({
                 value: model.id,
                 label: `${model.name || model.model}（${model.model}）${
                   model.isDefault ? ` · ${t('douyin-link.settingsPage.portraitModelDefault')}` : ''
                 }`
-              }))
-            ]}
-            notFoundContent={t('douyin-link.settingsPage.portraitModelEmpty')}
-          />
+              }))}
+              notFoundContent={t('douyin-link.settingsPage.portraitModelEmpty')}
+            />
+          </span>
         </Row>
 
         <Row label={t('douyin-link.settingsPage.kindsLabel')}>

@@ -700,9 +700,8 @@ export const DouyinLinkZhCN = {
       /* 「AI 画像」的模型（用的是宿主里配好的供应商；harness 的模型清单与这里同一份） */
       portraitModelLabel: 'AI 画像模型',
       portraitModelHint:
-        '「用户档案 → AI 画像」用哪个模型来写。默认跟随宿主的默认模型（与 AI 助手的后台任务同一条链）；这里的清单就是你已经在「设置 → 模型」里配好的供应商，选一个更省钱或更强的都行。生成结果会存进数据库，不会重复花钱。',
-      portraitModelFollow: '跟随默认模型',
-      portraitModelDefault: '默认',
+        '「用户档案 → AI 画像」用哪个模型来写。这里列的就是你已经在「设置 → 模型」里配好的供应商（只列启用的），选一个更省钱或更强的都行；还没选过时用宿主的默认模型，下拉里显示的就是实际会用的那一个。生成结果会存进数据库，不会重复花钱。',
+      portraitModelDefault: '宿主默认',
       portraitModelEmpty: '还没有配置任何大模型供应商（先到「设置 → 模型」里加一个）',
       cleanupNow: '立即清理',
       importExportLabel: '数据备份（导入 / 导出）',

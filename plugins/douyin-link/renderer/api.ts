@@ -123,10 +123,20 @@ export const FALLBACK_SETTINGS: LiveSettings = {
   douyinCookie: '',
   monitorConcurrency: 3,
   resumeOnStart: true,
-  retentionDays: 7
+  retentionDays: 7,
+  /** 没选过 = null（用宿主的默认模型）；设置页会把「实际会用的那一个」显示出来 */
+  portraitProviderId: null
 }
 
-/** 设置归一化：缺项用兜底值，数值收敛到合法范围（音量 0..1） */
+/**
+ * 设置归一化：缺项用兜底值，数值收敛到合法范围（音量 0..1）。
+ *
+ * ⚠️ **这里必须逐字段列全**（2026-10-13 用户报「选择其他模型选择不了」的根因）：
+ * 它是设置回话（快照与 `settings-set`）在渲染层的唯一收口，**没列在这里的字段会被悄悄丢掉**，
+ * 于是界面拿到的设置里没有那一项 —— 表现为「选完就弹回去、像没生效」，而库里其实已经存对了。
+ * 新增设置字段时，这里、`FALLBACK_SETTINGS`、主进程 `DEFAULT_SETTINGS`/`updateSettings`
+ * 四处要一起改（工装 `settings-render-check.mjs` 里有一条专门钉这个字段的断言）。
+ */
 export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLBACK_SETTINGS): LiveSettings {
   if (!isRecord(value)) return { ...fallback, kinds: [...fallback.kinds] }
   const kinds = Array.isArray(value.kinds)
@@ -134,6 +144,7 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
     : fallback.kinds
   const bool = (input: unknown, base: boolean): boolean => (typeof input === 'boolean' ? input : base)
   const volume = typeof value.volume === 'number' && Number.isFinite(value.volume) ? value.volume : fallback.volume
+  const providerId = value.portraitProviderId
   return {
     quality: isQualityKey(value.quality) ? value.quality : fallback.quality,
     audioOnConnect: bool(value.audioOnConnect, fallback.audioOnConnect),
@@ -144,7 +155,14 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
     douyinCookie: clampCookie(value.douyinCookie).value,
     monitorConcurrency: asCount(value.monitorConcurrency) || fallback.monitorConcurrency,
     resumeOnStart: bool(value.resumeOnStart, fallback.resumeOnStart),
-    retentionDays: typeof value.retentionDays === 'number' && Number.isFinite(value.retentionDays) ? value.retentionDays : fallback.retentionDays
+    retentionDays:
+      typeof value.retentionDays === 'number' && Number.isFinite(value.retentionDays)
+        ? value.retentionDays
+        : fallback.retentionDays,
+    portraitProviderId:
+      typeof providerId === 'number' && Number.isFinite(providerId) && providerId > 0
+        ? Math.round(providerId)
+        : null
   }
 }
 

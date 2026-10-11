@@ -20,10 +20,14 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
-const bundlePath = join(ROOT, 'dist/douyin-link/renderer.mjs')
-const distDir = join(ROOT, 'dist/douyin-link')
+/**
+ * 产物目录：默认本仓库的 `dist/douyin-link`；`DY_DIST=<解开的发布产物>` 可以指向
+ * **发布出去的那份字节**（验发布件而不是本地构建件，同 overview / rank 工装）。
+ */
+const distDir = process.env.DY_DIST ? process.env.DY_DIST.replace(/^\/([A-Za-z]:)/, '$1') : join(ROOT, 'dist/douyin-link')
+const bundlePath = join(distDir, 'renderer.mjs')
 if (!existsSync(bundlePath)) {
-  console.error('先跑 npm run build（找不到 dist/douyin-link/renderer.mjs）')
+  console.error(`先跑 npm run build（找不到 ${bundlePath}）`)
   process.exit(2)
 }
 
@@ -444,6 +448,150 @@ calls.length = 0
 await paste(fullCookie)
 check('粘贴的就是库里那份 → 不重复调设置通道', setCalls().length, 0)
 check('粘贴的就是库里那份 → 框里一个字不变', textarea()?.value, fullCookie)
+
+/* ------------------------------- 7. 「AI 画像模型」下拉：选得动、显示的就是实际会用的 */
+
+/*
+ * 用户 2026-10-13 报「不要有默认模型选项，选择其他模型选择不了」：
+ * - 「选择不了」的根因是 `api.ts` 的 `normalizeSettings` 没有列这个新字段 —— 设置回话在渲染层
+ *   被归一化时把它吃掉了，界面拿到的设置里没有它，于是选完立刻弹回「宿主默认」；
+ * - 「不要有默认模型选项」= 下拉里不再有「跟随默认模型」那一条，直接列真实供应商。
+ * 这一段把两件事都钉住：①归一化**不许吃掉**这个字段（下面直测，与 UI 结构无关）；
+ * ②选中的值真的送到了主进程；③**回包之后下拉里显示的就是刚选的那个**。
+ */
+const apiBundle = join(workDir, 'api.mjs')
+await build({
+  entryPoints: [join(ROOT, 'plugins/douyin-link/renderer/api.ts')],
+  outfile: apiBundle,
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent'
+})
+const { normalizeSettings, FALLBACK_SETTINGS } = await import(pathToFileURL(apiBundle).href)
+check('兜底设置里「AI 画像模型」是 null（没选过 = 用宿主默认）', FALLBACK_SETTINGS.portraitProviderId, null)
+check(
+  '归一化**保留**已选的供应商 id（这个字段就是被这里吃掉的）',
+  normalizeSettings({ portraitProviderId: 42 }).portraitProviderId,
+  42
+)
+check('归一化把非法值收敛成 null（0 / 负数 / 字符串）', [
+  normalizeSettings({ portraitProviderId: 0 }).portraitProviderId,
+  normalizeSettings({ portraitProviderId: -3 }).portraitProviderId,
+  normalizeSettings({ portraitProviderId: '42' }).portraitProviderId
+], [null, null, null])
+
+const providerA = { id: 41, name: '工装供应商A', model: 'model-a', isDefault: true }
+const providerB = { id: 42, name: '工装供应商B', model: 'model-b', isDefault: false }
+const labelOf = (provider) =>
+  `${provider.name}（${provider.model}）${provider.isDefault ? ` · ${zh['douyin-link'].settingsPage.portraitModelDefault}` : ''}`
+/** 模型清单由主进程给；设置快照里带上「已选过的那个」（先不带 = 没选过） */
+let portraitModels = [providerA, providerB]
+let snapshotPortraitId = null
+const prevInvoke = dom.window.api.plugin.invoke
+dom.window.api.plugin.invoke = async (channel, ...args) => {
+  if (channel === 'plugin:douyin-link:ai-portrait-models') {
+    calls.push({ channel, args })
+    return portraitModels
+  }
+  if (channel === 'plugin:douyin-link:settings-set') {
+    calls.push({ channel, args })
+    return { ...(args[0] ?? {}) }
+  }
+  if (channel === 'plugin:douyin-link:snapshot') {
+    calls.push({ channel, args })
+    // 快照带的是「主进程那份设置」：没选过时**没有**这个字段（老用户/首次就是这个形状）
+    return { settings: { ...(snapshotPortraitId ? { portraitProviderId: snapshotPortraitId } : {}) }, rooms: [] }
+  }
+  return prevInvoke(channel, ...args)
+}
+/** 重新挂一次设置页 = 重新读一遍快照（换人/改设置后的样子） */
+const remount = async () => {
+  await act(async () => {
+    root.render(React.createElement('div'))
+  })
+  await act(async () => {
+    root.render(React.createElement(registered.Component))
+  })
+  await settle()
+}
+/** 只认「AI 画像模型」那一个 Select（页面上还有一个多选，按类名取会抓错） */
+const portraitRoot = () => dom.window.document.querySelector('[data-rb-portrait-model]')
+/**
+ * 当前选中的那个模型：读**整个 Select 的文本**。
+ *
+ * 不读 `.ant-select-selection-item`：antd 6 的单选不再用那个类渲染选中值（只有多选的标签才用它），
+ * 而「文本里有没有这个供应商的名字」正是用户看到的东西，跨 antd 版本都成立。
+ */
+const selectedModelText = () => portraitRoot()?.querySelector('.ant-select')?.textContent ?? ''
+const openSelect = async () => {
+  // antd 6：可点开的壳是 `.ant-select-content`（v5 时代叫 `.ant-select-selector`）
+  const box =
+    portraitRoot()?.querySelector('.ant-select-content') ?? portraitRoot()?.querySelector('.ant-select-selector')
+  await act(async () => {
+    box?.dispatchEvent(new dom.window.MouseEvent('mousedown', { bubbles: true, button: 0 }))
+  })
+  await settle()
+}
+const optionByLabel = (label) =>
+  [...dom.window.document.querySelectorAll('.ant-select-item-option')].find(
+    (node) => (node.getAttribute('title') ?? node.textContent ?? '').includes(label)
+  )
+const pickOption = async (label) => {
+  await openSelect()
+  const option = optionByLabel(label)
+  if (!option) return false
+  await act(async () => {
+    option.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, button: 0 }))
+  })
+  await settle()
+  return true
+}
+
+mainReply = (patch) => ({ ...patch })
+snapshotSettings = { douyinCookie: fullCookie }
+calls.length = 0
+await remount()
+check('下拉渲染出来了（当前选中项有字）', Boolean(selectedModelText()), true)
+check('下拉里显示的是**宿主默认**那个（没选过时不写设置，显示的就是实际会用的）', (selectedModelText() ?? '').includes(labelOf(providerA)), true)
+
+await openSelect()
+const optionTexts = [...dom.window.document.querySelectorAll('.ant-select-item-option')].map(
+  (node) => (node.getAttribute('title') ?? node.textContent ?? '').trim()
+)
+check('下拉里列的是供应商自己的名字（不是笼统的「模型」）', optionTexts.some((item) => item.includes(labelOf(providerB))), true)
+check('下拉里**没有**「跟随默认模型」那一条（用户 2026-10-13 要求去掉）', optionTexts.some((item) => item.includes('跟随默认模型')), false)
+check('下拉里只有真实供应商两项', optionTexts.length, 2)
+/** 点空白处收起下拉（不然下一个 pickOption 里的 openSelect 会把它关掉） */
+await act(async () => {
+  dom.window.document.body.dispatchEvent(new dom.window.MouseEvent('mousedown', { bubbles: true, button: 0 }))
+})
+await settle()
+
+calls.length = 0
+check('能选中另一个模型', await pickOption(labelOf(providerB)), true)
+const modelSet = setCalls().at(-1)
+check('选完真的把这个 id 送到了主进程', modelSet?.args?.[0]?.portraitProviderId, providerB.id)
+/*
+ * 关键一条（bug 就在这里）：回包经过 `normalizeSettings` 之后，界面必须**留着**刚选的那个。
+ * 旧代码把这个字段吃掉了 → 这里会显示回 A（宿主默认），也就是用户看到的「选不了」。
+ */
+check('回包之后下拉里显示的就是刚选的那个（不再弹回默认）', (selectedModelText() ?? '').includes(labelOf(providerB)), true)
+check('选的是 B，就没有「宿主默认」那个后缀', (selectedModelText() ?? '').includes('宿主默认'), false)
+
+// 快照路径（重开设置页）也要留着：主进程存了 42，界面就该显示 B
+snapshotPortraitId = providerB.id
+calls.length = 0
+await remount()
+check('重开设置页仍然显示已选的那个（快照归一化没吃掉字段）', (selectedModelText() ?? '').includes(labelOf(providerB)), true)
+check('重开只读快照，没有多余的写盘', setCalls().length, 0)
+
+// 一个供应商都没配：下拉空态 + 说明，不是崩掉
+portraitModels = []
+snapshotPortraitId = null
+await remount()
+check('没有可用供应商时下拉是空的（不显示任何名字）', Boolean(selectedModelText()), false)
 
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项失败`)
 rmSync(workDir, { recursive: true, force: true })
