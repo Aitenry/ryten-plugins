@@ -26,7 +26,7 @@ import type {
   UserDetail,
   UserProfile
 } from '../shared/types'
-import { isAnonymousId } from '../shared/anonymous'
+import { isAnonymousId, rawDouyinId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
 import { installCloseDiagnostics } from './diagnose'
 import { AllRoomsPanel } from './components/AllRoomsPanel'
@@ -1323,13 +1323,18 @@ function UserProfileModal(props: {
 
   /**
    * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
+   *
    * 唯一的例外是抖音的匿名**占位 id `111111`**：帧里的 id/抖音号/secUid 全是它，真实账号标识被抹掉，
    * 拿它查一定 `notFound`（2026-10-09 批量抓帧实测），所以不给按钮、改成一句如实说明。
+   *
+   * ⚠️ 这里的 `props.userId` 可能是**内部身份键**（`anon:111111#dou2056511`，见
+   * `shared/anonymous.ts`）：匿名的人按马甲分开记账之后，档案弹窗拿到的就是它。
+   * 所以判「是不是匿名」要先 `rawDouyinId()` 脱壳，展示抖音 id 的地方也一样。
    */
-  const revealable =
-    !loading && /^\d{4,}$/.test(props.userId) && !isAnonymousId(props.userId)
-  /** 这条档案就是那个共用占位 id：真实身份在数据里不可还原 */
-  const anonymousOnly = !loading && isAnonymousId(props.userId)
+  const rawId = rawDouyinId(props.userId)
+  const revealable = !loading && /^\d{4,}$/.test(props.userId) && !isAnonymousId(props.userId)
+  /** 这条档案是匿名占位身份（可能已经按马甲分开）：真实账号标识在抖音那边就不可还原 */
+  const anonymousOnly = !loading && isAnonymousId(rawId)
 
   useEffect(() => {
     let alive = true
@@ -1640,7 +1645,7 @@ function UserProfileModal(props: {
                 </div>
                 <span className="flex flex-wrap items-center gap-1 text-xs opacity-70">
                   <span>
-                    {t('douyin-link.users.userId')} {profile.id}
+                    {t('douyin-link.users.userId')} {rawId}
                   </span>
                   <span>·</span>
                   <span>
@@ -1724,7 +1729,7 @@ function UserProfileModal(props: {
                 items={[
                   `${t('douyin-link.users.following')} ${profile.following > 0 ? formatNumber(profile.following) : '-'}`,
                   `${t('douyin-link.users.follower')} ${profile.follower > 0 ? formatNumber(profile.follower) : '-'}`,
-                  `${t('douyin-link.users.userId')} ${profile.id}`
+                  `${t('douyin-link.users.userId')} ${rawId}`
                 ]}
               />
               <FactLine

@@ -65,7 +65,7 @@ import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
-import { isAnonymousName } from '../../shared/anonymous'
+import { anonymousUserId, displayDisplayId, displayNickname, isAnonymousName } from '../../shared/anonymous'
 import { COOKIE_MAX_LENGTH, clampCookie } from '../../shared/cookie'
 import { monthBucketRange, monthOf } from '../../shared/gift-calendar'
 
@@ -222,6 +222,14 @@ const BADGE_ROWS_CAP = 400
  * 而全表按 (web_rid, user_id) 聚合在「永久保存」的库上会越跑越贵。
  */
 const USERS_REPAIRED_KEY = 'users.repaired'
+
+/**
+ * 「匿名身份拆分」跑没跑过的标记（见 `splitAnonymousOnce`）。
+ *
+ * 与补档案同一个道理：那是一次性的历史重排（把共用占位 id `111111` 上的所有匿名行
+ * 按马甲分开），跑完之后新数据写入时就带对了身份，没必要每次启动再扫一遍全库。
+ */
+const ANON_SPLIT_KEY = 'identity.anon-split'
 
 export const DEFAULT_SETTINGS: LiveSettings = {
   // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
@@ -440,6 +448,7 @@ export class AnalyzerHub {
     this.startTimers()
     void this.cleanup()
     void this.repairUserRowsOnce()
+    void this.splitAnonymousOnce()
     /**
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
@@ -476,6 +485,25 @@ export class AnalyzerHub {
   }
 
   /**
+   * **工装用**：把一批消息直接喂进某个房间的记录器（跳过网络与采集器）。
+   *
+   * 为什么要有这个入口（`spike/anon-identity-check.mjs`）：匿名身份拆分这件事发生在
+   * `applyItems` → `identifyBatch`（进 recorder 之前），只有走**真 hub** 才能验到
+   * 「三个共用占位 id `111111` 的匿名用户各记各的」。房间不在库里就现场建一个空状态
+   * （不落库、不连网、不出声）。
+   */
+  ingestItemsForTest(webRid: string, items: DanmakuItem[], users: UserInfo[] = [], roomEnded = false): void {
+    const state = this.states.get(webRid) ?? this.createState({ webRid, addedAt: Date.now() })
+    this.states.set(webRid, state)
+    this.handleItems(state, items, users, roomEnded)
+  }
+
+  /** 工装用：立刻跑一次攒批落库（不等 2 秒那一拍） */
+  async flushForTest(): Promise<void> {
+    await this.flush()
+  }
+
+  /**
    * **补档案（跑一次）**：把 0.15.9 以前那个配额 bug 漏掉的历史档案行按消息流水补出来。
    *
    * 三个决定：
@@ -502,6 +530,36 @@ export class AnalyzerHub {
       }
     } catch (error) {
       logger.warn('[douyin-link] 补档案失败（下次启动会再试）:', describe(error))
+    }
+  }
+
+  /**
+   * **匿名身份拆分（跑一次）**：把历史上堆在共用占位 id `111111` 上的匿名行按马甲分开。
+   *
+   * 由来（2026-10-12 用户报障「匿名用户，内容监控会重复，这么严重的 bug」）：抖音给所有
+   * 隐藏身份的人发的 id 都是 `111111`，按 id 聚合的一切都把互不相干的匿名观众堆成一个人——
+   * 档案弹窗的「互动统计」成了几个人头的合计、「历史弹幕」成了混合时间线，
+   * 看上去就是同一个人把内容重复刷了一遍。新数据从这一版起按马甲分开，**旧数据靠这次重排**。
+   *
+   * 三个决定（照 `repairUserRowsOnce` 的口径）：
+   * 1. **装载时 fire-and-forget**：重排几万行不该拖慢装载（界面上晚几秒看到正确的档案没关系）；
+   * 2. **只跑一次**（`identity.anon-split` 标记）：跑失败不写标记，下次启动再试；
+   * 3. 跑完之后**作废「库里累计量」缓存**：房间列表的「用户 N」在拆分后本来就该变大。
+   */
+  private async splitAnonymousOnce(): Promise<void> {
+    try {
+      if ((await store.getMeta(ANON_SPLIT_KEY)) === '1') return
+      const startedAt = Date.now()
+      const moved = await store.splitAnonymousIdentities()
+      await store.setMeta(ANON_SPLIT_KEY, '1')
+      logger.info(
+        moved > 0
+          ? `[douyin-link] 匿名身份拆分：按马甲重排了 ${moved} 行（原先是所有匿名用户共用一个 id，+${since(startedAt)}）`
+          : `[douyin-link] 匿名身份拆分：没有需要重排的匿名行（+${since(startedAt)}）`
+      )
+      if (moved > 0) this.storeCache.at = 0
+    } catch (error) {
+      logger.warn('[douyin-link] 匿名身份拆分失败（下次启动会再试）:', describe(error))
     }
   }
 
@@ -1261,6 +1319,10 @@ export class AnalyzerHub {
      * 先本场见过的人，再查库（见 `resolveGiftSenders`）——补到了就直接显示真名，
      * 补不到就照实显示匿名/裸 id，用户可以在档案弹窗里点「查看神秘人信息」按 id 去抖音查
      * （见 `main/douyin/mystery.ts`）。
+     *
+     * 注意这里判「没名字」用的是**原始占位名**（`isAnonymousName`）：马甲名（`dou2056511`）
+     * 在抖音那边不算匿名，但在我们这套口径里**属于匿名人**——他的 id 也是共用的占位 `111111`，
+     * 所以照样要走「补真名」，只是补不到时下面会按马甲分开记账（见 `identifyBatch`）。
      */
     const unnamed = items.filter((item) => item.kind === 'gift' && item.userId && isAnonymousName(item.user))
     if (unnamed.length === 0) {
@@ -1282,6 +1344,68 @@ export class AnalyzerHub {
       }
     })
     this.ingestChain.set(state.webRid, next.catch(() => undefined))
+  }
+
+  /**
+   * **把「匿名」的人按马甲分开**（2026-10-12 修：用户报障「匿名用户，内容监控会重复」）。
+   *
+   * 抖音给所有隐藏身份的人发的 `id` 都是 `111111`，于是按 id 聚合的一切都会把互不相干的
+   * 匿名观众堆成一个人：档案「互动统计」成了几个人头的合计、库里累计变成十几条弹幕，
+   * 「历史弹幕」把几个马甲名说过的话排成一条时间线——看上去就是同一个人把内容重复刷了一遍。
+   *
+   * 这里在**进 recorder 之前**把 id 换成 `anon:<占位 id>#<马甲>`（见 `shared/anonymous.ts`），
+   * 于是一条链路全都跟着分开：内存档案、消息流水、用户统计、分钟桶、在场清单、榜单、历史查询。
+   * 名字补到了真名（这个人以前露过面）就退回他的真 id，同一帧里的 `users` 也要跟着换，
+   * 否则档案会写到两个身份上。
+   */
+  private identifyBatch(items: DanmakuItem[], users: UserInfo[]): { items: DanmakuItem[]; users: UserInfo[] } {
+    const identityOf = new Map<string, string>()
+    const usersOut: UserInfo[] = []
+    for (const info of users) {
+      if (!info.id) continue
+      const key = anonymousUserId(info.id, info)
+      identityOf.set(info.id, key)
+      // 连马甲都没有（残缺帧）：抖音 id 与昵称都没给出跟「这个人是谁」有关的东西，
+      // 那就不要建档案——建出来的一行会把好几个人合成一个（见文件头的说明）
+      if (!key) continue
+      usersOut.push({ ...info, id: key, displayId: displayDisplayId(info.displayId) })
+    }
+    const seen = new Set<string>()
+    const itemsOut: DanmakuItem[] = []
+    for (const item of items) {
+      if (!item.userId) {
+        itemsOut.push({ ...item, user: displayNickname(item.user) })
+        continue
+      }
+      const key = identityOf.get(item.userId) ?? anonymousUserId(item.userId, { nickname: item.user })
+      // 同上：认不出是谁的匿名帧**不写进用户维度**（消息流水照记，只是没有档案行）
+      if (!key) continue
+      itemsOut.push({ ...item, userId: key, user: displayNickname(item.user) })
+      // 帧里没带 `User` 的那条（点歌 / 只有裸 id 的礼物）：身份是从 id 推出来的，
+      // 这一批若没有它的档案就补一份只有昵称的，否则名字就丢了
+      if (!identityOf.has(item.userId) && !seen.has(key)) {
+        seen.add(key)
+        const name = displayNickname(item.user)
+        if (name) {
+          usersOut.push({
+            id: key,
+            displayId: '',
+            nickname: name,
+            gender: 0,
+            signature: '',
+            city: '',
+            avatar: '',
+            following: 0,
+            follower: 0,
+            honorLevel: 0,
+            fansClubLevel: 0,
+            badges: [],
+            secUid: ''
+          })
+        }
+      }
+    }
+    return { items: itemsOut, users: usersOut }
   }
 
   /**
@@ -1367,9 +1491,16 @@ export class AnalyzerHub {
     this.lastDataAt.set(state.webRid, Date.now())
     // 有人发言/进场 → 在线观众那份表要跟着变（界面没开这个页签就不记）
     this.markPresenceDirty(state.webRid)
-    this.noteEmptyGifts(state, items)
-    const touched = state.recorder.ingest(items, users, this.settings.maxItems)
+    /**
+     * **匿名的人在这里按马甲分开**（见 `identifyBatch`）——必须在 `ingest` 之前，
+     * 因为「这个人的档案/统计/在场/分钟桶」全部按 `userId` 聚合。
+     */
+    const identified = this.identifyBatch(items, users)
+    this.noteEmptyGifts(state, identified.items)
+    const touched = state.recorder.ingest(identified.items, identified.users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)
+    items = identified.items
+    users = identified.users
 
     if (items.length > 0) {
       state.danmaku = {

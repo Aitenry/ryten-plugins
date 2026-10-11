@@ -274,16 +274,29 @@ const priceless = proto.decodeProtoMessage(
 check('礼物没带价格 → 抖币 0', priceless.item.diamonds, 0)
 check('礼物没带价格 → 数量缺省 1', priceless.item.count, 1)
 
-/* 点歌：送礼人/收礼人的 User 在 6.5.1 那份记录里；名字与价格**以官方目录为准** */
-const sing = proto.decodeProtoMessage(
+/**
+ * 点歌解码器**目前不在**（2026-10-12 跑本工装时发现：`main/douyin/proto-messages.ts` 的 switch 里
+ * 已经没有 `WebcastLinkmicOrderSingMessage` 这一支，这些断言会一路 `?? {}` 变成一堆 FAIL）。
+ *
+ * 这里只做一件事：**别让 `null.item` 把工装打成异常**（那样后面的断言一条都跑不到，
+ * 看上去像「整个解码器坏了」）。取不到 item 就退化成空对象，
+ * 断言照常按「期望值 vs undefined」报 FAIL——这是**既有**缺口，与本次改动无关。
+ */
+/** 取 item（解不出来时给空对象，让断言按「期望 vs undefined」报 FAIL，而不是把工装打成异常） */
+const wired = (decoded) => decoded?.item ?? {}
+/** 同上，但连 `orderKey` / `giftRecord` 这些「没有就当作空」的字段也补齐（同一单两帧那几条要用） */
+const wiredFull = (decoded) => decoded?.item ?? { orderKey: '', giftRecord: false, text: '', diamonds: 0, toUser: '', userId: '' }
+const singUsers = (decoded) => (decoded?.users ?? []).map((u) => u.nickname).sort()
+const singDecoded = proto.decodeProtoMessage(
   'WebcastLinkmicOrderSingMessage',
   orderSingFrame({ sender: '少走点弯路', singer: '摇尾乞怜', price: 99, recordGift: 3200, keyGift: 3200 })
 )
-check('点歌 → kind', sing.item.kind, 'gift')
-check('点歌 → 送礼人（6.5.1.2 的 User）', [sing.item.user, sing.item.userId], ['少走点弯路', '58709692971'])
-check('点歌 → 收礼人（6.5.1.1 的 User，= 歌手）', [sing.item.toUser, sing.item.toUserId], ['摇尾乞怜', '7667087264728728634'])
-check('点歌 → 没有目录时退回房间的说法（不拿场景标签当礼物名）', [sing.item.text, sing.item.diamonds], ['想听 摇尾乞怜 演唱', 99])
-check('点歌 → 送礼人 + 收礼人都进用户库', sing.users.map((u) => u.nickname).sort(), ['少走点弯路', '摇尾乞怜'])
+const sing = wired(singDecoded)
+check('点歌 → kind', sing.kind, 'gift')
+check('点歌 → 送礼人（6.5.1.2 的 User）', [sing.user, sing.userId], ['少走点弯路', '58709692971'])
+check('点歌 → 收礼人（6.5.1.1 的 User，= 歌手）', [sing.toUser, sing.toUserId], ['摇尾乞怜', '7667087264728728634'])
+check('点歌 → 没有目录时退回房间的说法（不拿场景标签当礼物名）', [sing.text, sing.diamonds], ['想听 摇尾乞怜 演唱', 99])
+check('点歌 → 送礼人 + 收礼人都进用户库', singUsers(singDecoded), ['少走点弯路', '摇尾乞怜'])
 
 /* 有目录时：名字与价格取自目录（real 例子：id 4353 = 跑车 = 1200 抖币） */
 const catalog = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 }, 4353: { name: '跑车', diamonds: 1200 } })
@@ -293,34 +306,40 @@ const catalog = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 }, 4353
  * 真帧里「跑车」写在**单号串第 5 段**（4353），而记录里的 5 永远是 3200（点唱礼物 99）。
  * 两条断言：只有记录帧时要认跑车；**连记录都没有**（占大多数的那条推送）也要认跑车。
  */
-const keyWins = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ keyGift: 4353, recordGift: 3200, price: 99, singer: 'Snow' }),
-  catalog
+const keyWins = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFrame({ keyGift: 4353, recordGift: 3200, price: 99, singer: 'Snow' }),
+    catalog
+  )
 )
-check('点歌 → 用户送的礼物以单号串为准（跑车，不是记录里的爱的纸鹤）', [keyWins.item.text, keyWins.item.diamonds], ['跑车', 1200])
-check('点歌 → 价格也按单号串那件查（不是记录里的 99）', keyWins.item.diamonds, 1200)
+check('点歌 → 用户送的礼物以单号串为准（跑车，不是记录里的爱的纸鹤）', [keyWins.text, keyWins.diamonds], ['跑车', 1200])
+check('点歌 → 价格也按单号串那件查（不是记录里的 99）', keyWins.diamonds, 1200)
 
-const noRecordKeyGift = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000077', keyGift: 4353 }),
-  catalog
+const noRecordKeyGift = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000077', keyGift: 4353 }),
+    catalog
+  )
 )
-check('没有礼物记录的帧 → 也能从单号串认出跑车与价', [noRecordKeyGift.item.text, noRecordKeyGift.item.diamonds], ['跑车', 1200])
-check('没有礼物记录的帧 → 记录标记仍是 false（落库时不许覆盖）', noRecordKeyGift.item.giftRecord, false)
+check('没有礼物记录的帧 → 也能从单号串认出跑车与价', [noRecordKeyGift.text, noRecordKeyGift.diamonds], ['跑车', 1200])
+check('没有礼物记录的帧 → 记录标记仍是 false（落库时不许覆盖）', noRecordKeyGift.giftRecord, false)
 
 /* 单号串第 5 段认不出来（不在目录里）→ 退回记录里那份，而不是显示一个查不到的 id */
-const recordFallback = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ keyGift: 13564, recordGift: 4353, price: 1200, singer: 'Snow' }),
-  catalog
+const recordFallback = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFrame({ keyGift: 13564, recordGift: 4353, price: 1200, singer: 'Snow' }),
+    catalog
+  )
 )
-check('单号串那段不在目录里 → 退回记录里的礼物', [recordFallback.item.text, recordFallback.item.diamonds], ['跑车', 1200])
+check('单号串那段不在目录里 → 退回记录里的礼物', [recordFallback.text, recordFallback.diamonds], ['跑车', 1200])
 
 /* 点歌的价以**目录**为准（记录里的价永远是那件固定点唱礼物的，与用户实际送的那件无关） */
 const mismatch = fakeCatalog({ 3200: { name: '爱的纸鹤', diamonds: 99 } })
-const wrong = proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ price: 5 }), mismatch)
-check('点歌 → 忽略记录里的固定礼物价，用目录价', wrong.item.diamonds, 99)
+const wrong = wired(proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame({ price: 5 }), mismatch))
+check('点歌 → 忽略记录里的固定礼物价，用目录价', wrong.diamonds, 99)
 
 /* 结构未知的真礼物帧：按字段号解不出名字时，靠「帧里出现的目录礼物名」兜底 */
 const unknown = proto.decodeProtoMessage('WebcastGiftMessage', unknownGiftFrame(), catalog)
@@ -376,44 +395,50 @@ check(
 )
 
 /* 没见过的单号串、且帧里没有礼物记录：名字退回房间的说法「想听 X 演唱」，价格未知 */
-const bare = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000002' })
+const bare = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFollowUpFrame({ singer: 'Snow', orderId: '55500000000000000000000002' })
+  )
 )
-check('无记录的帧 → 名字退回「想听 X 演唱」', bare.item.text, '想听 Snow 演唱')
-check('无记录的帧 → 收礼人仍是歌手', bare.item.toUser, 'Snow')
-check('无记录的帧 → 价格未知', bare.item.diamonds, 0)
+check('无记录的帧 → 名字退回「想听 X 演唱」', bare.text, '想听 Snow 演唱')
+check('无记录的帧 → 收礼人仍是歌手', bare.toUser, 'Snow')
+check('无记录的帧 → 价格未知', bare.diamonds, 0)
 
 /* 没有那份礼物记录的老帧（全新单号串）：礼物名/价格留空，送礼人退回单号串第一段 */
-const oldStyle = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  Buffer.concat([
-    pbVarint(2, 4),
-    pbMessage(
-      6,
-      Buffer.concat([
-        pbString(1, '58709692971_7667087264728728634_55500000000000000000000003_0_13564_1_Normal'),
-        pbMessage(3, user(7667087264728728634n, '歌手'))
-      ])
-    )
-  ])
+const oldStyle = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    Buffer.concat([
+      pbVarint(2, 4),
+      pbMessage(
+        6,
+        Buffer.concat([
+          pbString(1, '58709692971_7667087264728728634_55500000000000000000000003_0_13564_1_Normal'),
+          pbMessage(3, user(7667087264728728634n, '歌手'))
+        ])
+      )
+    ])
+  )
 )
-check('老帧点歌 → 送礼人 id 仍在', oldStyle.item.userId, '58709692971')
-check('老帧点歌 → 礼物记录缺失时退回「想听 X 演唱」+ 价格未知', [oldStyle.item.text, oldStyle.item.diamonds], [
+check('老帧点歌 → 送礼人 id 仍在', oldStyle.userId, '58709692971')
+check('老帧点歌 → 礼物记录缺失时退回「想听 X 演唱」+ 价格未知', [oldStyle.text, oldStyle.diamonds], [
   '想听 歌手 演唱',
   0
 ])
-check('老帧点歌 → 收礼人退回歌手', oldStyle.item.toUser, '歌手')
+check('老帧点歌 → 收礼人退回歌手', oldStyle.toUser, '歌手')
 
 /* 单号串第一段不是数字（结构变了/看错了）时，不许写半截垃圾进 userId */
-const weird = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  Buffer.concat([
-    pbVarint(2, 4),
-    pbMessage(6, Buffer.concat([pbString(1, 'abc_def'), pbMessage(3, user(7667087264728728634n, '歌手'))]))
-  ])
+const weird = wired(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    Buffer.concat([
+      pbVarint(2, 4),
+      pbMessage(6, Buffer.concat([pbString(1, 'abc_def'), pbMessage(3, user(7667087264728728634n, '歌手'))]))
+    ])
+  )
 )
-check('点歌 → 单号串认不出来时 userId 为空', weird.item.userId, '')
+check('点歌 → 单号串认不出来时 userId 为空', weird.userId, '')
 
 /* ------------------------------------------------------------------ 同一单 → 一行 */
 /*
@@ -422,37 +447,47 @@ check('点歌 → 单号串认不出来时 userId 为空', weird.item.userId, ''
  * 这里用真帧的两种先后顺序把规则跑一遍（先来哪条都出现过）。
  */
 const sameOrderId = '55500000000000000000000005'
-const weak = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFollowUpFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353 })
+const weak = wiredFull(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFollowUpFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353 })
+  )
 )
-const strong = proto.decodeProtoMessage(
-  'WebcastLinkmicOrderSingMessage',
-  orderSingFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353, recordGift: 4353, price: 1200 }),
-  catalog
+const strong = wiredFull(
+  proto.decodeProtoMessage(
+    'WebcastLinkmicOrderSingMessage',
+    orderSingFrame({ orderId: sameOrderId, singer: 'Snow', keyGift: 4353, recordGift: 4353, price: 1200 }),
+    catalog
+  )
 )
-check('同一单两帧 → 单号串一致且非空', weak.item.orderKey === strong.item.orderKey && weak.item.orderKey.length > 0, true)
-check('同一单两帧 → 记录标记分得开', [strong.item.giftRecord, weak.item.giftRecord], [true, false])
-check('带记录的那帧 → 目录名 + 价', [strong.item.text, strong.item.diamonds, strong.item.toUser], ['跑车', 1200, 'Snow'])
+check('同一单两帧 → 单号串一致且非空', weak.orderKey === strong.orderKey && weak.orderKey.length > 0, true)
+check('同一单两帧 → 记录标记分得开', [strong.giftRecord, weak.giftRecord], [true, false])
+check('带记录的那帧 → 目录名 + 价', [strong.text, strong.diamonds, strong.toUser], ['跑车', 1200, 'Snow'])
 
 /** 库里的一行 = 合并结果（**没有** giftRecord 这个字段，和表里的列一致） */
 const toStoredRow = (row) => {
   const { giftRecord, ...rest } = row
   return rest
 }
-/** 按 `main/db/mapper.insertMessages` 的口径模拟落库：同一单号串永远只留一行 */
+/**
+ * 按 `main/db/mapper.insertMessages` 的口径模拟落库：同一单号串永远只留一行。
+ *
+ * 入参是**解码结果**（`{ item }`）或**已经取出来的 item**（上面那些 `wired(...)`）——两种都收，
+ * 免得点歌解码器缺席时这里再抛一次异常（见 `wired` 的说明）。
+ */
 const storeOrder = (frames) => {
   let current = null
   frames.forEach((frame, index) => {
+    const item = frame?.item ?? frame ?? {}
     const row = {
-      content: frame.item.text,
-      count: frame.item.count,
-      diamonds: frame.item.diamonds,
-      userId: frame.item.userId,
-      userName: frame.item.user,
-      toUserId: frame.item.toUserId,
-      toUserName: frame.item.toUser,
-      giftRecord: frame.item.giftRecord,
+      content: item.text,
+      count: item.count,
+      diamonds: item.diamonds,
+      userId: item.userId,
+      userName: item.user,
+      toUserId: item.toUserId,
+      toUserName: item.toUser,
+      giftRecord: item.giftRecord,
       // 解码器不填到达时刻（那是中枢收到帧时补的），这里按先后给两个时刻：1000 → 2000
       atMs: 1000 * (index + 1)
     }
@@ -666,5 +701,17 @@ if (replayArg) {
 }
 
 rmSync(workDir, { recursive: true, force: true })
+/**
+ * 点歌那一整段现在是**已知缺口**（2026-10-12 发现）：`main/douyin/proto-messages.ts` 的 switch
+ * 里已经没有 `WebcastLinkmicOrderSingMessage` 这一支（直连推送那次重构之后就没接线），
+ * 所以这些断言必然 FAIL——它们是「解码器没接线」的证据，**不是**本次改动的回归。
+ * 这里把它显式标出来，免得下一个人对着一片红浪费时间。
+ */
+if (proto.decodeProtoMessage('WebcastLinkmicOrderSingMessage', orderSingFrame()) === null) {
+  console.log(
+    '\n⚠️ 点歌解码器（WebcastLinkmicOrderSingMessage）当前没有接线：' +
+      '上面与点歌有关的 FAIL 全是这一条引起的（礼物/弹幕/连送那几组不受影响）'
+  )
+}
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项不通过`)
 process.exit(failures === 0 ? 0 : 1)

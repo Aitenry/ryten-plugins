@@ -1,5 +1,6 @@
 import logger from 'electron-log'
 import type { DanmakuItem, DanmakuKind, UserInfo } from '../../shared/types'
+import { displayDisplayId } from '../../shared/anonymous'
 import type { GiftResolver } from '../gift/catalog'
 import {
   getBytes,
@@ -443,7 +444,8 @@ export function parseProtoUser(user: PbMessage | undefined): UserInfo | null {
 
   return {
     id,
-    displayId: getString(user, 38, 40) ?? shortId,
+    // 抖音号：匿名占位（`111111`）不写进去——界面上「抖音号 111111」没有意义（见 shared/anonymous.ts）
+    displayId: displayDisplayId(getString(user, 38, 40) ?? shortId),
     nickname: getString(user, 3, 60) ?? getString(user, 68, 60) ?? '',
     gender: getVarint(user, 4) ?? 0,
     signature: getString(user, 5, 200) ?? '',

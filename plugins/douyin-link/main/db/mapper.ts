@@ -32,6 +32,7 @@ import {
   douyinLinkUsers
 } from './schema'
 import { schemaReady } from './ddl'
+import { ANON_ID_PREFIX, ANONYMOUS_ID } from '../../shared/anonymous'
 import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
 import type { UserAnalysisData } from '../analysis/portrait'
 
@@ -1110,8 +1111,175 @@ export async function repairUsersFromMessages(webRid = ''): Promise<number> {
   })
 }
 
-/* --------------------------------------------------------------- 画像（多账号） */
+/**
+ * **匿名身份拆分**（一次性迁移）：把历史上「所有匿名用户共用占位 id `111111`」的行，
+ * 按马甲名拆成 `anon:<占位 id>#<马甲>`（见 `shared/anonymous.ts`）。
+ *
+ * 为什么必须迁移历史数据（2026-10-12 用户报障「匿名用户，内容监控会重复，这么严重的 bug」）：
+ * 新写入从这一版起就按马甲分开，但**库里已经堆在一起的那份不会自己散开**——档案弹窗
+ * 打开 `111111` 看到的仍是十几个互不相干的人合出来的「互动统计 13 条弹幕 / 53 次进场」
+ * 与一条混合时间线的「历史弹幕」。所以装载时把这个箱子按马甲重新分装一次。
+ *
+ * 四条口径：
+ * 1. **只动匿名那部分**（`user_id = 占位 id`，或 `anon:` 开头但没有马甲段的残缺行），
+ *    真实用户的 id 一个都不碰；
+ * 2. **可反复跑**（幂等）：拆过的行（`anon:…#马甲`）会被跳过，跑第二遍什么都不改；
+ * 3. 拆出来**落回同一个 `user_id` 列**——这一列从此是「内部身份键」，展示真抖音 id 的地方
+ *    走 `rawDouyinId()`（`shared/anonymous.ts`）；
+ * 4. 拆分后同一个人在不同帧里仍可能是两行（马甲换过、或早期帧没名字），所以遇到
+ *    `(web_rid, user_id)` 撞行时**把两行并成一行**：统计相加、静态字段取非空、时间取首末。
+ *
+ * 返回改动的行数（消息 + 用户档案），装载时打一条日志。
+ */
+export async function splitAnonymousIdentities(): Promise<number> {
+  await schemaReady
+  return withOrm('douyin-link.splitAnonymous', async (db) => {
+    /** 名字 → 马甲（与 `shared/anonymous.ts` 的 `anonymousMask` 逐字对齐：昵称优先，其次抖音号） */
+    const mask = sql<string>`trim(regexp_replace(coalesce(nullif(btrim(u.nickname), ''), nullif(btrim(u.display_id), ''), ''), '\s+', ' ', 'g'))`
+    /** 马甲是「信息量为零的占位名」（空 / 匿名 / 神秘人）→ 退回等级组合（那边同样认不出人，但不合并） */
+    const placeholder = sql`(${mask} = '' or ${mask} like '%匿名%' or ${mask} like '%神秘人%' or lower(${mask}) like '%anonymous%')`
+    /** 旧键 → 新键：`111111` → `anon:111111#dou2056511`；已经是新键的行不满足条件，跑第二遍什么都不动 */
+    const newKey = sql<string>`${ANON_ID_PREFIX} || replace(u.user_id, ${ANON_ID_PREFIX}, '') || '#' ||
+      case when ${placeholder}
+        then 'lv' || greatest(u.honor_level, 0) || '_fc' || greatest(u.fans_club_level, 0)
+        else left(${mask}, 24)
+      end`
+    const unsplit = sql`(u.user_id = ${ANONYMOUS_ID} or (u.user_id like ${`${ANON_ID_PREFIX}%`} and position('#' in u.user_id) = 0))`
 
+    /**
+     * 消息行自己的马甲（**与 `shared/anonymous.ts` 的 `anonymousMask` 同规则**）：
+     * 先归一化空白、再去掉抖音给匿名名挂的装饰（`☞`、`-`、空格），最后截到 24 字符。
+     */
+    const nameOf = sql<string>`left(btrim(ltrim(regexp_replace(btrim(m.user_name), '\s+', ' ', 'g'), '☞·-— ')), 24)`
+    const namedRow = sql`(${nameOf} <> '' and ${nameOf} not like '%匿名%' and ${nameOf} not like '%神秘人%' and lower(${nameOf}) not like '%anonymous%')`
+    const splitId = sql<string>`${ANON_ID_PREFIX} || replace(m.user_id, ${ANON_ID_PREFIX}, '') || '#' || ${nameOf}`
+    /** 消息行上的同一个判据（`u` → `m`：这一列两处都要判） */
+    const unsplitMessage = sql`(m.user_id = ${ANONYMOUS_ID} or (m.user_id like ${`${ANON_ID_PREFIX}%`} and position('#' in m.user_id) = 0))`
+    /** 收礼人那一列（没有名字，只能按档案行的马甲换） */
+    const splitRecipient = sql<string>`${ANON_ID_PREFIX} || replace(m.to_user_id, ${ANON_ID_PREFIX}, '') || '#' ||
+      case when ${placeholder}
+        then 'lv' || greatest(u.honor_level, 0) || '_fc' || greatest(u.fans_club_level, 0)
+        else left(${mask}, 24)
+      end`
+
+    let touched = 0
+
+    /**
+     * ① **档案行：先给「只在消息流水里出现过」的马甲补一行，再把旧键整体换掉。**
+     *
+     * 为什么绕这一圈（2026-10-12 工装抓到的）：真库里 `(web_rid, user_id)` 是唯一键，
+     * 十几个马甲的档案**只剩下最后一个写进来的那个**，其余只存在于消息行的 `user_name` 里；
+     * 直接把那一行换键，就等于把十几个人的统计全算到那一个马甲头上（又一次「重复」）。
+     * 所以先按**消息行自己的名字**把认得出的马甲补出档案（统计按流水现算），
+     * 换键时它们各自对上自己的新键（撞行就相加）。
+     *
+     * 统计走一层「按 (房间, 马甲) 先算好」的子查询：`select` 里再拼 `anon:…#马甲`
+     * 这种表达式（Postgres 不许在 `group by` 里直接引用同一层的表达式）。
+     *
+     * ⚠️ 顺序要紧：**档案先于消息流水**。反过来的话，消息行的 id 已经换成新键，
+     * 这一步的 `where`（只认旧键）就再也匹配不到那些行——2026-10-12 工装就是这么抓到的。
+     */
+    await db.execute(sql`
+      insert into douyin_link_users (
+        web_rid, user_id, nickname, chat, enter, likes, follows, gift, diamonds, first_seen, last_seen
+      )
+      select
+        g.web_rid,
+        ${ANON_ID_PREFIX} || ${ANONYMOUS_ID} || '#' || g.name,
+        g.name,
+        g.chat, g.enter, g.likes, g.follows, g.gift, g.diamonds, g.first_seen, g.last_seen
+      from (
+        select
+          m.web_rid,
+          ${nameOf} as name,
+          count(*) filter (where m.kind = 'chat')::int as chat,
+          count(*) filter (where m.kind = 'member')::int as enter,
+          count(*) filter (where m.kind = 'like')::int as likes,
+          count(*) filter (where m.kind = 'social')::int as follows,
+          count(*) filter (where m.kind = 'gift')::int as gift,
+          coalesce(sum(m.diamonds) filter (where m.kind = 'gift'), 0)::int as diamonds,
+          min(m.at_ms) as first_seen,
+          max(m.at_ms) as last_seen
+        from douyin_link_messages m
+        where m.user_id <> '' and ${unsplitMessage} and ${namedRow}
+        group by m.web_rid, ${nameOf}
+      ) g
+      on conflict (web_rid, user_id) do nothing`)
+
+    /**
+     * ② 旧档案行换键。`(web_rid, user_id)` 是唯一键，而新键按马甲算——**同一个旧键在同一房间
+     *    会散成好几行**（马甲名不同），所以先把新行插出来，最后删旧行。
+     *
+     * **撞行时以 ① 补出来的那行为准（`excluded`）**：旧行那份统计是「十几个人加在一起」的
+     * 脏账（旧版把所有匿名用户按一个 id 累加），而 ① 的统计是按消息流水现算的、
+     * 只算这个马甲自己的行。所以这里不能再相加，也不能保留旧值——直接覆盖。
+     * 唯一保留旧值的是头像/签名/等级这类静态字段：流水里没有，只有旧行记过。
+     * （早先写成 `chat + excluded.chat` 是错的：真库副本上 dou2056511 因此变成「4 条弹幕」，
+     * 而库里属于他的弹幕行是 0 条——2026-10-12 真库排练抓到的。）
+     */
+    const moved = await db.execute(sql`
+      insert into douyin_link_users (
+        web_rid, user_id, display_id, nickname, gender, signature, city, avatar, following, follower,
+        honor_level, fans_club_level, badges, sec_uid, chat, enter, likes, follows, gift, diamonds,
+        first_seen, last_seen
+      )
+      select u.web_rid, ${newKey}, u.display_id, u.nickname, u.gender, u.signature, u.city, u.avatar,
+        u.following, u.follower, u.honor_level, u.fans_club_level, u.badges, u.sec_uid,
+        u.chat, u.enter, u.likes, u.follows, u.gift, u.diamonds, u.first_seen, u.last_seen
+      from douyin_link_users u
+      where u.user_id <> '' and ${unsplit} and ${newKey} <> u.user_id
+      on conflict (web_rid, user_id) do update set
+        chat = excluded.chat,
+        enter = excluded.enter,
+        likes = excluded.likes,
+        follows = excluded.follows,
+        gift = excluded.gift,
+        diamonds = excluded.diamonds,
+        first_seen = excluded.first_seen,
+        last_seen = excluded.last_seen,
+        nickname = case when douyin_link_users.nickname = '' then excluded.nickname else douyin_link_users.nickname end,
+        display_id = case when douyin_link_users.display_id = '' then excluded.display_id else douyin_link_users.display_id end,
+        avatar = case when douyin_link_users.avatar = '' then excluded.avatar else douyin_link_users.avatar end,
+        signature = case when douyin_link_users.signature = '' then excluded.signature else douyin_link_users.signature end,
+        city = case when douyin_link_users.city = '' then excluded.city else douyin_link_users.city end,
+        sec_uid = case when douyin_link_users.sec_uid = '' then excluded.sec_uid else douyin_link_users.sec_uid end,
+        honor_level = greatest(douyin_link_users.honor_level, excluded.honor_level),
+        fans_club_level = greatest(douyin_link_users.fans_club_level, excluded.fans_club_level),
+        following = greatest(douyin_link_users.following, excluded.following),
+        follower = greatest(douyin_link_users.follower, excluded.follower)`)
+    touched += Number(moved.affectedRows ?? 0) || 0
+    // 旧行清掉：它记的统计已经不再代表任何一个人（见上），新行才是准的
+    const dropped = await db.execute(sql`
+      delete from douyin_link_users u where u.user_id <> '' and ${unsplit} and ${newKey} <> u.user_id`)
+    touched += Number(dropped.affectedRows ?? 0) || 0
+
+    /**
+     * ③ **消息流水按「行自己的名字」换 id**（一次 UPDATE 就够：同一个旧 id 在不同房间、不同行
+     *    各自算自己的新键）。放在档案之后：这一步之后旧键就没了，反过来的话 ① 的补档案
+     *    再也匹配不到那些行。
+     *
+     * 认不出名字的占位名帧**留在原处**——宁可留着旧样子（一条没有身份的共用行），
+     * 也不能把两个匿名的人并成一个新的假身份。
+     */
+    const rows = await db.execute(sql`
+      update douyin_link_messages m
+      set user_id = ${splitId}
+      where m.user_id <> '' and ${unsplitMessage} and ${namedRow}`)
+    touched += Number(rows.affectedRows ?? 0) || 0
+    /** 收礼人那一列同样只有 id、没有名字：按**档案行**的马甲换（那个人的档案里有名字） */
+    const received = await db.execute(sql`
+      update douyin_link_messages m
+      set to_user_id = ${splitRecipient}
+      from douyin_link_users u
+      where u.web_rid = m.web_rid and m.to_user_id = u.user_id
+        and ${unsplit} and ${splitRecipient} <> m.to_user_id`)
+    touched += Number(received.affectedRows ?? 0) || 0
+
+    return touched
+  })
+}
+
+/* --------------------------------------------------------------- 画像（多账号） */
 /**
  * 画像：**一个人可以有多个抖音账号，但画像只有一个**（用户 2026-10-11 的要求）。
  *
