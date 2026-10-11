@@ -131,7 +131,6 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       window7d: '7 days',
       windowAll: 'All',
       rangeSpan: 'span {{duration}}',
-      rangeWholeDay: 'Whole day',
       rangeEmpty: 'No data yet (start monitoring)',
       dayRecords: 'Daily records ({{count}} days)',
       dayRecordsEmpty: 'Nothing recorded for this room yet',

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Slider, theme } from 'antd'
+import { Slider, theme } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api, { normalizeRoomSummary } from '../api'
@@ -136,6 +136,17 @@ export function OverviewPanel(props: {
         ? `${stamp(rangeFrom)} → ${clock(rangeTo)}`
         : `${stamp(rangeFrom)} → ${stamp(rangeTo)}`
       : t('douyin-link.page.kpiRecent', { window: windowLabel(t, props.minutes) })
+  /**
+   * 这一段的**时长**：拖过进度条就是那一段的长度，没拖过就是这一天的整段——
+   * 和进度条两端同一个口径。放**标题右边**（用户 2026-10-13：「时长 15h39m 放在标题的右边」），
+   * 正文里就只剩进度条本体，不再有底部那行和「这一天全部」按钮。
+   */
+  const rangeSpan =
+    props.bounds && props.bounds.last > props.bounds.first
+      ? t('douyin-link.page.rangeSpan', {
+          duration: duration((rangeTo || props.bounds.last) - (rangeFrom || props.bounds.first))
+        })
+      : ''
   const totals = summary?.totals
   /**
    * 「平均速率」的分母：有明确区间就用区间长度，否则用窗口分钟数；**全部**模式（windowMinutes = 0）
@@ -239,7 +250,11 @@ export function OverviewPanel(props: {
           两端是这个房间库里最早/最近的消息，拖两个把手就是选一段；「每日记录」点一天也走同一段区间
           （所以「看某一天」不需要另一套控件）。取消选择 = 回到最近 `minutes` 分钟的预设。
         */}
-        <Panel className="shrink-0" title={t('douyin-link.page.range')}>
+        <Panel
+          className="shrink-0"
+          title={t('douyin-link.page.range')}
+          extra={rangeSpan ? <span className="text-xs opacity-60">{rangeSpan}</span> : null}
+        >
           {props.bounds && props.bounds.last > props.bounds.first ? (
             <div className="flex flex-col gap-1">
               <Slider
@@ -260,17 +275,6 @@ export function OverviewPanel(props: {
                 <span className="shrink-0">{stamp(props.bounds.first)}</span>
                 <span className="min-w-0 truncate font-medium">{rangeText}</span>
                 <span className="shrink-0">{stamp(props.bounds.last)}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[10px] opacity-50">
-                  {t('douyin-link.page.rangeSpan', { duration: duration((rangeTo || props.bounds.last) - (rangeFrom || props.bounds.first)) })}
-                </span>
-                {/* 重置 = 「这一天全部」（时间范围不跨天，所以回到的不是「最近 N 分钟」而是整段这一天） */}
-                {props.range ? (
-                  <Button size="small" type="text" onClick={() => props.onRange(null)}>
-                    {t('douyin-link.page.rangeWholeDay')}
-                  </Button>
-                ) : null}
               </div>
             </div>
           ) : (
