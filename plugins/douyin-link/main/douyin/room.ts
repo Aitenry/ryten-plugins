@@ -1,5 +1,6 @@
 import type { LiveRoomInfo, QualityKey, UserInfo } from '../../shared/types'
 import { QUALITY_KEYS, parseWebRid } from '../../shared/types'
+import { mergeCookieHeaders } from './cookie'
 import { parseUserJson } from './json'
 
 /**
@@ -52,42 +53,84 @@ export interface RoomResolveResult {
   anchorUser: UserInfo | null
 }
 
-export async function resolveLiveRoom(input: string): Promise<RoomResolveResult> {
+/**
+ * @param userCookie 应用里配置的**登录态 Cookie**（设置里的那一份）。
+ *
+ * 为什么解析也要带它（2026-10-11 真机事故的修复）：解析页面时**不带任何 cookie** 的请求
+ * 会被抖音当成陌生访客，直接回一张 `<title>验证码中间页</title>` 的风控页
+ * （HTTP 200、6KB、没有房间数据）——于是所有房间一起变成 `roomNotFound`、监控一个也起不来。
+ * 实测同一时刻：不带 cookie → 验证码页；带上用户那份 cookie → **正常页面（1MB，房间数据都在）**。
+ * 所以这里把用户 cookie 一路带上（进房接口同样用它）；页面自己 Set-Cookie 的那些字段
+ * （`ttwid` 等）作为补充合并进来，用户那份优先。
+ */
+export async function resolveLiveRoom(input: string, userCookie = ''): Promise<RoomResolveResult> {
   const webRid = parseWebRid(input)
   if (!webRid) throw new ResolveFailure('badInput', String(input ?? '').slice(0, 80))
 
-  const page = await fetchPage(webRid)
+  const page = await fetchPage(webRid, userCookie)
   const roomId = pickRoomId(page.html)
+  const pageCookie = mergeCookieHeaders(userCookie, page.cookie)
   let entered: EnterResult | null = null
-  if (roomId) entered = await tryEnter(webRid, roomId, page.cookie)
+  if (roomId) entered = await tryEnter(webRid, roomId, pageCookie)
   if ((!entered || !entered.room) && roomId) {
     // 偶发空 body（风控/抖动）：换一份 Cookie 再试一次
-    const retryPage = await fetchPage(webRid)
+    const retryPage = await fetchPage(webRid, userCookie)
     const retryRoomId = pickRoomId(retryPage.html) ?? roomId
-    entered = await tryEnter(webRid, retryRoomId, retryPage.cookie).catch(() => entered)
-    if (entered && entered.room) return build(webRid, retryPage.cookie, entered)
+    const retryCookie = mergeCookieHeaders(userCookie, retryPage.cookie)
+    entered = await tryEnter(webRid, retryRoomId, retryCookie).catch((error) => {
+      /**
+       * `resolving` 是**真事故**（风控中间页 / 网络），不是「这个房间没开播」：
+       * 报 `roomNotFound` 会把人带偏（看起来像房间号错了），所以照实抛出去。
+       * 解析失败的常见形态是 `tryEnter` 直接抛（HTTP 非 200），这时 `entered` 还是 null。
+       */
+      if (error instanceof ResolveFailure && error.code === 'resolving') throw error
+      if (error instanceof ResolveFailure && error.code === 'network') throw error
+      return entered
+    })
+    if (entered && entered.room) return build(webRid, retryCookie, entered)
 
     // enter 彻底没戏：用 HTML 里嵌的那份兜底
     const fromHtml = fromPageHtml(webRid, retryPage.html)
-    if (fromHtml) return build(webRid, retryPage.cookie, fromHtml)
+    if (fromHtml) return build(webRid, retryCookie, fromHtml)
   }
-  if (entered && entered.room) return build(webRid, page.cookie, entered)
+  if (entered && entered.room) return build(webRid, pageCookie, entered)
 
   const fromHtml = fromPageHtml(webRid, page.html)
-  if (fromHtml) return build(webRid, page.cookie, fromHtml)
+  if (fromHtml) return build(webRid, pageCookie, fromHtml)
   if (!roomId) throw new ResolveFailure('roomNotFound', webRid)
   throw new ResolveFailure('enterFailed', String(roomId))
 }
 
+/**
+ * **风控中间页**（验证码）长什么样——2026-10-11 真机踩到的那一版：
+ * `<title>验证码中间页</title>`，正文 6.2KB 左右，**一条房间数据都没有**（所以 `roomNotFound`）。
+ *
+ * 为什么要单独认出来：这不是「房间号不存在」，而是**这个 IP 被抖音挡在验证码后面了**——
+ * 同一时刻所有房间都这样（当天 6 个房间一起挂），而且**跟用户自己的操作没关系**
+ * （解析请求是插件发的）。报 `roomNotFound` 会让人一直去核对房间号、重启、重装插件，全是白费。
+ * 改成 `resolving` + 一句「去浏览器打开一次抖音把验证码过了」，才是有用的信息。
+ *
+ * 判定只用**页面标题**这类稳定特征，不用正文里的「验证」二字：正常页面也可能出现这两个字
+ * （弹幕里就常有），宁可漏判也不要误判。
+ */
+export function looksLikeChallengePage(html: string): boolean {  const head = html.slice(0, 3000)
+  return /<title>\s*(验证码中间页|安全验证|访问验证)/.test(head) || /验证码中间页/.test(head)
+}
+
 /** 只解析出房间信息与 Cookie，不要拉流（用来拿进房凭证与房间成员名单） */
-export async function fetchPage(webRid: string): Promise<{ html: string; cookie: string }> {
+export async function fetchPage(webRid: string, userCookie = ''): Promise<{ html: string; cookie: string }> {
   let response: Response
   try {
     response = await fetch(`https://live.douyin.com/${webRid}`, {
       headers: {
         'user-agent': UA,
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8'
+        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        /**
+         * **必须带上用户那份登录态 cookie**：不带的话抖音会直接回验证码中间页
+         * （见 `resolveLiveRoom` 的说明），而带着它就是正常页面。
+         */
+        ...(userCookie ? { cookie: userCookie } : {})
       },
       redirect: 'follow',
       signal: AbortSignal.timeout(PAGE_TIMEOUT_MS)
@@ -99,6 +142,8 @@ export async function fetchPage(webRid: string): Promise<{ html: string; cookie:
   const cookie = readCookieHeader(response)
   const html = await response.text()
   if (!html) throw new ResolveFailure('pageFailed', 'empty body')
+  /** 风控中间页：HTTP 200 但页面里没有房间数据，必须在这里认出来（否则一路变成 roomNotFound） */
+  if (looksLikeChallengePage(html)) throw new ResolveFailure('resolving', 'captcha')
   return { html, cookie }
 }
 

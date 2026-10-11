@@ -613,6 +613,7 @@ export const DouyinLinkZhCN = {
       network: '网络请求失败：{{detail}}',
       pageFailed: '打不开直播间页面：{{detail}}',
       roomNotFound: '页面里没有房间号，直播间可能已下播或链接不对',
+      resolving: '抖音把这个网络挡在验证码后面了：用浏览器打开一次 live.douyin.com 过掉验证码，再把 Cookie 更新到设置里（插件会自己重试）',
       enterFailed: '直播间接口返回异常：{{detail}}',
       resolveFailed: '解析直播间失败：{{detail}}',
       connectFailed: '启动实时通道失败：{{detail}}',
