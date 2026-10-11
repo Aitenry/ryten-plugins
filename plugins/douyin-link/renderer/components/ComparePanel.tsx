@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { Segmented, Tag } from 'antd'
 import { RiVolumeUpLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
@@ -9,15 +9,15 @@ import { WINDOWS, formatNumber, windowLabel } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
-/** 概览多久自动刷一次（对比是「现在的横截面」，跟着动才有用） */
-const RELOAD_MS = 10000
-
 /**
  * 对比页签：**把所有直播间放在一张表里比**（窗口内的量 + 库里累计 + 相位/声音状态）。
  *
  * 一张表就能回答分析里最常见的问题：哪个房间最热、
  * 哪个房间其实已经半天没消息了（活跃分钟 vs 窗口分钟）、哪个在排队没跑起来。
  * 点一行 = 把分析焦点切过去（声音跟着走）。
+ *
+ * **数据全部由主进程推**（2026-10-11）：这个页签原来自己每 10 秒查一次，现在改成
+ * 「进来查一次（顺带登记窗口）→ 之后落库/相位变了主进程推 `compare` 事件」。
  */
 export function ComparePanel(props: {
   minutes: number
@@ -30,26 +30,36 @@ export function ComparePanel(props: {
   const palette = usePluginPalette()
   const [rows, setRows] = useState<RoomCompareRow[]>([])
   const [loading, setLoading] = useState(false)
+  /** 推送里带着「这份是按多少分钟算的」：切窗口期间迟到的旧数据要丢掉 */
+  const minutesRef = useRef(props.minutes)
+  minutesRef.current = props.minutes
+
+  useEffect(() => {
+    const off = api.onCompare((push) => {
+      if (push.minutes !== minutesRef.current) return
+      setRows(push.rows)
+      setLoading(false)
+    })
+    return () => {
+      off()
+      api.compareUnwatch()
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
-    const load = (): void => {
-      setLoading(true)
-      void api
-        .roomsCompare(props.minutes)
-        .then((next) => {
-          if (alive) setRows(next)
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (alive) setLoading(false)
-        })
-    }
-    load()
-    const timer = window.setInterval(load, RELOAD_MS)
+    setLoading(true)
+    void api
+      .roomsCompare(props.minutes)
+      .then((next) => {
+        if (alive) setRows(next)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
     return () => {
       alive = false
-      window.clearInterval(timer)
     }
   }, [props.minutes])
 
@@ -176,3 +186,4 @@ export function ComparePanel(props: {
     </Panel>
   )
 }
+

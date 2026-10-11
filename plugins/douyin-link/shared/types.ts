@@ -514,6 +514,32 @@ export interface SummaryPush {
 }
 
 /**
+ * **在线观众**快照推送（2026-10-11：把渲染层那个 5 秒轮询换成主进程推送）。
+ *
+ * 这份数据的三条来源都在主进程手里（麦位同步、进房/发言过的本场用户、房间成员名单），
+ * 渲染层自己按 5 秒轮询只能「每隔 5 秒看一眼」，而且每次都是一次 IPC + 一次全表合成。
+ * 现在改成：界面打开这个页签时登记一次（`presence-list` 顺带登记），之后主进程在
+ * **这些来源真的变了**之后（或最多每 `WATCH_PUSH_MS` 一次）推一份回来。
+ */
+export interface PresencePush {
+  webRid: string
+  snapshot: PresenceSnapshot
+}
+
+/** **房间对比**推送（2026-10-11：替代对比页签那个 10 秒轮询） */
+export interface ComparePush {
+  /** 这一份是按多少分钟的窗口算的（界面切了窗口会重新登记） */
+  minutes: number
+  rows: RoomCompareRow[]
+}
+
+/** **每日记录**推送（2026-10-11：替代左侧列表那个 60 秒轮询） */
+export interface DaysPush {
+  webRid: string
+  days: DayRecordRow[]
+}
+
+/**
  * **单个直播间**在窗口内的分钟序列（数据大屏「指标」页签的原始素材）。
  *
  * 与 `AllRoomsAnalysis.series`（跨房**合计**的一条曲线）互补：这一份是**每房一条**，

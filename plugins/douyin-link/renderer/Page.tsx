@@ -17,6 +17,7 @@ import type {
 } from '../shared/types'
 import { isAnonymousId } from '../shared/anonymous'
 import api, { normalizeSnapshot } from './api'
+import { installCloseDiagnostics } from './diagnose'
 import { AllRoomsPanel } from './components/AllRoomsPanel'
 import { DanmakuFeed } from './components/DanmakuFeed'
 import { MetricsPanel } from './components/MetricsPanel'
@@ -191,8 +192,10 @@ export default function Page(): React.JSX.Element {
   const users = activeRoom ? (usersByRoom.get(activeRoom) ?? new Map()) : new Map<string, UserProfile>()
 
   /**
-   * 「每日记录」：切房间时拉一次，监控中的房间每分钟补一次（今天那一行是活的）。
-   * 进度条两端也来自它（最早/最近一天的首末消息时间）——所以两处口径天然一致。
+   * 「每日记录」：切房间时拉一次；之后**由主进程推**（2026-10-11 起不再自己每分钟轮询）。
+   *
+   * 推进来的是同一个 `dayRecords` 结果（今天那一行是活的），进度条两端也来自它
+   * （最早/最近一天的首末消息时间）——所以两处口径天然一致。
    */
   const reloadDays = useCallback(async (webRid: string): Promise<void> => {
     if (!webRid) {
@@ -291,17 +294,34 @@ export default function Page(): React.JSX.Element {
   }, [reload])
 
   /**
-   * 「现在」时钟：每 5 秒把 `clock` 推一格，让「今天」的时间范围右端跟着时间走
+   * 「现在」时钟：每 20 秒把 `clock` 推一格，让「今天」的时间范围右端跟着时间走
    * （见 clock 的注释——没有它，概览会冻在打开那一刻，新的礼物永远进不来）。
+   *
+   * 它**只是本地的一个数字，不查任何通道**（数据全走主进程推送）。2026-10-11 从 5 秒放到
+   * 20 秒：这一跳会让整页重渲染一次（包括图表），而它的唯一作用是「今天」的右端推进
+   * ——晚 20 秒完全看不出来，代价却小得多。
    */
   useEffect(() => {
-    const timer = window.setInterval(() => setClock(Date.now()), 5000)
+    const timer = window.setInterval(() => setClock(Date.now()), 20000)
     return () => window.clearInterval(timer)
   }, [])
 
   /**
-   * 当前房间的「每日记录」：切房间时拉一次，监控中每 60 秒补一次（今天那一行的计数是活的）。
-   * 房间没在监控也要拉——历史记录与监控状态无关。
+   * 「第一次点关闭没反应」的现场诊断（2026-10-11，见 `./diagnose`）。
+   *
+   * 这个页签是用户报的现场（只在这个页面上出现过），所以在页面挂载期间盯着：
+   * 主线程长任务、关闭按钮有没有被盖住、点了关闭之后本页是不是还在。
+   * 全部走浏览器原生事件（`PerformanceObserver` + 捕获阶段点击），**没有轮询**；
+   * 只有真出事时才写一行 warn（宿主会把渲染层 warn 转进 main.log）。
+   */
+  useEffect(() => installCloseDiagnostics(), [])
+
+  /**
+   * 当前房间的「每日记录」：切房间时拉一次（查询顺带登记推送），之后由主进程推。
+   *
+   * 2026-10-11：原来这里在监控中每 60 秒自己查一次（用户明确要求不要渲染层轮询）。
+   * 主进程在**这一个房间有数据落库 / 开会话关会话**时标脏，按 `WATCH_PUSH_MS` 节流推一份。
+   * 房间没在监控也要拉/也要能收到推送——历史记录与监控状态无关。
    */
   useEffect(() => {
     if (!activeRoom) {
@@ -309,10 +329,18 @@ export default function Page(): React.JSX.Element {
       return
     }
     void reloadDays(activeRoom)
-    if (!active?.monitor) return
-    const timer = window.setInterval(() => void reloadDays(activeRoom), 60000)
-    return () => window.clearInterval(timer)
-  }, [activeRoom, active?.monitor, reloadDays])
+    return () => {
+      api.daysUnwatch(activeRoom)
+    }
+  }, [activeRoom, reloadDays])
+
+  /** 每日记录推送：今天那一行的计数跟着落库走（不用等一分钟） */
+  useEffect(() => {
+    const off = api.onDays((push) => {
+      if (push.webRid === activeRoom) setDays(push.days)
+    })
+    return off
+  }, [activeRoom])
 
   /** 房间列表推送：相位、计数、库里累计都在里面（界面直接替换，不做增量合并） */
   useEffect(

@@ -17,14 +17,13 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
 export const WINDOWS = [15, 60, 360, 1440, 0] as const
 
 /**
- * 概览的**兜底**轮询间隔。
+ * 概览的**实时更新全靠主进程推送**（2026-10-11）。
  *
- * 实时更新靠主进程的 `summary` 推送（落库后按界面请求的窗口推一份，见 main/monitor/hub.ts），
- * 所以这里只留一个低频兜底：万一推送通道没挂上（宿主刚升级插件、主进程还是旧模块），
- * 界面最多慢这么多，不会一直停在打开那一刻。
+ * 主进程在落库之后按界面登记过的窗口重算一份推过来（`summary` 事件），界面直接替换。
+ * 这里**不再留兜底轮询**：用户明确要求「不要渲染层主动轮询，要主进程推」——
+ * 兜底改成「切房间 / 改窗口时查一次」，推送通道要是没挂上（宿主刚升级、主进程还是旧模块），
+ * 界面会停在这一刻的数据上；那种情况有 `relive-check.mjs` 之外的宿主探针管（装机链路验证）。
  */
-const RELOAD_MS = 30000
-
 export function windowLabel(t: Translate, minutes: number): string {
   if (minutes <= 0) return t('douyin-link.page.windowAll')
   if (minutes <= 15) return t('douyin-link.page.window15')
@@ -88,6 +87,10 @@ export function OverviewPanel(props: {
     }
   }, [webRid])
 
+  /**
+   * 切房间 / 改窗口时**查一次**（查询顺带在主进程登记这个窗口，之后由推送持续更新）。
+   * 没有定时器：这一段只在依赖真的变了时跑。
+   */
   useEffect(() => {
     if (!webRid) {
       setSummary(null)
@@ -95,33 +98,28 @@ export function OverviewPanel(props: {
       return
     }
     let alive = true
-    const load = (): void => {
-      setLoading(true)
-      void api
-        .roomSummary(
-          webRid,
-          props.minutes,
-          rangeFrom > 0 && rangeTo > rangeFrom ? { from: rangeFrom, to: rangeTo } : undefined
-        )
-        .then((next) => {
-          if (alive) setSummary(next)
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (alive) setLoading(false)
-        })
-      void api
-        .sessionsList(webRid, 5)
-        .then((rows) => {
-          if (alive) setSessions(rows)
-        })
-        .catch(() => undefined)
-    }
-    load()
-    const timer = window.setInterval(load, RELOAD_MS)
+    setLoading(true)
+    void api
+      .roomSummary(
+        webRid,
+        props.minutes,
+        rangeFrom > 0 && rangeTo > rangeFrom ? { from: rangeFrom, to: rangeTo } : undefined
+      )
+      .then((next) => {
+        if (alive) setSummary(next)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
+    void api
+      .sessionsList(webRid, 5)
+      .then((rows) => {
+        if (alive) setSessions(rows)
+      })
+      .catch(() => undefined)
     return () => {
       alive = false
-      window.clearInterval(timer)
     }
   }, [webRid, props.minutes, rangeFrom, rangeTo])
 

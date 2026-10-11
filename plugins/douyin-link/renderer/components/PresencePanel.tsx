@@ -10,9 +10,6 @@ import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
-/** 面板自己的刷新节奏（不走事件推送：只在面板可见时拉，见 api.presenceList 的说明） */
-const REFRESH_MS = 5000
-
 /**
  * 在线观众页签：**这个房间里现在有谁**，以及「聊天室里谁在麦上」。
  *
@@ -23,6 +20,10 @@ const REFRESH_MS = 5000
  * - **本场**（`lastSeen > 0`）：这次监控里发言/进场/点赞过的人。
  *
  * 排序与标记都在主进程定好（麦上 → 主播 → 本场最近出现），这一层不重排。
+ *
+ * **数据全部由主进程推**（2026-10-11）：这个页签原来自己每 5 秒查一次（用户明确要求
+ * 「不要渲染层主动轮询」），现在改成「进来查一次（顺带登记）→ 麦位/发言/成员名单变了
+ * 主进程推 `presence` 事件」。
  *
  * **三种「空」要分清楚**（0.6.0 用户实测反馈「面板全是 0」之后加的）：
  * 主进程没响应（通道拿不到）／房间信息还没解析（插件刚装载、宿主刚升级完插件）／
@@ -44,6 +45,21 @@ export function PresencePanel(props: {
   const [loading, setLoading] = useState(false)
   const webRid = props.room?.webRid ?? ''
 
+  /** 推送：主进程把合好的那份快照推回来（麦位/发言/成员名单一变就推） */
+  useEffect(() => {
+    if (!webRid) return
+    const off = api.onPresence((push) => {
+      if (push.webRid !== webRid) return
+      setSnapshot(push.snapshot)
+      setOffline(false)
+    })
+    return () => {
+      off()
+      api.presenceUnwatch(webRid)
+    }
+  }, [webRid])
+
+  /** 进房间 / 切房间 / 用户事件 reloadKey 变了：查一次（查询顺带登记推送） */
   useEffect(() => {
     if (!webRid) {
       setSnapshot(null)
@@ -51,27 +67,22 @@ export function PresencePanel(props: {
       return
     }
     let alive = true
-    const load = (): void => {
-      void api
-        .presenceList(webRid)
-        .then((next) => {
-          if (!alive) return
-          setSnapshot(next)
-          setOffline(next === null)
-        })
-        .catch(() => {
-          if (alive) setOffline(true)
-        })
-        .finally(() => {
-          if (alive) setLoading(false)
-        })
-    }
     setLoading(true)
-    load()
-    const timer = window.setInterval(load, REFRESH_MS)
+    void api
+      .presenceList(webRid)
+      .then((next) => {
+        if (!alive) return
+        setSnapshot(next)
+        setOffline(next === null)
+      })
+      .catch(() => {
+        if (alive) setOffline(true)
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
     return () => {
       alive = false
-      window.clearInterval(timer)
     }
   }, [webRid, props.reloadKey])
 

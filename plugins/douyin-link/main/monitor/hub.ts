@@ -8,9 +8,11 @@ import {
   type AllRoomsAnalysis,
   type AnalyzerSnapshot,
   type AudioMessage,
+  type ComparePush,
   type DanmakuItem,
   type DayRecordRow,
   type DanmakuStatus,
+  type DaysPush,
   type DbStats,
   type FailureInfo,
   type GiftBreakdownRow,
@@ -23,6 +25,7 @@ import {
   type MonitorPhase,
   type MonitorSession,
   type MysteryReveal,
+  type PresencePush,
   type PresenceRow,
   type PresenceSnapshot,
   type QualityKey,
@@ -106,6 +109,16 @@ export const SUMMARY_EVENT = 'plugin:douyin-link:summary'
  */
 export const ALL_EVENT = 'plugin:douyin-link:all'
 
+/**
+ * 主进程 → 渲染层：**在线观众**快照（界面开着这个页签时，数据变了就推）。
+ * 2026-10-11 起用它替掉渲染层那个 5 秒轮询（见 `PresencePush` 的说明）。
+ */
+export const PRESENCE_EVENT = 'plugin:douyin-link:presence'
+/** 主进程 → 渲染层：**房间对比**（替掉对比页签那个 10 秒轮询） */
+export const COMPARE_EVENT = 'plugin:douyin-link:compare'
+/** 主进程 → 渲染层：**每日记录**（替掉左侧列表那个 60 秒轮询） */
+export const DAYS_EVENT = 'plugin:douyin-link:days'
+
 /** 一个房间在内存里最多留多少条最近弹幕 */
 const RECENT_CAP = 400
 /** 「名字空的礼物行」最多记几条日志（见 noteEmptyGifts） */
@@ -125,6 +138,14 @@ const SUMMARY_PUSH_MS = 300
  * 去重人数），跑在宿主的 PGlite 上，太频繁会把宿主的流式输出一起挤住。
  */
 const ALL_PUSH_MS = 4000
+/**
+ * 「观众 / 对比 / 每日记录」这三份推送的最小间隔（2026-10-11）。
+ *
+ * 它们原来是渲染层在轮询（5 秒 / 10 秒 / 60 秒各一次 IPC + 一次查询/合成）。
+ * 现在改成主进程按「数据真的变了」标脏 + 这个节流推：一次事件里连着落几批数据也只推一份。
+ * 比原来的轮询间隔短（2 秒），所以观感只会更实时，而请求次数只少不多。
+ */
+const WATCH_PUSH_MS = 2000
 /** 窗口右端早于「现在」这么多就算历史区间：不会再落进新数据，不必实时重算 */
 const SUMMARY_LIVE_GRACE_MS = 60 * 1000
 const USERS_PUSH_THROTTLE_MS = 1500
@@ -335,6 +356,21 @@ export class AnalyzerHub {
   private allTimer: ReturnType<typeof setTimeout> | null = null
   /** 全局推送是否在算（避免同一时刻叠几次跨房聚合） */
   private allPushing = false
+  /**
+   * 「界面正在看的**观众 / 对比 / 每日记录**」——2026-10-11 加，把渲染层那三个轮询
+   * （5 秒 / 10 秒 / 60 秒）换成推送。
+   *
+   * 三份都是「界面开着才有意义」的数据，所以按登记来：谁登记了就为谁算，卸载/切页签就撤销。
+   * 推送统一走 `pushWatches()`，一次最多 `WATCH_PUSH_MS`（数据变了才标脏，没变不白算）。
+   */
+  private presenceWatch = new Map<string, boolean>()
+  private presenceDirty = new Set<string>()
+  private daysWatch = new Map<string, number>()
+  private daysDirty = new Set<string>()
+  private compareWatch: number | null = null
+  private compareDirty = false
+  private watchTimer: ReturnType<typeof setTimeout> | null = null
+  private watchPushing = false
   private storeCache = { at: 0, data: new Map<string, store.RoomStore>() }
   private dbCache = { at: 0, data: null as DbStats | null }
   /** 「只有 id 的人」补资料的缓存：成功本进程永久记着，失败按冷却重试（见 enrichUnknownUsers） */
@@ -444,6 +480,15 @@ export class AnalyzerHub {
     // 停用之后不留「正在探测」「最后一条消息」这类运行态（重新启用时 init 会重建）
     this.reliveProbing.clear()
     this.lastDataAt.clear()
+    // 三份按登记推送的数据也一起清掉（重新启用时界面会重新登记）
+    if (this.watchTimer) clearTimeout(this.watchTimer)
+    this.watchTimer = null
+    this.presenceWatch.clear()
+    this.presenceDirty.clear()
+    this.daysWatch.clear()
+    this.daysDirty.clear()
+    this.compareWatch = null
+    this.compareDirty = false
     this.flushTimer = null
     this.cleanupTimer = null
     this.started = false
@@ -1040,6 +1085,7 @@ export class AnalyzerHub {
       }
       state.sessionId = sessionId
       state.recorder.begin(sessionId, this.settings.maxItems)
+      this.markDaysDirty(state.webRid)
       state.danmaku = { phase: 'connecting', failure: null, since: Date.now(), received: 0 }
       state.phase = 'connecting'
       logger.info(
@@ -1083,6 +1129,8 @@ export class AnalyzerHub {
       const messages = state.recorder.received
       state.sessionId = 0
       void store.closeSession(id, messages, reason)
+      // 会话开/关都会改变「今天那一条」的场次数
+      this.markDaysDirty(state.webRid)
     }
     state.phase = 'off'
     state.danmaku = idleDanmaku()
@@ -1262,6 +1310,8 @@ export class AnalyzerHub {
      * 空帧/心跳不算：真机上下播之后那条连接还在推空帧，正是被它骗过去的。
      */
     this.lastDataAt.set(state.webRid, Date.now())
+    // 有人发言/进场 → 在线观众那份表要跟着变（界面没开这个页签就不记）
+    this.markPresenceDirty(state.webRid)
     this.noteEmptyGifts(state, items)
     const touched = state.recorder.ingest(items, users, this.settings.maxItems)
     if (touched.length > 0) this.queueUsers(state, touched)
@@ -1332,6 +1382,8 @@ export class AnalyzerHub {
       const detail = failure ? `（${failure.code}${failure.detail ? ': ' + failure.detail : ''}）` : ''
       logger.info(`[douyin-link] ${state.webRid} 实时通道：${phase}${detail}`)
     }
+    // 对比表里带着相位/错误，相位变了就该重算（界面没在看对比页签就不记）
+    this.markCompareDirty()
     this.roomsDirty = true
     this.pushRoomsThrottled()
   }
@@ -1346,6 +1398,8 @@ export class AnalyzerHub {
   private handleMic(state: RoomState, userIds: string[]): void {
     // 麦位同步也是业务消息（语音房掉线时它同样会停，见 watchMonitors）
     this.lastDataAt.set(state.webRid, Date.now())
+    // 麦位是「在线观众」表里置顶的那一列：变了就推一份
+    this.markPresenceDirty(state.webRid)
     const before = state.recorder.micList()
     const changed =
       before.length !== userIds.length ||
@@ -1397,6 +1451,9 @@ export class AnalyzerHub {
         this.addFlushedDeltas(state, messages)
         // 此刻数据才真正在库里：概览要看到的就是这一份，标脏让实时推送重算
         this.markSummaryDirty(state.webRid)
+        // 这三个房间的「每日记录」也会跟着变（今天那一行的计数是活的）；对比表同理
+        this.markDaysDirty(state.webRid)
+        this.markCompareDirty()
         flushed = true
       } catch (error) {
         logger.warn(`[douyin-link] ${state.webRid} 落库失败（这批增量会丢）:`, describe(error))
@@ -1679,6 +1736,134 @@ export class AnalyzerHub {
     } finally {
       this.summaryPushing = false
       if (this.summaryDirty.size > 0) this.scheduleSummaryPush()
+    }
+  }
+
+  /* --------------------------------------------------- 观众 / 对比 / 每日记录推送 */
+
+  /**
+   * 登记「界面正在看这个房间的在线观众」。之后数据变了就推 `PRESENCE_EVENT`。
+   * 语义与 `watchSummary` 一致：界面每次查都顺带登记（切房间 = 换登记）。
+   */
+  watchPresence(webRid: string): void {
+    if (!webRid) return
+    this.presenceWatch.set(webRid, true)
+  }
+
+  /** 界面不再看这个房间的在线观众（切房间 / 关页签 / 卸载） */
+  unwatchPresence(webRid: string): void {
+    if (!webRid) return
+    this.presenceWatch.delete(webRid)
+    this.presenceDirty.delete(webRid)
+  }
+
+  /** 登记「界面正在看这个房间的每日记录」（`limit` 跟着界面要的条数走） */
+  watchDays(webRid: string, limit = 90): void {
+    if (!webRid) return
+    this.daysWatch.set(webRid, Math.min(Math.max(1, Math.round(limit)), 400))
+  }
+
+  unwatchDays(webRid: string): void {
+    if (!webRid) return
+    this.daysWatch.delete(webRid)
+    this.daysDirty.delete(webRid)
+  }
+
+  /** 登记「界面正在看这个窗口的房间对比」（切窗口 = 换登记，会立刻重算一份推回去） */
+  watchCompare(minutes: number): void {
+    const next = Math.min(Math.max(5, Math.round(minutes)), 1440)
+    const changed = this.compareWatch !== next
+    this.compareWatch = next
+    if (changed) {
+      this.compareDirty = true
+      this.scheduleWatchPush()
+    }
+  }
+
+  unwatchCompare(): void {
+    this.compareWatch = null
+    this.compareDirty = false
+  }
+
+  /** 在线观众的数据变了（发言/进场/麦位/成员名单）：标脏，按节流推 */
+  private markPresenceDirty(webRid: string): void {
+    if (!this.presenceWatch.has(webRid)) return
+    this.presenceDirty.add(webRid)
+    this.scheduleWatchPush()
+  }
+
+  /** 这一个房间的当日记录该更新了（落库 / 开会话 / 关会话） */
+  private markDaysDirty(webRid: string): void {
+    if (!this.daysWatch.has(webRid)) return
+    this.daysDirty.add(webRid)
+    this.scheduleWatchPush()
+  }
+
+  /** 有数据落库 / 相位变了 → 对比表要重算（没人在看就不记） */
+  private markCompareDirty(): void {
+    if (this.compareWatch === null) return
+    this.compareDirty = true
+    this.scheduleWatchPush()
+  }
+
+  private scheduleWatchPush(): void {
+    if (this.watchTimer || this.watchPushing) return
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null
+      void this.pushWatches()
+    }, WATCH_PUSH_MS)
+  }
+
+  /**
+   * 把这三份「界面登记过的」数据重算并推回去。
+   *
+   * **串行 + 单飞**（同 `pushSummaries`）：每份都要查库/合成，叠几轮只会跟宿主的流式输出抢资源。
+   * 算完还有欠账就再排一轮（数据在不断进来时会持续跟随，但每轮间隔不小于 `WATCH_PUSH_MS`）。
+   */
+  private async pushWatches(): Promise<void> {
+    if (this.watchPushing) return
+    this.watchPushing = true
+    try {
+      const presence = [...this.presenceDirty]
+      this.presenceDirty.clear()
+      for (const webRid of presence) {
+        if (!this.presenceWatch.has(webRid)) continue
+        try {
+          const snapshot = await this.presence(webRid)
+          this.broadcast(PRESENCE_EVENT, { webRid, snapshot } satisfies PresencePush)
+        } catch (error) {
+          logger.warn(`[douyin-link] ${webRid} 观众推送失败:`, describe(error))
+        }
+        await yieldToLoop()
+      }
+
+      const days = [...this.daysDirty]
+      this.daysDirty.clear()
+      for (const webRid of days) {
+        const limit = this.daysWatch.get(webRid)
+        if (limit === undefined) continue
+        try {
+          const rows = await this.dayRecords(webRid, limit)
+          this.broadcast(DAYS_EVENT, { webRid, days: rows } satisfies DaysPush)
+        } catch (error) {
+          logger.warn(`[douyin-link] ${webRid} 每日记录推送失败:`, describe(error))
+        }
+        await yieldToLoop()
+      }
+
+      if (this.compareDirty && this.compareWatch !== null) {
+        this.compareDirty = false
+        const minutes = this.compareWatch
+        try {
+          const rows = await this.compare(minutes)
+          this.broadcast(COMPARE_EVENT, { minutes, rows } satisfies ComparePush)
+        } catch (error) {
+          logger.warn('[douyin-link] 房间对比推送失败:', describe(error))
+        }
+      }
+    } finally {
+      this.watchPushing = false
+      if (this.presenceDirty.size > 0 || this.daysDirty.size > 0 || this.compareDirty) this.scheduleWatchPush()
     }
   }
 
@@ -2482,6 +2667,8 @@ export class AnalyzerHub {
     }
     if (resolved.anchorUser?.id) state.anchorUser = resolved.anchorUser
     state.refreshedAt = Date.now()
+    // 成员名单/主播资料随解析更新，而这两样都在「在线观众」表里
+    this.markPresenceDirty(state.webRid)
   }
 }
 

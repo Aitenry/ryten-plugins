@@ -50,26 +50,21 @@ export function MetricsPanel(props: {
     }
   }, [])
 
-  /** 首次 / 换区间时查一次（顺带登记这个区间），并留一个低频兜底轮询 */
+  /** 首次 / 换区间时查一次（顺带登记这个区间）；之后**全靠推送**，没有定时器 */
   useEffect(() => {
     let alive = true
-    const load = (): void => {
-      setLoading(true)
-      void api
-        .allAnalysis(minutes, props.range)
-        .then((next) => {
-          if (alive) setAnalysis(next)
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (alive) setLoading(false)
-        })
-    }
-    load()
-    const timer = window.setInterval(load, RELOAD_MS)
+    setLoading(true)
+    void api
+      .allAnalysis(minutes, props.range)
+      .then((next) => {
+        if (alive) setAnalysis(next)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
     return () => {
       alive = false
-      window.clearInterval(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.range.from, props.range.to])
@@ -161,11 +156,6 @@ export function MetricsPanel(props: {
     </div>
   )
 }
-
-/**
- * 兜底轮询间隔：与全局分析一致（实时更新靠 `all` 推送，这里只防「推送没挂上」）。
- */
-const RELOAD_MS = 30000
 
 /** 动态排序柱状图一次展示多少个房间（名次再往后就挤成一条线了） */
 const RACE_TOP = 8

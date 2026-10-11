@@ -6,7 +6,10 @@ import type { LiveSettings } from '../shared/types'
 import {
   ALL_EVENT,
   AUDIO_EVENT,
+  COMPARE_EVENT,
+  DAYS_EVENT,
   MESSAGES_EVENT,
+  PRESENCE_EVENT,
   ROOMS_EVENT,
   SUMMARY_EVENT,
   TICKS_EVENT,
@@ -158,11 +161,23 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     'plugin:douyin-link:all-analysis-unwatch': () => hub.unwatchAllAnalysis(),
     // 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）
     'plugin:douyin-link:reveal-mystery': (userId?: string) => hub.revealMystery(String(userId ?? '')),
-    // 每一天的直播记录（左侧房间旁边的列表）
-    'plugin:douyin-link:day-records': (webRid?: string, limit?: number) =>
-      hub.dayRecords(String(webRid ?? ''), typeof limit === 'number' ? limit : 90),
-    'plugin:douyin-link:rooms-compare': (minutes?: number) =>
-      hub.compare(typeof minutes === 'number' ? minutes : 60),
+    // 每一天的直播记录（左侧房间旁边的列表）：查一次 + 登记推送（登记语义同 room-summary）
+    'plugin:douyin-link:day-records': (webRid?: string, limit?: number) => {
+      const id = String(webRid ?? '')
+      const count = typeof limit === 'number' ? limit : 90
+      hub.watchDays(id, count)
+      return hub.dayRecords(id, count)
+    },
+    /** 界面不再看这个房间的每日记录（切房间 / 卸载） */
+    'plugin:douyin-link:days-unwatch': (webRid?: string) => hub.unwatchDays(String(webRid ?? '')),
+    // 房间对比：查一次 + 登记这个窗口的实时推送（切窗口 = 换登记）
+    'plugin:douyin-link:rooms-compare': (minutes?: number) => {
+      const window = typeof minutes === 'number' ? minutes : 60
+      hub.watchCompare(window)
+      return hub.compare(window)
+    },
+    /** 界面不再看对比页签（切页签 / 卸载） */
+    'plugin:douyin-link:compare-unwatch': () => hub.unwatchCompare(),
     'plugin:douyin-link:users-list': (webRid?: string, sort?: string, keyword?: string, limit?: number, offset?: number) =>
       hub.listUsers(
         String(webRid ?? ''),
@@ -201,8 +216,15 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
           ? { from, to }
           : undefined
       ),
-    // 「在线观众」：麦上（聊天室）+ 接口给的房间成员 + 本场活跃，合并成一份列表
-    'plugin:douyin-link:presence-list': (webRid?: string) => hub.presence(String(webRid ?? '')),
+    // 「在线观众」：麦上（聊天室）+ 接口给的房间成员 + 本场活跃，合并成一份列表。
+    // 查一次 + 登记推送：之后观众/麦位/成员变了由主进程推（替掉渲染层那个 5 秒轮询）
+    'plugin:douyin-link:presence-list': (webRid?: string) => {
+      const id = String(webRid ?? '')
+      hub.watchPresence(id)
+      return hub.presence(id)
+    },
+    /** 界面不再看这个房间的在线观众（切房间 / 切页签） */
+    'plugin:douyin-link:presence-unwatch': (webRid?: string) => hub.unwatchPresence(String(webRid ?? '')),
     // 头像：渲染层 CSP 不许外链图片，所以由主进程下载成 data URL 再给界面
     'plugin:douyin-link:user-avatar': (webRid?: string, userId?: string) =>
       hub.userAvatar(String(webRid ?? ''), String(userId ?? '')),
@@ -258,5 +280,9 @@ export const EVENTS = [
   TICKS_EVENT,
   AUDIO_EVENT,
   SUMMARY_EVENT,
-  ALL_EVENT
+  ALL_EVENT,
+  PRESENCE_EVENT,
+  COMPARE_EVENT,
+  DAYS_EVENT
 ]
+

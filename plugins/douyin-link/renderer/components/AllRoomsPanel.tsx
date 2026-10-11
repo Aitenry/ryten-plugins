@@ -10,15 +10,6 @@ import { GiftRankBoard, TrendChart, formatNumber } from './OverviewPanel'
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
 /**
- * 全局分析的**兜底**轮询间隔。
- *
- * 实时更新靠主进程的 `all-analysis` 推送（落库后按界面请求的窗口重算一份推过来，
- * 见 main/monitor/hub.ts 的全局推送管线），这里只留一个低频兜底：万一推送没挂上，
- * 界面最多慢这么多，不会一直停在打开那一刻。
- */
-const RELOAD_MS = 30000
-
-/**
  * 数据大屏 · 全局分析页签：**所有直播间合起来**的分析报告。
  *
  * 与概览页签（单房间）相对：
@@ -59,26 +50,21 @@ export function AllRoomsPanel(props: {
     }
   }, [])
 
-  /** 首次 / 换区间时查一次（`allAnalysis` 顺带登记这个区间），并留一个低频兜底轮询 */
+  /** 首次 / 换区间时查一次（`allAnalysis` 顺带登记这个区间）；之后全靠推送，没有定时器 */
   useEffect(() => {
     let alive = true
-    const load = (): void => {
-      setLoading(true)
-      void api
-        .allAnalysis(minutes, props.range)
-        .then((next) => {
-          if (alive) setAnalysis(next)
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (alive) setLoading(false)
-        })
-    }
-    load()
-    const timer = window.setInterval(load, RELOAD_MS)
+    setLoading(true)
+    void api
+      .allAnalysis(minutes, props.range)
+      .then((next) => {
+        if (alive) setAnalysis(next)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
     return () => {
       alive = false
-      window.clearInterval(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.range.from, props.range.to])

@@ -5,9 +5,11 @@ import type {
   AllRoomsAnalysis,
   AnalyzerSnapshot,
   AudioMessage,
+  ComparePush,
   DanmakuItem,
   DanmakuKind,
   DayRecordRow,
+  DaysPush,
   DbStats,
   ExportResult,
   FailureInfo,
@@ -19,6 +21,7 @@ import type {
   MessageQuery,
   MonitorSession,
   MysteryReveal,
+  PresencePush,
   PresenceRow,
   PresenceSnapshot,
   RoomCompareRow,
@@ -571,6 +574,19 @@ export const api = {
   summaryUnwatch: (webRid: string): void => {
     if (webRid) void invoke(`${PREFIX}summary-unwatch`, webRid)
   },
+  /**
+   * 撤销「在线观众 / 每日记录 / 房间对比」的实时推送（切房间 / 切页签 / 卸载时调）。
+   * 登记同样是查询顺带做的（见主进程 ipc），这里只负责撤销——发出去就不管回话。
+   */
+  presenceUnwatch: (webRid: string): void => {
+    if (webRid) void invoke(`${PREFIX}presence-unwatch`, webRid)
+  },
+  daysUnwatch: (webRid: string): void => {
+    if (webRid) void invoke(`${PREFIX}days-unwatch`, webRid)
+  },
+  compareUnwatch: (): void => {
+    void invoke(`${PREFIX}compare-unwatch`)
+  },
   dbStats: async (): Promise<DbStats> => normalizeDbStats(await invoke(`${PREFIX}db-stats`)),
   /** 立刻按保留期清一次旧数据（设置页的「立即清理」），返回删掉的条数 */
   cleanup: async (): Promise<number> => asCount(await invoke(`${PREFIX}cleanup`)),
@@ -624,6 +640,27 @@ export const api = {
     window.api.plugin.on(`${PREFIX}users`, (payload) => {
       const batch = payload as UserBatch
       if (batch && typeof batch.webRid === 'string' && Array.isArray(batch.users)) callback(batch)
+    }),
+  /**
+   * 在线观众推送（2026-10-11：替掉渲染层那个 5 秒轮询）。
+   * 主进程在「观众/麦位/成员名单真的变了」之后推一份，界面直接替换。
+   */
+  onPresence: (callback: (push: PresencePush) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}presence`, (payload) => {
+      const push = payload as PresencePush
+      if (push && typeof push.webRid === 'string' && push.snapshot) callback(push)
+    }),
+  /** 房间对比推送（替掉对比页签那个 10 秒轮询）；`minutes` 用来挡掉切窗口期间迟到的旧数据 */
+  onCompare: (callback: (push: ComparePush) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}compare`, (payload) => {
+      const push = payload as ComparePush
+      if (push && typeof push.minutes === 'number' && Array.isArray(push.rows)) callback(push)
+    }),
+  /** 每日记录推送（替掉左侧列表那个 60 秒轮询） */
+  onDays: (callback: (push: DaysPush) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}days`, (payload) => {
+      const push = payload as DaysPush
+      if (push && typeof push.webRid === 'string' && Array.isArray(push.days)) callback(push)
     }),
   /** 音频消息（只会是正在响的那个房间）——直接喂给播放器的 handleMessage */
   onAudio: (callback: (message: AudioMessage) => void): (() => void) =>
