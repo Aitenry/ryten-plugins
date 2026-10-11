@@ -625,9 +625,15 @@ await settle(300)
 /** 2026-10-01 是周四（表头周一起 → 前面该有 3 个空位） */
 const octoberFirstWeekdayOffset = () => (new Date(2026, 9, 1).getDay() + 6) % 7
 
-/** 档案弹窗里那一块统计（找含「互动统计」的那张卡） */
-const profileModal = () => [...doc.querySelectorAll('.ant-modal')].pop()
 const bodyText = (node) => (node?.textContent ?? '').replace(/\s+/g, ' ')
+/**
+ * 档案弹窗：**按内容认**（「互动统计」那块只在它里面）。
+ * 不能取「最后一个弹窗」——日历开着时最后一个就是日历（第一版这么写，量层叠号时量成了自己）。
+ */
+const profileModal = () =>
+  [...doc.querySelectorAll('.ant-modal')].find((node) =>
+    bodyText(node).includes(zh['douyin-link'].users.statsTitle)
+  ) ?? null
 const profileText = bodyText(profileModal())
 check(
   '标题写着「全部直播间」而不是「本房间」',
@@ -655,31 +661,30 @@ check(
   [false, false]
 )
 /*
- * 「横排」在 jsdom 里**量不到**（工装的 `getBoundingClientRect` 对所有元素给同一个矩形），
- * 所以这里只钉结构：两个数字是**同一个 flex 行**里的兄弟，两个都**按内容自适应宽度**
- * （没有 `flex-1`：用户 2026-10-11 第三轮说「这个前后的空隙太大了」——各占半格居中会把
- * 两个数推到块的两端，中间空一大截），行内只隔一个 `gap-3`。
- * 真正的像素版式看 `snap()` 落出来的那张快照。
+ * **左右分开**（用户 2026-10-11 的定版：「要左右分开」）：两个数字在同一行，
+ * 一个贴左、一个贴右（`justify-between`），不是上下两行、也不是挤在左侧。
+ * jsdom 量不到几何，这里钉结构：同一个 flex 行里的兄弟、行内有 `justify-between`、
+ * 两个都不 `flex-1`（不撑开而是靠父级 space-between 分开）。高度看 `snap()` 快照（47px = 与旁边等高）。
  */
 check(
-  '两个数字是同一个 flex 行里的兄弟、都按内容自适应（不撑开）',
+  '两个数字在同一行、左右分开（justify-between 的兄弟节点）',
   [
     Boolean(sentNode?.parentElement) && sentNode?.parentElement === receivedNode?.parentElement,
     (sentNode?.parentElement?.className ?? '').includes('flex'),
-    (sentNode?.parentElement?.className ?? '').includes('gap-3'),
+    (sentNode?.parentElement?.className ?? '').includes('justify-between'),
     [sentNode?.className.includes('flex-1'), receivedNode?.className.includes('flex-1')]
   ],
   [true, true, true, [false, false]]
+)
+check(
+  '礼物格 = 标题 + 一行数字（没有第三行）',
+  [...(giftBlock?.children ?? [])].map((node) => node.getAttribute('data-rb-gift-sent') !== null ? 'sent' : node.getAttribute('data-rb-gift-received') !== null ? 'received' : 'other'),
+  ['other', 'other']
 )
 /*
  * 高度对齐：旁边四个块都是「一行标签 + 一行数字」，礼物那格也必须是**两行**的高度
  * （标签 + 一行数字），不能再多出第三行——工装能数的是子元素层数，像素高度在 jsdom 里都是 0。
  */
-check(
-  '礼物格结构 = 标签行 + 数字行（没有多出来的第三行）',
-  [...(giftBlock?.children ?? [])].map((node) => node.querySelectorAll('span').length),
-  [0, 2]
-)
 check(
   '悬浮提示写清了两个数字是什么（含义不靠格子里的文字）',
   giftBlock?.getAttribute('title'),
@@ -712,6 +717,23 @@ check('本月合计写在月份条右边（送 1,200 / 收 600）', calendarText
  */
 const dayCells = [...(calendarModal()?.querySelectorAll('button[data-rb-row]') ?? [])]
 check('日历里有 31 个格子（10 月）', dayCells.length, 31)
+/*
+ * 层叠（用户 2026-10-11：「点击后第一次是置顶的，后面都被用户档案遮挡了」）：
+ * 三层弹窗的 z-index 必须是**固定且递增**的（档案 < 日历 < 某天明细），不能靠 antd 自动分配——
+ * 自动分配在第二次打开时会给出比档案更小的号。jsdom 看不到 antd 生成的 CSS，但**内联的
+ * `zIndex` 是我们自己传的**，能直接读。这里顺带断言它们彼此有序，防止以后有人去掉。
+ */
+const wrapZ = (node) => {
+  let hit = node
+  while (hit && !(hit instanceof dom.window.HTMLElement && String(hit.className ?? '').includes('ant-modal-wrap'))) {
+    hit = hit.parentElement
+  }
+  return Number(hit?.style.zIndex ?? 0)
+}
+const profileZ = wrapZ(profileModal())
+const calendarZ = wrapZ(calendarModal())
+check('档案弹窗有固定层叠号', profileZ > 0, true)
+check('日历层叠号高于档案（第二次打开也不被遮挡）', calendarZ > profileZ, true)
 const cellOf = (day) => dayCells.find((node) => (node.textContent ?? '').trim().startsWith(String(day)))
 check('8 号格子：送礼 1.2k、收礼 100', [bodyText(cellOf(8)).includes('1.2k'), bodyText(cellOf(8)).includes('100')], [true, true])
 /*
@@ -826,6 +848,8 @@ check(
 /* 明细那几行也留一张快照（方向标签的位置与配色只能靠眼睛看） */
 console.log(`  明细快照（暗）：${snap('gift-history-dark', historyModal, 'dark')}`)
 console.log(`  明细快照（亮）：${snap('gift-history-light', historyModal, 'light')}`)
+/* 某天明细也要压在日历之上（第三层） */
+check('某天明细的层叠号高于日历', wrapZ(historyModal) > calendarZ, true)
 
 console.log('\n=== 8. 日历能翻到上一个月 ===')
 calls.length = 0

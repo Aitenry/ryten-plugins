@@ -6,6 +6,7 @@ import type { GiftDayRow } from '../../shared/types'
 import { dayRangeOf, monthDays } from '../../shared/gift-calendar'
 import api from '../api'
 import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
+import { MODAL_Z } from './modal-z'
 import { formatNumber } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -126,6 +127,13 @@ export function GiftCalendarModal(props: {
       title={t('douyin-link.users.giftCalendarTitle', { name: props.name })}
       onCancel={props.onClose}
       footer={null}
+      /*
+       * **层叠必须自己定**（用户 2026-10-11：「点击后第一次是置顶的，后面都被用户档案遮挡了」）：
+       * 日历是叠在**用户档案弹窗**上面打开的，靠 antd 自动分配 z-index 时，第二次打开会分到比档案
+       * 更小的号、于是被盖住。这里给三层弹窗各一个固定号（档案 1000 < 日历 1100 < 某天明细 1200，
+       * 见 `Page.tsx` 的 `MODAL_Z`），与打开顺序无关。
+       */
+      zIndex={MODAL_Z.calendar}
       /* 比档案弹窗宽一点：7 列日历横向要放得下 */
       width={560}
     >

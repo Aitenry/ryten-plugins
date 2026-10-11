@@ -54,6 +54,7 @@ import { UserAvatar, forgetAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
 import { GiftCalendarModal } from './components/GiftCalendar'
+import { MODAL_Z } from './components/modal-z'
 import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
 import { duration, formatNumber, stamp } from './components/OverviewPanel'
@@ -1187,10 +1188,12 @@ export default function Page(): React.JSX.Element {
           webRid=""
           userId={openUser}
           name={giftCalendarName}
-          /* 日历那一格同时有送礼与收礼两个数，明细就得两个方向都列（逐行 `→ / ←` 标方向） */
+          /* 日历那一格同时有送礼与收礼两个数，明细就得两个方向都列（逐行 `收入 / 支出` 标方向） */
           both
           direction="sent"
           range={giftDay}
+          /* 明细叠在日历上面（见 `modal-z.ts`：靠 antd 自动分配会被下面的弹窗盖住） */
+          zIndex={MODAL_Z.dayDetail}
           onClose={() => setGiftDay(null)}
         />
       ) : null}
@@ -1278,8 +1281,7 @@ function UserProfileModal(props: {
    * 内层的 onCancel 又冒泡到外层）。放在页面同级，两个弹窗各管各的开关。
    */
   onOpenCalendar: (name: string) => void
-}): React.JSX.Element {
-  const { t: translate } = useTranslation()
+}): React.JSX.Element {  const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
   const [profile, setProfile] = useState<UserDetail | null>(null)
@@ -1528,6 +1530,8 @@ function UserProfileModal(props: {
       title={t('douyin-link.users.detailTitle')}
       onCancel={props.onClose}
       footer={null}
+      /* 最底层：日历（1100）与某天明细（1200）都叠在它上面（见 `modal-z.ts`） */
+      zIndex={MODAL_Z.profile}
       width={splitOpen ? 892 : undefined}
     >
       <ScrollStyle />
@@ -1869,14 +1873,14 @@ function GiftValueBlock(props: {
     >
       <span className="truncate text-[10px] opacity-60">{props.label}</span>
       {/*
-        两个数字**挨着放**（送出在前、收到在后），只有颜色区分送/收，不再带文字标签。
+        **左右分开**（用户 2026-10-11：「要左右分开」）：两个数字在同一行，
+        **一个贴左、一个贴右**（`justify-between`）——送出在左（绿）、收到在右（琥珀）。
+        这是定版：并排但在方块两端分开，不再挤在一起、也不再分两行。
 
-        间距（用户 2026-10-11 第三轮：「这个前后的空隙太大了」）：第一版把两个数各塞进半格并居中，
-        于是「14,741」与「0」被推到块的两端、中间空一大截——像两个不相干的指标。现在两个数宽度
-        按内容自适应、彼此只隔一个 `gap-3`，整行**左对齐**（与上面的「礼物价值」标签同一条竖线）。
-        行高 `leading-5` 与 `StatBlock` 的数字行逐字一致，这一格才与旁边四个块等高。
+        行高 `leading-5` 与旁边 `StatBlock` 的数字行逐字一致 ⇒ 这一格与它们**等高**
+        （真组件快照实测五格都是 47px）。
       */}
-      <span className="flex min-w-0 flex-1 items-center gap-3 tabular-nums leading-5">
+      <span className="flex min-w-0 items-center justify-between gap-2 tabular-nums leading-5">
         <span
           data-rb-gift-sent=""
           className="min-w-0 truncate text-sm font-semibold"

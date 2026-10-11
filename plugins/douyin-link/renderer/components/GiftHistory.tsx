@@ -46,6 +46,8 @@ export function GiftHistoryModal(props: {
    * 点开就正好是那两条。
    */
   range: { from: number; to: number } | null
+  /** 层叠号（叠在别的弹窗上面时用；见 `modal-z.ts`） */
+  zIndex?: number
   onClose: () => void
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
@@ -113,6 +115,8 @@ export function GiftHistoryModal(props: {
       open={Boolean(props.userId)}
       title={t('douyin-link.page.giftHistoryTitle')}
       onCancel={props.onClose}
+      /* 层叠号由调用方给（叠在日历上面时要 > 日历，见 `modal-z.ts`） */
+      zIndex={props.zIndex}
       /* 没有页脚：底部那个「关闭」跟右上角的 × 是同一件事，去掉后正文多出一行高度 */
       footer={null}
     >
