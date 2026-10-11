@@ -1187,6 +1187,8 @@ export default function Page(): React.JSX.Element {
           webRid=""
           userId={openUser}
           name={giftCalendarName}
+          /* 日历那一格同时有送礼与收礼两个数，明细就得两个方向都列（逐行 `→ / ←` 标方向） */
+          both
           direction="sent"
           range={giftDay}
           onClose={() => setGiftDay(null)}

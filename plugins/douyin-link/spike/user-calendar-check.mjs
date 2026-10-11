@@ -95,7 +95,7 @@ const AT = {
 
 const entry = `
 import { withOrm, closeOrm } from '@host/main/database/orm'
-import { insertMessages, upsertUserDeltas, userStatsAnyRoom, userGiftDays, userGiftMonths, clearUsers } from './db/mapper'
+import { insertMessages, upsertUserDeltas, userStatsAnyRoom, userGiftDays, userGiftMonths, clearUsers, queryMessages } from './db/mapper'
 
 const ROOM_A = '700000000001'
 const ROOM_B = '700000000002'
@@ -209,6 +209,27 @@ const dayRange = (month) => {
 const october = await userGiftDays([ME], dayRange('2026-10').from, dayRange('2026-10').to)
 const september = await userGiftDays([ME], dayRange('2026-09').from, dayRange('2026-09').to)
 
+/*
+ * 「某一天的明细」要**两个方向都给**（用户 2026-10-11：「礼物历史只能看见送的，没有收的」——
+ * 日历那格写着送礼 + 收礼两个数，明细却只给送出）。
+ * bothDirections: true = 送礼与收礼从「与」变成「或」，一次查回来。
+ */
+/* 那一天（本地）的起止：与 shared/gift-calendar.ts 的 dayRangeOf 同一口径，这里就地算 */
+const day8 = {
+  from: new Date(2026, 9, 8, 0, 0, 0, 0).getTime(),
+  to: new Date(2026, 9, 8, 23, 59, 59, 999).getTime()
+}
+const onlySent = await queryMessages({ kind: 'gift', userIds: [ME], from: day8.from, to: day8.to })
+const onlyReceived = await queryMessages({ kind: 'gift', toUserIds: [ME], from: day8.from, to: day8.to })
+const both = await queryMessages({
+  kind: 'gift',
+  userIds: [ME],
+  toUserIds: [ME],
+  bothDirections: true,
+  from: day8.from,
+  to: day8.to
+})
+const summary = (page) => page.rows.map((row) => row.userId + '->' + row.toUserId + ':' + row.diamonds).sort()
 /* 清空用户表后：没有档案行的人也应该算得出收礼（收礼是从流水里来的） */
 await clearUsers()
 const noProfile = await userStatsAnyRoom([ME])
@@ -227,7 +248,13 @@ export default JSON.stringify({
   meAfterClear: (() => { const hit = noProfile.get(ME); return hit ? { chat: hit.chat, diamonds: hit.diamonds, received: hit.receivedDiamonds } : null })(),
   months,
   october: october.map((d) => ({ day: d.day, sent: d.sent, received: d.received, sentGifts: d.sentGifts, receivedGifts: d.receivedGifts })),
-  september: september.map((d) => ({ day: d.day, sent: d.sent, received: d.received }))
+  september: september.map((d) => ({ day: d.day, sent: d.sent, received: d.received })),
+  dayDetail: {
+    sent: summary(onlySent),
+    received: summary(onlyReceived),
+    both: summary(both),
+    bothTotal: both.total
+  }
 })
 `
 
@@ -274,7 +301,6 @@ const check = (label, actual, expected) => {
 const { monthBucketRange, dayBucketOf, dayRangeOf } = await import(
   pathToFileURL(join(ROOT, 'plugins/douyin-link/shared/gift-calendar.ts')).href
 )
-
 console.log('=== A. 月份 → 本地日桶 ===')
 const oct = monthBucketRange('2026-10')
 check('10-01 的桶就是月初', dayBucketOf(new Date(2026, 9, 1, 12).getTime()), oct.from)
@@ -350,6 +376,25 @@ check('10-08：送礼 1 件、收礼 2 件', [result.october[0].sentGifts, resul
 check('10-09：只收到 500（那一天没送过）', [result.october[1].sent, result.october[1].received], [0, 500])
 check('9 月那天的 700 落在 9 月，不在 10 月', result.september.map((d) => [d.day, d.received]), [['2026-09-20', 700]])
 check('9 月那天没有送礼', result.september[0].sent, 0)
+
+console.log('\n=== D. 某一天的礼物明细：送出与收到都要有 ===')
+/*
+ * 10-08 那一天：我送出 1 件（给 PEER 1200）、收到 2 件（PEER 给的 99 + 1）。
+ * 只查「送」或只查「收」各得一半；`bothDirections` 一次拿全——这就是用户说的
+ * 「礼物历史只能看见送的，没有收的」要修的那条。
+ */
+check('只按送礼人查：只有那条送出的', result.dayDetail.sent, [`${ME}->${PEER}:1200`])
+check(
+  '只按收礼人查：只有那两条收到的',
+  result.dayDetail.received,
+  [`${PEER}->${ME}:1`, `${PEER}->${ME}:99`]
+)
+check(
+  '两个方向都要：三条都在（送出 + 收到）',
+  result.dayDetail.both,
+  [`${ME}->${PEER}:1200`, `${PEER}->${ME}:1`, `${PEER}->${ME}:99`]
+)
+check('总数也是三条（分页不会少算）', result.dayDetail.bothTotal, 3)
 
 console.log(`\n=== 小结 ===\n${failures === 0 ? '✓ 全部断言通过' : `✗ ${failures} 项断言失败`}`)
 rmSync(workDir, { recursive: true, force: true })

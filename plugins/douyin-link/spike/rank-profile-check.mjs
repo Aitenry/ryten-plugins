@@ -126,6 +126,46 @@ const CHAT_USERS = [
 const GIFT_ROWS = [{ userId: '8001', name: '收礼的人', count: 3, diamonds: 300, lastAt: 1 }]
 
 /**
+ * 「某一天的礼物明细」的工装数据：**一条送出 + 一条收到**（用户报的就是只给送出那种）。
+ *
+ * 行形状是 `GiftHistoryRow`（`StoredMessage` + 主进程算好的 `direction` / `counterpart`）。
+ */
+const GIFT_HISTORY = [
+  {
+    id: 1,
+    webRid: '880000000001',
+    kind: 'gift',
+    user: '发言第一名',
+    userId: '7001',
+    toUser: '收礼的人',
+    toUserId: '8001',
+    text: '跑车',
+    count: 1,
+    diamonds: 1200,
+    at: new Date(2026, 9, 9, 20, 0).getTime(),
+    direction: 'sent',
+    counterpart: '收礼的人',
+    counterpartId: '8001'
+  },
+  {
+    id: 2,
+    webRid: '880000000001',
+    kind: 'gift',
+    user: '送礼的人',
+    userId: '8001',
+    toUser: '发言第一名',
+    toUserId: '7001',
+    text: '大啤酒',
+    count: 1,
+    diamonds: 500,
+    at: new Date(2026, 9, 9, 21, 0).getTime(),
+    direction: 'received',
+    counterpart: '送礼的人',
+    counterpartId: '8001'
+  }
+]
+
+/**
  * 日历数据里那几天的日桶号：**与插件同一份实现**算出来（`shared/gift-calendar.ts`），
  * 不用手写常量——桶号算错一天，界面就会把数据画到隔壁格子（工装 A 段就是在钉这件事）。
  */
@@ -234,6 +274,17 @@ const handlers = () => {
     return { month: target, months: ['2026-10', '2026-09'], days }
   })
   map.set(`${PREFIX}user-identity`, () => null)
+  /*
+   * 礼物历史：**按方向给不同的数据**——`both` 时两条都给（一条送的、一条收的），
+   * 单一方向时只给对应的那条。这样界面如果偷偷把 `both` 当成 `sent`，断言就会缺一条。
+   */
+  map.set(`${PREFIX}gift-history`, (_webRid, _userId, direction) => {
+    const rows =
+      direction === 'both'
+        ? GIFT_HISTORY
+        : GIFT_HISTORY.filter((row) => row.direction === (direction === 'received' ? 'received' : 'sent'))
+    return { rows, total: rows.length }
+  })
   map.set(`${PREFIX}presence-list`, () => ({
     webRid: ROOM,
     rows: [],
@@ -708,6 +759,23 @@ check(
   true
 )
 check('而且明细弹窗也开了', dayCalls.filter((entry) => entry.channel === `${PREFIX}gift-history`).length, 1)
+/*
+ * 用户 2026-10-11：「礼物历史只能看见送的，没有收的」——日历那格同时写着送礼与收礼两个数，
+ * 点开明细就必须**两个方向都给**（`direction='both'`），并且逐行标出方向。
+ */
+check('明细问的是「两个方向都要」（不是只要送的）', historyCall?.args[2], 'both')
+const historyModal = [...doc.querySelectorAll('.ant-modal')].find((node) =>
+  bodyText(node).includes(zh['douyin-link'].page.giftHistoryBoth)
+)
+check('明细弹窗标题行写着「送出与收到」', Boolean(historyModal), true)
+const historyText = bodyText(historyModal)
+check('送出的那条在（带 → 指向对方）', historyText.includes(`→ ${GIFT_HISTORY[0].toUser}`), true)
+check('收到的那条也在（带 ← 指向对方）', historyText.includes(`← ${GIFT_HISTORY[1].user}`), true)
+check(
+  '两条的抖币都画出来了',
+  [historyText.includes('1,200'), historyText.includes('500')],
+  [true, true]
+)
 
 console.log('\n=== 8. 日历能翻到上一个月 ===')
 calls.length = 0

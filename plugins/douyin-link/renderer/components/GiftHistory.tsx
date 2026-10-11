@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Modal } from 'antd'
 import { RiArrowLeftLine, RiArrowRightLine, RiRefreshLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
-import type { StoredMessage } from '../../shared/types'
+import type { GiftHistoryRow } from '../../shared/types'
 import api from '../api'
 import { ScrollStyle, formModalProps, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
@@ -22,6 +22,10 @@ const LIST_MAX_HEIGHT = 260
  *
  * 一行 = 一条礼物记录：时间 · 礼物名 · 对方（收礼/送礼口径随榜单）· 件数 · 抖币；
  * 抖币为 0 的显示「价值未知」（官方没给价，不写成 0）。
+ *
+ * `both = true`（档案「每日收益」日历里点某一天用的那条路）：**送出与收到都列出来**，
+ * 逐行标 `→ 对方`（送出）/ `← 对方`（收到）。用户 2026-10-11 报的
+ * 「礼物历史只能看见送的，没有收的」就是这条——日历那格同时写着两个数，明细却只给了送的。
  */
 export function GiftHistoryModal(props: {
   /** 打开的这个人（空串 = 不显示弹窗） */
@@ -30,6 +34,11 @@ export function GiftHistoryModal(props: {
   name?: string
   webRid: string
   direction: 'sent' | 'received'
+  /**
+   * **两个方向都要**（默认 false）。日历「某一天的明细」用它——那一格本来就有送有收，
+   * 只给一个方向等于骗人（榜上写「收礼 3.2k」点开却只有送出的）。
+   */
+  both?: boolean
   /**
    * **与榜单同一段时间范围**（默认就是「今天这一场」）。
    * 用户 2026-10-08：「点开显示礼物历史送内容，不能直接显示之前的内容，只能是当前的，
@@ -42,16 +51,18 @@ export function GiftHistoryModal(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
-  const [rows, setRows] = useState<StoredMessage[]>([])
+  const [rows, setRows] = useState<GiftHistoryRow[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(false)
   /** 手动刷新：加一就重查（不重挂组件，翻页状态留着） */
   const [tick, setTick] = useState(0)
+  /** 实际查询用的方向：`both` 打开时两个方向一起查（主进程逐行标好方向） */
+  const query = props.both ? 'both' : props.direction
 
   useEffect(() => {
     setPage(0)
-  }, [props.userId, props.direction, props.webRid, props.range?.from, props.range?.to])
+  }, [props.userId, props.direction, props.both, props.webRid, props.range?.from, props.range?.to])
 
   useEffect(() => {
     if (!props.userId) {
@@ -62,7 +73,7 @@ export function GiftHistoryModal(props: {
     let alive = true
     setLoading(true)
     void api
-      .giftHistory(props.webRid, props.userId, props.direction, PAGE_SIZE, page * PAGE_SIZE, props.range)
+      .giftHistory(props.webRid, props.userId, query, PAGE_SIZE, page * PAGE_SIZE, props.range)
       .then((result) => {
         if (!alive) return
         setRows(result.rows)
@@ -83,10 +94,19 @@ export function GiftHistoryModal(props: {
     if (page > 0 && page >= pages) setPage(pages - 1)
   }, [page, pages])
 
-  const counterpart = (row: StoredMessage): string => {
-    const name = props.direction === 'received' ? row.user : row.toUser
-    const id = props.direction === 'received' ? row.userId : row.toUserId
-    return name || (id ? t('douyin-link.page.idOnly', { id }) : '')
+  /**
+   * 这一行的**对方**：`→ 昵称` = 我送出去的、`← 昵称` = 我收到的。
+   *
+   * 两个方向都要时箭头是必须的——不然「软软呀」既可能是我送的人、也可能是我收的人，读不出来。
+   * 单一方向时（榜单点进来的）不画箭头：那个方向已经写在标题行上了（「送出」/「收到」）。
+   */
+  const counterpart = (row: GiftHistoryRow): string => {
+    const received = props.both ? row.direction === 'received' : props.direction === 'received'
+    const name = received ? row.user : row.toUser
+    const id = received ? row.userId : row.toUserId
+    const label = name || (id ? t('douyin-link.page.idOnly', { id }) : '')
+    if (!props.both) return label
+    return `${received ? '←' : '→'} ${label}`
   }
 
   return (
@@ -106,9 +126,11 @@ export function GiftHistoryModal(props: {
             <span className="opacity-60">
               {' · '}
               {t(
-                props.direction === 'received'
-                  ? 'douyin-link.page.giftHistoryReceived'
-                  : 'douyin-link.page.giftHistorySent'
+                props.both
+                  ? 'douyin-link.page.giftHistoryBoth'
+                  : props.direction === 'received'
+                    ? 'douyin-link.page.giftHistoryReceived'
+                    : 'douyin-link.page.giftHistorySent'
               )}
               {' · '}
               {t('douyin-link.page.total', { count: formatNumber(total) })}

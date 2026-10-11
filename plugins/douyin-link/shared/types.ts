@@ -291,6 +291,22 @@ export interface StoredMessage extends DanmakuItem {
   webRid: string
 }
 
+/**
+ * **礼物流水**里的一行（礼物历史弹窗用）：`StoredMessage` + 「这一行对**当前这个人**是哪个方向」。
+ *
+ * 为什么要带方向（用户 2026-10-11：「礼物历史只能看见送的，没有收的」）：档案「每日收益」日历里
+ * 点某一天要**同时**看这天送出的与收到的，一行到底是送还是收只有主进程知道（它拿的是
+ * 「这个人名下的全部账号」那份 id 集合），所以在主进程算好，界面只负责显示
+ * （`→ 对方` = 送出 / `← 对方` = 收到）。
+ */
+export interface GiftHistoryRow extends StoredMessage {
+  direction: 'sent' | 'received'
+  /** 对方昵称（送礼/收礼的另一头；拿不到昵称时是空串，界面显示他/她的用户 id） */
+  counterpart: string
+  /** 对方的用户 id（点得开档案那一个） */
+  counterpartId: string
+}
+
 /** 失败原因：**只回代码 + 明细**，文案由渲染层按界面语言翻 */
 export interface FailureInfo {
   code: string
@@ -1074,6 +1090,15 @@ export interface MessageQuery {
   toUserId?: string
   /** 收礼人 id 集合（同上：画像多账号时用） */
   toUserIds?: string[]
+  /**
+   * **两个方向都要**（送礼 + 收礼）：`userId`/`userIds` 与 `toUserId`/`toUserIds` 从「与」变成「或」。
+   *
+   * 为什么需要它（用户 2026-10-11：「礼物历史只能看见送的，没有收的」）：档案「每日收益」日历里
+   * 一格同时给出送礼与收礼两个数，点某一天时**这一天两个方向都要看**；以前只能二选一，
+   * 那格写着「收礼 3.2k」点开却只有送出的记录。查两遍再在界面上合并会多一次查询、还得自己排，
+   * 不如一次查回来按时间排好。
+   */
+  bothDirections?: boolean
   /** 时间范围（ms） */
   from?: number
   to?: number

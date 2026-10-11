@@ -286,6 +286,14 @@ function toMessageInsert(row: MessageRow): Omit<MessageRow, 'giftRecord'> {
   }
 }
 
+/**
+ * **礼物的「对方」是谁**（只有礼物才有这个方向）。
+ *
+ * 同一行在不同人眼里方向是相反的：`from` 是送礼人、`to` 是收礼人；对「我」来说
+ * 我发的就是**送出**、我在 `to` 里就是**收到**。界面靠它显示「→ 对方 / ← 对方」。
+ */
+export type GiftMessageDirection = 'sent' | 'received'
+
 /** 条件检索（跨房间也行：`webRid` 空 = 所有房间） */
 export async function queryMessages(query: MessageQuery): Promise<MessagePage> {
   await schemaReady
@@ -299,12 +307,32 @@ export async function queryMessages(query: MessageQuery): Promise<MessagePage> {
      * 画像的多账号口径就是这一条：命中集合里任何一个 id 都算「这个人发的」。
      */
     const senderIds = [...new Set([...(query.userId ? [query.userId] : []), ...(query.userIds ?? [])])]
-    if (senderIds.length === 1) filters.push(eq(douyinLinkMessages.userId, senderIds[0]))
-    else if (senderIds.length > 1) filters.push(inArray(douyinLinkMessages.userId, senderIds))
+    const senderFilter =
+      senderIds.length === 1
+        ? eq(douyinLinkMessages.userId, senderIds[0])
+        : senderIds.length > 1
+          ? inArray(douyinLinkMessages.userId, senderIds)
+          : undefined
     // 收礼人（礼物才有）：某人「收到的礼物历史」就是 kind='gift' + 这个条件（同样的合并口径）
     const recipientIds = [...new Set([...(query.toUserId ? [query.toUserId] : []), ...(query.toUserIds ?? [])])]
-    if (recipientIds.length === 1) filters.push(eq(douyinLinkMessages.toUserId, recipientIds[0]))
-    else if (recipientIds.length > 1) filters.push(inArray(douyinLinkMessages.toUserId, recipientIds))
+    const recipientFilter =
+      recipientIds.length === 1
+        ? eq(douyinLinkMessages.toUserId, recipientIds[0])
+        : recipientIds.length > 1
+          ? inArray(douyinLinkMessages.toUserId, recipientIds)
+          : undefined
+    /**
+     * 两个方向都要（`bothDirections`）：送礼与收礼是**或**的关系，而不是与——
+     * 这就是「某一天他送的和收的都在同一张明细里」。任一边没给条件就退回那一边的条件。
+     */
+    if (query.bothDirections) {
+      if (senderFilter && recipientFilter) filters.push(or(senderFilter, recipientFilter)!)
+      else if (senderFilter) filters.push(senderFilter)
+      else if (recipientFilter) filters.push(recipientFilter)
+    } else {
+      if (senderFilter) filters.push(senderFilter)
+      if (recipientFilter) filters.push(recipientFilter)
+    }
     if (typeof query.from === 'number' && query.from > 0) filters.push(gte(douyinLinkMessages.atMs, query.from))
     if (typeof query.to === 'number' && query.to > 0) filters.push(lte(douyinLinkMessages.atMs, query.to))
     const keyword = (query.keyword ?? '').trim()

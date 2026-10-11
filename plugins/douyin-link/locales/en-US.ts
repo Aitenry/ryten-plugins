@@ -232,6 +232,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       giftHistoryTitle: 'Gift history',
       giftHistoryReceived: 'received',
       giftHistorySent: 'sent',
+      /* When both directions are listed, the header uses this and each row shows -> / <- */
+      giftHistoryBoth: 'sent and received',
       giftHistoryRange: 'range {{from}} -> {{to}}',
       giftHistoryEmpty: 'No gifts recorded yet',
       giftBoardEmpty: 'No gifts in this window yet',

@@ -242,6 +242,8 @@ export const DouyinLinkZhCN = {
       giftHistoryTitle: '礼物历史',
       giftHistoryReceived: '收到',
       giftHistorySent: '送出',
+      /* 两个方向都列出来时（日历点某一天）标题行用这个，行内用 → / ← 区分 */
+      giftHistoryBoth: '送出与收到',
       giftHistoryRange: '范围 {{from}} → {{to}}',
       giftHistoryEmpty: '还没有礼物记录',
       giftBoardEmpty: '这个窗口里还没有礼物',

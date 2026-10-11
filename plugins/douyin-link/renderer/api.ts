@@ -15,6 +15,7 @@ import type {
   FailureInfo,
   GiftBreakdownRow,
   GiftDayRow,
+  GiftHistoryRow,
   GiftRankRow,
   IdentityAccountRow,
   ImportResult,
@@ -627,18 +628,19 @@ export const api = {
     }
   },
   /**
-   * 礼物榜点一行后的礼物历史（`sent` = 他送的 / `received` = 他收到的）。
+   * 礼物榜点一行后的礼物历史（`sent` = 他送的 / `received` = 他收到的 / `both` = 两个方向都要）。
    * 走消息流水，所以是**明细**：时间、礼物名、件数、抖币、对方。
+   * `both` 时每一行带 `direction` 与 `counterpart`（主进程算好），界面直接显示 `→ / ←`。
    * `range` 必须与榜单同一段（默认就是「今天这一场」）——条数与抖币才和榜上那一行对得上。
    */
   giftHistory: async (
     webRid: string,
     userId: string,
-    direction: 'sent' | 'received',
+    direction: 'sent' | 'received' | 'both',
     limit = 30,
     offset = 0,
     range?: { from: number; to: number } | null
-  ): Promise<MessagePage> => {
+  ): Promise<{ rows: GiftHistoryRow[]; total: number }> => {
     const raw = await invoke(
       `${PREFIX}gift-history`,
       webRid,
@@ -651,7 +653,12 @@ export const api = {
     )
     if (!isRecord(raw)) return { rows: [], total: 0 }
     return {
-      rows: asList<StoredMessage>(raw.rows),
+      rows: asList<GiftHistoryRow>(raw.rows).map((row) => ({
+        ...row,
+        direction: row.direction === 'received' ? 'received' : 'sent',
+        counterpart: asText(row.counterpart),
+        counterpartId: asText(row.counterpartId)
+      })),
       total: asCount(raw.total)
     }
   },

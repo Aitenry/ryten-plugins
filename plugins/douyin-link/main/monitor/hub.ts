@@ -48,6 +48,7 @@ import {
   type UserTotalsRow,
   type UserGiftCalendar,
   type GiftDayRow,
+  type GiftHistoryRow,
   type UserBatch
 } from '../../shared/types'
 import * as store from '../db/mapper'
@@ -2352,9 +2353,15 @@ export class AnalyzerHub {
   /**
    * 礼物榜点一行后的**礼物历史**（用户 2026-10-08：「点击后可查看历史礼物数据」）。
    *
-   * `direction`：`sent` = 这个人送出去的、`received` = 这个人收到的——两者都走消息流水
-   * （`queryMessages` 的 `userId` / `toUserId` 过滤），所以看到的是**明细**：
+   * `direction`：`sent` = 这个人送出去的、`received` = 这个人收到的、`both` = **两个方向都要**
+   * （2026-10-11 用户报「礼物历史只能看见送的，没有收的」——档案「每日收益」日历点某一天时，
+   * 那一格同时写着送礼与收礼两个数，明细就必须两个方向都给）。
+   *
+   * 三者都走消息流水（`queryMessages` 的 `userId` / `toUserId` 过滤），所以看到的是**明细**：
    * 时间、礼物名、件数、抖币、对方是谁。分页与「共 N 条」由界面管。
+   *
+   * `both` 时每一行都带 `direction` 与 `counterpart`（在主进程算，因为只有它手里有
+   * 「这个人名下的全部账号」那份 id 集合）：界面据此显示 `→ 对方` / `← 对方`，不用自己猜。
    *
    * `range` **必须跟榜单一致**（用户 2026-10-08 追加：「点开显示礼物历史送内容，不能直接显示
    * 之前的内容，只能是当前的，今天的历史礼物」）：榜单是按那天（或进度条选的那一段）算的，
@@ -2364,22 +2371,45 @@ export class AnalyzerHub {
   async giftHistory(
     webRid: string,
     userId: string,
-    direction: 'sent' | 'received',
+    direction: 'sent' | 'received' | 'both',
     limit = 30,
     offset = 0,
     range?: { from: number; to: number }
-  ): Promise<MessagePage> {
+  ): Promise<{ rows: GiftHistoryRow[]; total: number }> {
     if (!userId) return { rows: [], total: 0 }
     // 画像的多账号：他哪个号送/收的礼物都算这个人的
     const ids = await this.accountIdsOf(userId)
-    return store.queryMessages({
+    const idSet = new Set(ids)
+    const page = await store.queryMessages({
       webRid,
       kind: 'gift',
-      ...(direction === 'received' ? { toUserIds: ids } : { userIds: ids }),
+      // `both` = 送礼与收礼是「或」（见 `MessageQuery.bothDirections`）
+      ...(direction === 'both'
+        ? { userIds: ids, toUserIds: ids, bothDirections: true }
+        : direction === 'received'
+          ? { toUserIds: ids }
+          : { userIds: ids }),
       ...(range && range.to > range.from ? { from: range.from, to: range.to } : {}),
       limit,
       offset
     })
+    /*
+     * 方向逐行算：**我（或我名下的号）发的** = 送出；**我收到的** = 收到。
+     * 两个都成立（自己给自己/自己名下两个号互送）时按「送出」记——送礼那条流水是这个人发起的，
+     * 与画像里 `selfLoop` 的口径一致（那笔不算他收到的礼）。
+     */
+    const rows: GiftHistoryRow[] = page.rows.map((row) => {
+      const sent = idSet.has(row.userId)
+      const counterpart = sent ? row.toUser : row.user
+      const counterpartId = sent ? row.toUserId : row.userId
+      return {
+        ...row,
+        direction: sent ? 'sent' : 'received',
+        counterpart,
+        counterpartId
+      }
+    })
+    return { rows, total: page.total }
   }
 
   /**
