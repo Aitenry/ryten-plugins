@@ -380,6 +380,43 @@ export const DouyinLinkZhCN = {
       analyzeEmpty: '这个人的互动太少，还不足以形成画像（先多观察一会儿）',
       analyzeFailed: '分析失败，主进程没回话，稍后再试',
       analyzeConfidence: '置信度',
+      /*
+       * 「AI 画像」：用宿主里配置的大模型写的那份画像（与 harness 同一个模型服务）。
+       * 与上面那份确定性画像**不是一回事**：那份量事实、这份做解读，所以文案处处点明
+       * 「大模型 / 要花 token / 事实由算法给」——用户才知道自己在为什么付费。
+       */
+      aiButton: 'AI 画像（大模型）',
+      aiTitle: 'AI 画像',
+      aiScopeHint: '大模型解读 · 跨全部直播间',
+      aiModel: '模型',
+      aiVersion: '第 {{n}} 版',
+      aiGeneratedAt: '生成于',
+      aiBasedOn: '基于 {{n}} 条互动',
+      aiTokens: 'token {{input}}/{{output}}',
+      aiDataGrew: '数据已更新：又攒了 {{n}} 条互动，重新生成会更准',
+      aiRegenerate: '重新生成',
+      aiShowRaw: '看原文',
+      aiHideRaw: '收起原文',
+      aiLoading: '读取中…',
+      aiThinking: '正在生成，模型还在思考…',
+      aiWriting: '正在生成…（已写 {{n}} 字）',
+      aiIntro:
+        '这份画像由大模型写：它拿到的是这个人的互动数据、弹幕原话、礼物流水与算法算出的行为特征，写出的是一段「他是什么样的人、为什么留在这里、该怎么维护」的解读。生成一次会保存下来，下次打开直接用（不重复花钱）。',
+      aiWillUse: '将使用：{{model}}（在插件设置里可换）',
+      aiNoModel: '还没有可用的模型：先在设置 → 模型里配置一个大模型供应商',
+      aiGenerate: '生成画像',
+      aiUnstructured: '模型这次没有按结构回话，下面是它的原文：',
+      aiEvidenceTitle: '关键证据',
+      aiSuggestionsTitle: '维护建议',
+      aiCaveatsTitle: '数据局限',
+      aiFooter:
+        '事实层（互动统计 / 大五侧写 / 情感构成）来自本插件的确定性算法，与本弹窗里的解读相互独立；解读由大模型依据同一份材料写出。',
+      aiErrorNoModel: '没有可用的模型：先去设置里配置一个大模型供应商',
+      aiErrorModelFailed: '模型调用失败：{{detail}}',
+      aiErrorBusy: '这个人正在生成中，稍等一下再试',
+      aiErrorNoData: '这个人的互动太少，还不够写一份画像（先多观察一会儿）',
+      aiErrorBridge: '主进程没有响应（插件可能还在装载，或已被停用）',
+      aiErrorGeneric: '生成失败：{{detail}}',
       /* 互动结构（五类互动全量：弹幕 / 进场 / 点赞 / 关注 / 礼物） */
       analyzeBehaviorTitle: '互动结构',
       analyzeBehaviorSessions: '到访场次',
@@ -660,6 +697,13 @@ export const DouyinLinkZhCN = {
       retentionLabel: '消息保留',
       retentionHint:
         '默认 0 = 永久保存（不自动清理任何内容）。填 N 天才清：超过 N 天的消息流水与分钟聚合会被删掉，用户统计不删。',
+      /* 「AI 画像」的模型（用的是宿主里配好的供应商；harness 的模型清单与这里同一份） */
+      portraitModelLabel: 'AI 画像模型',
+      portraitModelHint:
+        '「用户档案 → AI 画像」用哪个模型来写。默认跟随宿主的默认模型（与 AI 助手的后台任务同一条链）；这里的清单就是你已经在「设置 → 模型」里配好的供应商，选一个更省钱或更强的都行。生成结果会存进数据库，不会重复花钱。',
+      portraitModelFollow: '跟随默认模型',
+      portraitModelDefault: '默认',
+      portraitModelEmpty: '还没有配置任何大模型供应商（先到「设置 → 模型」里加一个）',
       cleanupNow: '立即清理',
       importExportLabel: '数据备份（导入 / 导出）',
       importExportHint:

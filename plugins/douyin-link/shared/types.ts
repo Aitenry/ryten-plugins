@@ -542,6 +542,14 @@ export interface LiveSettings {
   resumeOnStart: boolean
   /** 消息保留天数（启动时按它清旧数据，0 = 永久保留） */
   retentionDays: number
+  /**
+   * 「AI 画像」用哪个大模型（宿主设置里的供应商配置 id；`null`/缺省 = 跟随宿主默认模型）。
+   *
+   * 为什么要给这一项（用户 2026-10-13：「设置页指定模型」）：AI 画像是一次**花钱**的调用，
+   * 用哪个模型（便宜的快模型 / 贵的强模型）应该由用户定，而不是被默认模型牵着走；
+   * 但默认值仍然跟着宿主走 —— 与 harness 的后台任务同一条解析链（默认供应商 → 第一个启用的）。
+   */
+  portraitProviderId?: number | null
 }
 
 /** 房间列表里的累计统计（概览页签的 KPI 卡片与对比页签） */
@@ -1078,6 +1086,145 @@ export interface UserAnalysis {
   insights: UserAnalysisInsight[]
   /** 量化事实 */
   facts: UserAnalysisFacts
+}
+
+/* ------------------------------------------------------------------- AI 画像 */
+
+/**
+ * AI 画像的**一节**：小标题 + 若干条目（每条一句话）。
+ *
+ * 为什么让模型自己定小标题（而不是固定枚举）：确定性画像已经回答不了「他的语言风格像什么人、
+ * 他在这个直播间里扮演什么角色、该用什么话术维护他」这类问题——那是大模型的主场，
+ * 而**维度本身就属于它的输出**。界面只负责按 `title` + `items` 排版，不自己发明内容。
+ */
+export interface AiPortraitSection {
+  /** 小标题（模型给出的短标签，如「语言风格」） */
+  title: string
+  /** 条目（每条一句话，可带数字与原话引用） */
+  items: string[]
+}
+
+/** AI 画像里的一条**关键证据**：数据里的原话 / 数字 + 它说明了什么 */
+export interface AiPortraitEvidence {
+  /** 引用（用户的弹幕原话，或一个具体数字） */
+  quote: string
+  /** 这条引用说明了什么 */
+  note: string
+}
+
+/**
+ * AI 画像报告（大模型输出的**结构化正文**）。
+ *
+ * 与 `UserAnalysis`（确定性算法画像）的关系：那份是**事实层**（RFM / 大五 / 情感词典…，
+ * 同一份数据永远同一份结论），这份是**解读层**——模型拿到同一份事实 + 原始弹幕与礼物流水，
+ * 产出「他是个什么样的人、为什么留在这里、该怎么维护」的叙述与建议。
+ * 事实由算法给、解读由模型给，两者互不冒充：界面把这个区分写在页脚上。
+ *
+ * 字段全部是**自由文本**（不是机器键）：模型是唯一作者，界面不做二次改写，也不把文案翻成别的语言
+ * （生成时用界面语言提示模型，输出即该语言）。
+ */
+export interface AiPortraitReport {
+  /** 一句话画像（标题下那一行，最精炼的结论） */
+  headline: string
+  /** 人物类型名（4-10 字，模型起的名，如「夜聊型陪伴者」） */
+  persona: string
+  /** 总览：2-4 句把这个人整体说清楚 */
+  overview: string
+  /** 关键标签（3-6 个短词） */
+  tags: string[]
+  /** 分节正文（模型自定小标题） */
+  sections: AiPortraitSection[]
+  /** 关键证据（引用原话 / 数字） */
+  evidence: AiPortraitEvidence[]
+  /** 维护与互动建议（可执行，1-6 条） */
+  suggestions: string[]
+  /** 数据局限与置信度说明（模型必须如实交代样本大小与不确定的地方） */
+  caveats: string[]
+}
+
+/** 生成这次画像时用的模型（界面要如实写出「是谁生成的」） */
+export interface AiPortraitModelInfo {
+  /** 供应商配置 id（0 = 没记录） */
+  providerId: number
+  /** 供应商配置名（如「DeepSeek 官方」） */
+  providerName: string
+  /** 模型名（如 `deepseek-chat`） */
+  model: string
+}
+
+/**
+ * 一份**已落库的** AI 画像（一个人的最新一版）。
+ *
+ * 为什么要落库（用户 2026-10-13：「需要保存这个画像，不然每一次都要重新生成，会很亏 token」）：
+ * 大模型调用是**花钱**的那一步，所以生成一次就存下来，重开弹窗直接读缓存；
+ * 同时把「数据侧指纹」「版本」「用量」一起存，界面才能如实告诉用户
+ * 「这份画像是什么时候、用哪个模型、基于多少条互动生成的」以及**数据涨了没有**。
+ */
+export interface AiPortrait extends AiPortraitModelInfo {
+  /** 缓存键（`identity:<id>` 或 `user:<id>`，见 shared/ai-portrait.ts） */
+  key: string
+  /** 画像锚点（弹窗上那个 id） */
+  userId: string
+  /** 版本号（第几次生成；每次重新生成 +1 —— 用户可以不断叠加着刷新它） */
+  version: number
+  /** 结构化报告（模型没按 JSON 回时为 null，此时正文在 `raw` 里） */
+  report: AiPortraitReport | null
+  /** 模型原文（`report` 可用时也留着，便于「原文」兜底查看与排查） */
+  raw: string
+  /** 生成时的数据指纹（与当前指纹不同 = 之后又攒了新数据） */
+  fingerprint: string
+  /** 生成时的互动总量（弹幕+进场+点赞+关注+礼物条数） */
+  interactions: number
+  /** 这一版的输入 / 输出 token（供应商回报；没有就 0） */
+  inputTokens: number
+  outputTokens: number
+  /** 生成时刻（ms） */
+  generatedAt: number
+}
+
+/** 「AI 画像模型」下拉里的一项（**不含 api_key**：密钥永不离开主进程） */
+export interface AiPortraitModel {
+  id: number
+  name: string
+  model: string
+  /** 是不是宿主设置里的默认供应商 */
+  isDefault: boolean
+}
+
+/** 生成失败的原因（机器码在主进程、文案在渲染层） */
+export type AiPortraitFailure = 'no-model' | 'model-failed' | 'busy' | 'no-data'
+
+/** 打开弹窗时要的全部状态（缓存 + 数据侧现状 + 模型清单 + 是否正在生成） */
+export interface AiPortraitState {
+  /** 已生成的画像（没生成过 = null） */
+  portrait: AiPortrait | null
+  /** 当前数据侧的指纹与互动量（用来判断「要不要重新生成」） */
+  current: { fingerprint: string; interactions: number }
+  /** 现在有没有一次生成在跑（弹窗打开时若在跑，界面直接进流式态） */
+  running: boolean
+  /** 可选模型（渲染层的下拉用它；空数组 = 一个供应商都没配好） */
+  models: AiPortraitModel[]
+  /** 设置里指定用哪个供应商（null = 跟随宿主默认模型） */
+  selectedProviderId: number | null
+}
+
+/** 一次生成的结果（成功时连新画像一起回，界面不必再查一次） */
+export interface AiPortraitResult {
+  ok: boolean
+  reason?: AiPortraitFailure
+  /** 失败明细（模型报错原文一类；成功时不带） */
+  detail?: string
+  portrait?: AiPortrait
+}
+
+/** 生成过程中的**流式增量**（边生成边显示，不让用户对着转圈等一分钟） */
+export interface AiPortraitChunk {
+  /** 请求 id（同一次生成的增量共用它；界面按它丢弃过期增量） */
+  requestId: string
+  /** 本次新增的文本 */
+  delta: string
+  /** 完成了（正文结束；界面此时等 `ai-portrait-generate` 的回话拿最终结构化结果） */
+  done: boolean
 }
 
 /** 消息检索条件（全部可选；空条件 = 最近的消息） */

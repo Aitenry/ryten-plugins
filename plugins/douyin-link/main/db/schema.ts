@@ -10,7 +10,7 @@ import {
 } from 'drizzle-orm/pg-core'
 
 /**
- * 抖音直播分析器 的表（8 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
+ * 抖音直播分析器 的表（9 张，全部带 `douyin_link_` 前缀——一个库里装着所有插件的表，撞名就是事故）。
  *
  * 三条约定（与宿主同规矩）：
  * - JS 键 camelCase，列名显式给 snake_case，mapper 里同一套键名；
@@ -166,3 +166,40 @@ export const douyinLinkIdentityAccounts = pgTable(
   },
   (table) => [index('idx_douyin_link_identity_account_owner').on(table.identityId)]
 )
+
+/**
+ * AI 画像（大模型生成，0.15.29 起）：**一个人一版，只留最新那一版**。
+ *
+ * 为什么必须落库（用户 2026-10-13：「需要保存这个画像，不然每一次都要重新生成，会很亏 token」）：
+ * 生成一次 = 一次真金白银的模型调用。所以缓存键是主键、内容整份存下来，重开弹窗直接读；
+ * `version` 记录「这是第几版」（用户可以不断重新生成、越刷越准），
+ * `fingerprint`/`interactions` 记录**生成时的数据侧快照**——之后又攒了新数据时，
+ * 界面据此如实提示「数据已更新，可重新生成」，而不是装作画像一直新鲜。
+ *
+ * 缓存键的口径见 `shared/ai-portrait.ts` 的 `portraitKeyOf`：绑定过多账号的人用画像 id，
+ * 与确定性画像 / 礼物日历同口径。
+ */
+export const douyinLinkUserPortraits = pgTable('douyin_link_user_portraits', {
+  /** 缓存键：`identity:<画像 id>` 或 `user:<抖音 id>` */
+  portraitKey: text('portrait_key').primaryKey().notNull(),
+  /** 画像锚点（打开弹窗时的那个人） */
+  userId: text('user_id').notNull().default(''),
+  identityId: integer('identity_id').notNull().default(0),
+  /** 第几版（重新生成递增） */
+  version: integer().notNull().default(0),
+  providerId: integer('provider_id').notNull().default(0),
+  providerName: text('provider_name').notNull().default(''),
+  model: text().notNull().default(''),
+  /** 报告是否是结构化的（否 = 模型没按 JSON 回，正文在 `raw` 里） */
+  structured: boolean().notNull().default(false),
+  /** 结构化报告的 JSON（`structured = false` 时是空串） */
+  report: text().notNull().default(''),
+  /** 模型原文（结构化成功也留着：排查与「看原文」用） */
+  raw: text().notNull().default(''),
+  fingerprint: text().notNull().default(''),
+  interactions: integer().notNull().default(0),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  generatedAt: doublePrecision('generated_at').notNull().default(0),
+  updatedAt: doublePrecision('updated_at').notNull().default(0)
+})

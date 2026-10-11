@@ -371,6 +371,44 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       analyzeEmpty: 'Not enough interactions from this user to build a portrait yet (keep watching for a while)',
       analyzeFailed: 'Analysis failed — no response from the main process, try again later',
       analyzeConfidence: 'Confidence',
+      /*
+       * "AI portrait": the version written by the host's configured LLM (the same model service
+       * harness uses). It is NOT the deterministic portrait above: that one measures facts, this
+       * one interprets them — so the wording keeps saying "LLM / costs tokens / facts come from
+       * the algorithm", and the user knows what they are paying for.
+       */
+      aiButton: 'AI portrait (LLM)',
+      aiTitle: 'AI portrait',
+      aiScopeHint: 'LLM interpretation · all rooms combined',
+      aiModel: 'Model',
+      aiVersion: 'v{{n}}',
+      aiGeneratedAt: 'generated',
+      aiBasedOn: 'based on {{n}} interactions',
+      aiTokens: 'tokens {{input}}/{{output}}',
+      aiDataGrew: 'New data: {{n}} more interactions since this portrait — regenerating will be more accurate',
+      aiRegenerate: 'Regenerate',
+      aiShowRaw: 'Show raw',
+      aiHideRaw: 'Hide raw',
+      aiLoading: 'Loading…',
+      aiThinking: 'Generating — the model is still thinking…',
+      aiWriting: 'Generating… ({{n}} characters so far)',
+      aiIntro:
+        'This portrait is written by an LLM: it receives the interaction numbers, the user\u2019s own comments, the gift stream and the behavioural traits the algorithm computed, and writes an interpretation of who this person is, why they stay and how to keep them. Each generation is stored, so opening this again costs nothing.',
+      aiWillUse: 'Will use: {{model}} (change it in the plugin settings)',
+      aiNoModel: 'No model available yet: configure an LLM provider in Settings → Models first',
+      aiGenerate: 'Generate portrait',
+      aiUnstructured: 'The model did not answer in the structured format this time; here is its raw output:',
+      aiEvidenceTitle: 'Key evidence',
+      aiSuggestionsTitle: 'Retention advice',
+      aiCaveatsTitle: 'Data limits',
+      aiFooter:
+        'The factual layer (interaction stats, Big Five proxy, emotion mix) comes from this plugin\u2019s deterministic algorithm and is independent of the interpretation in this dialog, which the LLM wrote from the same material.',
+      aiErrorNoModel: 'No model available: configure an LLM provider in the settings first',
+      aiErrorModelFailed: 'Model call failed: {{detail}}',
+      aiErrorBusy: 'A generation for this user is already running, try again in a moment',
+      aiErrorNoData: 'Not enough interactions from this user to write a portrait yet (keep watching for a while)',
+      aiErrorBridge: 'The main process did not respond (the plugin may still be loading or has been disabled)',
+      aiErrorGeneric: 'Generation failed: {{detail}}',
       /* Interaction mix (all five kinds: chat / joins / likes / follows / gifts) */
       analyzeBehaviorTitle: 'Interaction mix',
       analyzeBehaviorSessions: 'Sessions',
@@ -651,6 +689,13 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       retentionLabel: 'Message retention',
       retentionHint:
         '0 (default) keeps everything forever and never cleans up. Set N days to delete the message stream and minute buckets older than N days; user stats are kept.',
+      /* The model behind "AI portrait" (uses the host's own providers; harness reads the same list) */
+      portraitModelLabel: 'AI portrait model',
+      portraitModelHint:
+        'Which model writes the AI portrait in a user profile. Defaults to following the host default model (the same resolution chain the AI assistant uses for background tasks); the list is what you already configured in Settings → Models, so pick whichever is cheaper or stronger. Results are stored in the database — you are never charged twice for the same portrait.',
+      portraitModelFollow: 'Follow the default model',
+      portraitModelDefault: 'default',
+      portraitModelEmpty: 'No LLM provider is configured yet (add one in Settings → Models)',
       cleanupNow: 'Clean up now',
       importExportLabel: 'Data backup (import / export)',
       importExportHint:

@@ -78,7 +78,7 @@ export function install(ctx: MainPluginContext): void {
 
   ctx.contribute(PLUGIN_PURGE, {
     label:
-      '本插件的数据库表（房间清单 / 消息流水 / 用户统计 / 分钟聚合 / 监控会话）、设置文件（plugin-state/douyin-link.json）',
+      '本插件的数据库表（房间清单 / 消息流水 / 用户统计 / 分钟聚合 / 监控会话 / 画像与账号绑定 / AI 画像）、设置文件（plugin-state/douyin-link.json）',
     run: purgePluginData
   })
 }

@@ -3,6 +3,7 @@ import { Button, Input, InputNumber, Select, Switch, Typography } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import {
   DANMAKU_KINDS,
+  type AiPortraitModel,
   type DanmakuKind,
   type DbStats,
   type LiveSettings
@@ -36,6 +37,11 @@ export default function Settings(): React.JSX.Element {
   /** 登录态 Cookie 的本地草稿（失焦才存，别每敲一个字就写盘） */
   const [cookieDraft, setCookieDraft] = useState('')
   /**
+   * 「AI 画像」可选的模型清单（**不含 api_key**：主进程只挑 id/名字/模型名发过来）。
+   * `null` = 还在读（下拉显示 loading）；`[]` = 一个可用供应商都没有（空态给一句说明）。
+   */
+  const [portraitModels, setPortraitModels] = useState<AiPortraitModel[] | null>(null)
+  /**
    * 上一次存盘时**被上限截掉前的字符数**（0 = 没被截）。
    *
    * 为什么要记这个数：截断是主进程做的，存完回来的草稿已经是砍过的那一份——
@@ -53,6 +59,11 @@ export default function Settings(): React.JSX.Element {
 
   useEffect(() => {
     void load()
+    // 模型清单独立于快照：读失败就当「没有可选模型」，不影响设置页其它字段
+    void api
+      .aiPortraitModels()
+      .then((models) => setPortraitModels(models))
+      .catch(() => setPortraitModels([]))
   }, [load])
 
   /** 设置从主进程回来后对齐草稿（外部改动/首次加载） */
@@ -193,6 +204,34 @@ export default function Settings(): React.JSX.Element {
             onChange={(value) => {
               if (typeof value === 'number') void save({ maxItems: value })
             }}
+          />
+        </Row>
+
+        {/*
+          「AI 画像」用哪个模型（用户 2026-10-13：「设置页指定模型」）。
+          默认 = 跟随宿主默认模型（与 harness 的后台任务同一条解析链）；这里只列**已启用**的供应商，
+          值传 0 = 清成「跟随默认」。清单由主进程给（**不含 api_key**）。
+        */}
+        <Row
+          label={t('douyin-link.settingsPage.portraitModelLabel')}
+          hint={t('douyin-link.settingsPage.portraitModelHint')}
+        >
+          <Select
+            size="small"
+            style={{ width: 360 }}
+            loading={portraitModels === null}
+            value={settings?.portraitProviderId ?? 0}
+            onChange={(value) => void save({ portraitProviderId: value === 0 ? null : Number(value) })}
+            options={[
+              { value: 0, label: t('douyin-link.settingsPage.portraitModelFollow') },
+              ...(portraitModels ?? []).map((model) => ({
+                value: model.id,
+                label: `${model.name || model.model}（${model.model}）${
+                  model.isDefault ? ` · ${t('douyin-link.settingsPage.portraitModelDefault')}` : ''
+                }`
+              }))
+            ]}
+            notFoundContent={t('douyin-link.settingsPage.portraitModelEmpty')}
           />
         </Row>
 

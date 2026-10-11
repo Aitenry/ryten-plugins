@@ -49,7 +49,9 @@ import {
   type UserGiftCalendar,
   type GiftDayRow,
   type GiftHistoryRow,
-  type UserBatch
+  type UserBatch,
+  type AiPortraitResult,
+  type AiPortraitState
 } from '../../shared/types'
 import * as store from '../db/mapper'
 import type { MessageRow } from '../db/mapper'
@@ -64,6 +66,11 @@ import { RoomRecorder, minuteOf } from './recorder'
 import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
+import {
+  aiPortraitState as readAiPortraitState,
+  disposePortrait,
+  generateAiPortrait as runAiPortrait
+} from '../portrait'
 import { since, withTimeout } from '../util/deadline'
 import {
   ANON_ID_PREFIX,
@@ -674,6 +681,8 @@ export class AnalyzerHub {
     this.cleanupTimer = null
     this.started = false
     avatarCache.dispose()
+    // AI 画像的「正在生成」登记也清掉：插件停用后不该再拦住下一次生成
+    disposePortrait()
     logger.info('[douyin-link] 分析中枢已停止（实时通道与音频泵都收掉了）')
   }
 
@@ -744,6 +753,16 @@ export class AnalyzerHub {
     if (typeof patch.resumeOnStart === 'boolean') next.resumeOnStart = patch.resumeOnStart
     if (typeof patch.retentionDays === 'number' && Number.isFinite(patch.retentionDays)) {
       next.retentionDays = Math.min(365, Math.max(0, Math.round(patch.retentionDays)))
+    }
+    /**
+     * 「AI 画像」用哪个模型：给 0/负数/空 = 清成「跟随宿主默认模型」。
+     * 这里只做形状校验（正整数或 null），**不校验配置是否还存在**——那个判断在用的那一刻做
+     * （见 main/portrait.ts 的 resolveProviderId），否则用户删掉一个供应商就会连带把设置改坏。
+     */
+    if ('portraitProviderId' in patch) {
+      const value = patch.portraitProviderId
+      next.portraitProviderId =
+        typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null
     }
     this.settings = next
     for (const state of this.states.values()) state.recorder.setCap(next.maxItems)
@@ -2926,6 +2945,39 @@ export class AnalyzerHub {
     const ids = await this.accountIdsOf(userId)
     const data = await store.userAnalysisData(ids)
     return buildUserAnalysis(data, Date.now())
+  }
+
+  /**
+   * 「AI 画像」：读**缓存状态**（打开弹窗就调；只查库、不算、不调模型）。
+   *
+   * 实现在 `../portrait.ts`（那一份是「用宿主大模型生成画像」的整条链：证据打包 → 调模型 →
+   * 落库缓存）。hub 只做两件它才知道的事：**把当前设置递过去**（用哪个模型）与**复用档案口径**
+   * （`userProfile` 的静态字段合并，保证弹窗上与材料里是同一份资料）。
+   */
+  async aiPortrait(userId: string): Promise<AiPortraitState> {
+    return readAiPortraitState({ userId: String(userId ?? ''), settings: this.settings })
+  }
+
+  /**
+   * 「AI 画像」：**生成**一版（真调大模型，会花钱）。
+   *
+   * `force = false` 时若已有缓存就直接回缓存——用户明确要求过「需要保存这个画像，
+   * 不然每一次都要重新生成，会很亏 token」；只有点了「重新生成」才 `force = true`（版本号 +1，
+   * 并把上一版喂回提示词做迭代）。
+   */
+  async generateAiPortrait(
+    webRid: string,
+    userId: string,
+    force = false
+  ): Promise<AiPortraitResult> {
+    const profile = await this.userProfile(webRid, userId).catch(() => null)
+    return runAiPortrait({
+      userId: String(userId ?? ''),
+      webRid: String(webRid ?? ''),
+      profile,
+      settings: this.settings,
+      force
+    })
   }
 
   /** 头像 → data URL（渲染层 CSP 不许外链图片，所以这一步在主进程做） */

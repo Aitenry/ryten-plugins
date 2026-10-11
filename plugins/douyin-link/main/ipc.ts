@@ -17,6 +17,7 @@ import {
   analyzerHub
 } from './monitor/hub'
 import { exportArchive, importArchive } from './archive'
+import { AI_PORTRAIT_EVENT, listPortraitModels } from './portrait'
 import type { MainPluginContext } from '@host/main/plugins/context'
 
 /**
@@ -218,6 +219,19 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     // 「分析用户」：按库里的数据用确定性规则算法生成用户画像（不依赖大模型）。
     // 只收 userId —— 画像是**跨全部直播间**的，与「当前房间」无关。
     'plugin:douyin-link:user-analysis': (userId?: string) => hub.userAnalysis(String(userId ?? '')),
+
+    /*
+     * 「AI 画像」：用宿主里配置的大模型（与 harness 同一个 ProviderService）写一份全面画像。
+     * 三条通道分开，是因为它们的**代价完全不同**：
+     * - `ai-portrait`：只读缓存与现状（打开弹窗就调，不花钱）；
+     * - `ai-portrait-generate`：真调模型（花钱；`force = false` 时若已有缓存直接回缓存）。
+     *   带 webRid 是因为档案的静态字段（昵称/地区/等级）按房间取，口径要与弹窗上显示的那份一致；
+     * - `ai-portrait-models`：可选模型清单（设置页下拉与弹窗头部用；**不含 api_key**）。
+     */
+    'plugin:douyin-link:ai-portrait': (userId?: string) => hub.aiPortrait(String(userId ?? '')),
+    'plugin:douyin-link:ai-portrait-generate': (webRid?: string, userId?: string, force?: boolean) =>
+      hub.generateAiPortrait(String(webRid ?? ''), String(userId ?? ''), force === true),
+    'plugin:douyin-link:ai-portrait-models': () => listPortraitModels(),
     /*
      * 档案里「送礼 / 收礼」点开的**每日收益日历**（跨全部直播间，一个月一次）。
      * 只收 userId 与月份（`YYYY-MM`，空/非法就在主进程取有记录的最近一个月）——与画像同口径，
@@ -313,6 +327,8 @@ export const EVENTS = [
   ALL_EVENT,
   PRESENCE_EVENT,
   COMPARE_EVENT,
-  DAYS_EVENT
+  DAYS_EVENT,
+  // AI 画像的流式增量（模型逐段回话时推给界面，见 main/portrait.ts）
+  AI_PORTRAIT_EVENT
 ]
 

@@ -1,6 +1,13 @@
 import { DANMAKU_KINDS, isQualityKey } from '../shared/types'
 import { clampCookie } from '../shared/cookie'
+import { normalizePortraitReport } from '../shared/ai-portrait'
 import type {
+  AiPortrait,
+  AiPortraitChunk,
+  AiPortraitFailure,
+  AiPortraitModel,
+  AiPortraitResult,
+  AiPortraitState,
   AllAnalysisPush,
   AllRoomsAnalysis,
   AnalyzerSnapshot,
@@ -366,9 +373,74 @@ export function normalizeUserAnalysis(value: unknown): UserAnalysis {
   }
 }
 
+/* --------------------------------------------------------------- AI 画像归一化 */
+
+/** 生成失败的原因白名单（主进程给机器码，文案在界面） */
+export const AI_PORTRAIT_FAILURES: AiPortraitFailure[] = [
+  'no-model',
+  'model-failed',
+  'busy',
+  'no-data'
+]
+
+function normalizeAiPortraitModel(value: unknown): AiPortraitModel | null {
+  if (!isRecord(value)) return null
+  const id = asCount(value.id)
+  if (id <= 0) return null
+  return {
+    id,
+    name: asText(value.name),
+    model: asText(value.model),
+    isDefault: value.isDefault === true
+  }
+}
+
+/**
+ * 一份已生成的画像。
+ *
+ * `report` 走 shared 的 `normalizePortraitReport`（与主进程**同一份**校验与限长逻辑）：
+ * 库里存的 JSON 可能是旧版本写的、也可能被人手改过，多过一道不至于把界面撑坏。
+ * 结构化失败的（模型没按 JSON 回）保留 `raw`，界面按原文显示。
+ */
+export function normalizeAiPortrait(value: unknown): AiPortrait {
+  const raw = isRecord(value) ? value : {}
+  const report = normalizePortraitReport(raw.report)
+  return {
+    key: asText(raw.key),
+    userId: asText(raw.userId),
+    version: asCount(raw.version),
+    providerId: asCount(raw.providerId),
+    providerName: asText(raw.providerName),
+    model: asText(raw.model),
+    report,
+    raw: asText(raw.raw),
+    fingerprint: asText(raw.fingerprint),
+    interactions: asCount(raw.interactions),
+    inputTokens: asCount(raw.inputTokens),
+    outputTokens: asCount(raw.outputTokens),
+    generatedAt: asCount(raw.generatedAt)
+  }
+}
+
+/** 打开弹窗的状态（缺字段一律空态，不炸界面） */
+export function normalizeAiPortraitState(value: unknown): AiPortraitState {
+  const raw = isRecord(value) ? value : {}
+  const current = isRecord(raw.current) ? raw.current : {}
+  const selected = raw.selectedProviderId
+  return {
+    portrait: isRecord(raw.portrait) ? normalizeAiPortrait(raw.portrait) : null,
+    current: { fingerprint: asText(current.fingerprint), interactions: asCount(current.interactions) },
+    running: raw.running === true,
+    models: asList<unknown>(raw.models)
+      .map((entry) => normalizeAiPortraitModel(entry))
+      .filter((entry): entry is AiPortraitModel => entry !== null),
+    selectedProviderId:
+      typeof selected === 'number' && Number.isFinite(selected) && selected > 0 ? Math.round(selected) : null
+  }
+}
+
 export const api = {
-  /* ------------------------------------------------------------- 快照 */
-  snapshot: async (): Promise<AnalyzerSnapshot> => normalizeSnapshot(await invoke(`${PREFIX}snapshot`)),
+  /* ------------------------------------------------------------- 快照 */  snapshot: async (): Promise<AnalyzerSnapshot> => normalizeSnapshot(await invoke(`${PREFIX}snapshot`)),
 
   /* --------------------------------------------------------- 房间清单 */
   roomAdd: async (input: string): Promise<{ ok: boolean; webRid?: string; failure?: FailureInfo }> => {
@@ -606,6 +678,47 @@ export const api = {
     return isRecord(raw) ? normalizeUserAnalysis(raw) : null
   },
   /**
+   * 「AI 画像」：**读缓存状态**（打开弹窗就调）。
+   *
+   * 回的是四样：已生成的画像（含版本 / 模型 / 用量 / 数据指纹）、当前数据侧现状
+   * （用来提示「数据已更新」）、是否正在生成、以及可选模型清单。
+   * 这里同样把 IPC 回话归一化——主进程换实现或缺字段时，界面最多是空态，不会白屏。
+   */
+  aiPortrait: async (userId: string): Promise<AiPortraitState> => {
+    const raw = await invoke(`${PREFIX}ai-portrait`, userId)
+    return normalizeAiPortraitState(raw)
+  },
+  /**
+   * 「AI 画像」：**生成一版**（真调大模型，会花钱）。
+   *
+   * `force = false` 时主进程若已有缓存就直接回缓存——「每次重开弹窗都重新生成」会白烧 token
+   * （用户 2026-10-13 的原话）。只有用户点了「重新生成」才 `force = true`（版本 +1）。
+   */
+  aiPortraitGenerate: async (
+    webRid: string,
+    userId: string,
+    force = false
+  ): Promise<AiPortraitResult> => {
+    const raw = await invoke(`${PREFIX}ai-portrait-generate`, webRid, userId, force)
+    if (!isRecord(raw)) return { ok: false, reason: 'model-failed' }
+    const reason = asText(raw.reason)
+    return {
+      ok: raw.ok === true,
+      reason: AI_PORTRAIT_FAILURES.includes(reason as AiPortraitFailure)
+        ? (reason as AiPortraitFailure)
+        : undefined,
+      detail: asText(raw.detail) || undefined,
+      portrait: isRecord(raw.portrait) ? normalizeAiPortrait(raw.portrait) : undefined
+    }
+  },
+  /** 可选模型清单（设置页的下拉用；**不含 api_key**——主进程只挑 id/名字/模型名发过来） */
+  aiPortraitModels: async (): Promise<AiPortraitModel[]> => {
+    const raw = await invoke(`${PREFIX}ai-portrait-models`)
+    return asList<unknown>(raw)
+      .map((entry) => normalizeAiPortraitModel(entry))
+      .filter((entry): entry is AiPortraitModel => entry !== null)
+  },
+  /**
    * 档案里「送礼 / 收礼」点开的**每日收益日历**：这个人一个月的逐日送礼/收礼抖币
    * （跨全部直播间），外加有记录的月份清单与回的是哪个月。
    *
@@ -767,6 +880,18 @@ export const api = {
     window.api.plugin.on(`${PREFIX}audio`, (payload) => {
       const message = payload as AudioMessage
       if (message && typeof message.type === 'string' && typeof message.webRid === 'string') callback(message)
+    }),
+  /**
+   * AI 画像的**流式增量**（模型逐段回话时推来）。
+   *
+   * 界面按 `requestId` 配对：只认「这次请求」的增量，切人/重新生成时迟到的旧增量直接丢。
+   * `delta` 为空、`done: true` 的那一条 = 这次生成收尾（最终结果等 `aiPortraitGenerate` 的回话）。
+   */
+  onAiPortrait: (callback: (chunk: AiPortraitChunk) => void): (() => void) =>
+    window.api.plugin.on(`${PREFIX}portrait`, (payload) => {
+      const chunk = payload as AiPortraitChunk
+      if (!chunk || typeof chunk.requestId !== 'string') return
+      callback({ requestId: chunk.requestId, delta: asText(chunk.delta), done: chunk.done === true })
     })
 }
 

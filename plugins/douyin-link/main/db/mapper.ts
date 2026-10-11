@@ -29,6 +29,7 @@ import {
   douyinLinkMinutes,
   douyinLinkRooms,
   douyinLinkSessions,
+  douyinLinkUserPortraits,
   douyinLinkUsers
 } from './schema'
 import { schemaReady } from './ddl'
@@ -2404,6 +2405,392 @@ export async function userAnalysisData(userIds: string[]): Promise<UserAnalysisD
       sessionSpans: sessionRows.map((row) => Math.max(0, row.span)),
       firstFollowAt: followRows[0]?.firstAt ?? 0
     }
+  })
+}
+
+/**
+ * AI 画像的**证据原料**（跨全部直播间、按画像的全部账号查）。
+ *
+ * 与 `userAnalysisData` 的分工：那一份喂**确定性算法**（只要数字），这一份喂**大模型**
+ * （要的是「有上下文的事实」）——所以它多给三样：
+ * 1. **按房间摊开**：他出现在哪几个直播间、每个房间各说了多少 / 送了多少、什么时候来什么时候走
+ *    （模型据此判断「他是这个主播的老观众，还是到处串场的人」）；
+ * 2. **带时间戳的弹幕样本**：模型要引用原话、要看出「他说话的语气」，光有词频统计不够；
+ * 3. **带时间戳的礼物流水（送 / 收两个方向）**：礼物名 + 件数 + 抖币 + 对方是谁——
+ *    「他给谁花过钱、收过谁的钱」是关系判断的硬证据。
+ *
+ * 口径与画像一致：`userIds` 是这个人的全部账号，自环（自己两个号之间）不算收礼。
+ */
+export interface UserPortraitRoomRow {
+  webRid: string
+  title: string
+  chat: number
+  enter: number
+  likes: number
+  follows: number
+  gift: number
+  diamonds: number
+  receivedDiamonds: number
+  firstSeen: number
+  lastSeen: number
+}
+
+/** 一条带上下文的流水（弹幕 / 送礼 / 收礼共用；`counterpart` 是对方的名字——弹幕为空） */
+export interface UserPortraitMessageRow {
+  atMs: number
+  webRid: string
+  content: string
+  count: number
+  diamonds: number
+  counterpart: string
+}
+
+export interface UserPortraitExtras {
+  /** 按房间摊开（出现的房间倒序：最近的在前） */
+  rooms: UserPortraitRoomRow[]
+  /** 最近的弹幕（新 → 旧） */
+  recentChat: UserPortraitMessageRow[]
+  /** 最近的送礼（新 → 旧） */
+  sentGifts: UserPortraitMessageRow[]
+  /** 最近的收礼（新 → 旧） */
+  receivedGifts: UserPortraitMessageRow[]
+  /** 跨房间合计：送礼 / 收礼抖币 */
+  sentDiamonds: number
+  receivedDiamonds: number
+  /** 首次 / 最近出现（ms） */
+  firstSeen: number
+  lastSeen: number
+}
+
+/** 证据原料的条数上限（提示词大小直接等于 token 成本，这里就是成本的闸门） */
+export const PORTRAIT_SAMPLE_LIMITS = {
+  chat: 80,
+  sentGifts: 40,
+  receivedGifts: 30,
+  rooms: 12
+} as const
+
+export async function userPortraitExtras(userIds: string[]): Promise<UserPortraitExtras> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  const empty: UserPortraitExtras = {
+    rooms: [],
+    recentChat: [],
+    sentGifts: [],
+    receivedGifts: [],
+    sentDiamonds: 0,
+    receivedDiamonds: 0,
+    firstSeen: 0,
+    lastSeen: 0
+  }
+  if (ids.length === 0) return empty
+  await schemaReady
+  return withOrm('douyin-link.userPortraitExtras', async (db) => {
+    const minPositive = (a: number, b: number): number => (a > 0 && b > 0 ? Math.min(a, b) : Math.max(a, b))
+
+    // 1) 按房间：档案表（权威：本房间的互动计数与送礼抖币）
+    const profileRows = await db
+      .select()
+      .from(douyinLinkUsers)
+      .where(inArray(douyinLinkUsers.userId, ids))
+
+    // 2) 按房间：收礼（档案表里没有这一列，只能从消息流水现算）
+    const receivedRows = await db
+      .select({
+        webRid: douyinLinkMessages.webRid,
+        diamonds: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`,
+        hits: sql<number>`count(*)::int`,
+        firstAt: sql<number>`coalesce(min(${douyinLinkMessages.atMs}), 0)::double precision`,
+        lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.toUserId, ids), eq(douyinLinkMessages.kind, 'gift')))
+      .groupBy(douyinLinkMessages.webRid)
+
+    // 3) 房间名（模型要知道「哪个直播间」，只有房间号它认不出来）
+    const roomRows = await db
+      .select({
+        webRid: douyinLinkRooms.webRid,
+        title: douyinLinkRooms.title,
+        anchor: douyinLinkRooms.anchor
+      })
+      .from(douyinLinkRooms)
+    const roomTitles = new Map(roomRows.map((row) => [row.webRid, row.title || row.anchor || '']))
+
+    const byRoom = new Map<string, UserPortraitRoomRow>()
+    const touch = (webRid: string): UserPortraitRoomRow => {
+      const hit = byRoom.get(webRid)
+      if (hit) return hit
+      const created: UserPortraitRoomRow = {
+        webRid,
+        title: roomTitles.get(webRid) ?? '',
+        chat: 0,
+        enter: 0,
+        likes: 0,
+        follows: 0,
+        gift: 0,
+        diamonds: 0,
+        receivedDiamonds: 0,
+        firstSeen: 0,
+        lastSeen: 0
+      }
+      byRoom.set(webRid, created)
+      return created
+    }
+
+    for (const row of profileRows) {
+      const target = touch(row.webRid)
+      target.chat += row.chat
+      target.enter += row.enter
+      target.likes += row.likes
+      target.follows += row.follows
+      target.gift += row.gift
+      target.diamonds += row.diamonds
+      target.firstSeen = minPositive(target.firstSeen, row.firstSeen)
+      target.lastSeen = Math.max(target.lastSeen, row.lastSeen)
+    }
+    for (const row of receivedRows) {
+      const target = touch(row.webRid)
+      target.receivedDiamonds += row.diamonds
+      // 档案缺失（只剩消息流水的历史数据）时用礼物流水兜底时间轴，和 userAnalysisData 同口径
+      if (target.lastSeen === 0) target.lastSeen = row.lastAt
+      if (target.firstSeen === 0) target.firstSeen = row.firstAt
+    }
+
+    const rooms = [...byRoom.values()]
+      .filter((room) => room.chat + room.enter + room.likes + room.follows + room.gift + room.receivedDiamonds > 0)
+      .sort((a, b) => b.lastSeen - a.lastSeen)
+      .slice(0, PORTRAIT_SAMPLE_LIMITS.rooms)
+
+    // 4) 最近的弹幕（带时间：模型要看「他什么时候说话、说什么」）
+    const chatRows = await db
+      .select({
+        atMs: douyinLinkMessages.atMs,
+        webRid: douyinLinkMessages.webRid,
+        content: douyinLinkMessages.content
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.userId, ids), eq(douyinLinkMessages.kind, 'chat')))
+      .orderBy(desc(douyinLinkMessages.atMs))
+      .limit(PORTRAIT_SAMPLE_LIMITS.chat)
+
+    // 5) 最近送出的礼物（谁、什么、多少、给了谁）
+    const sentRows = await db
+      .select({
+        atMs: douyinLinkMessages.atMs,
+        webRid: douyinLinkMessages.webRid,
+        content: douyinLinkMessages.content,
+        count: douyinLinkMessages.count,
+        diamonds: douyinLinkMessages.diamonds,
+        name: douyinLinkMessages.toUserName
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.userId, ids), eq(douyinLinkMessages.kind, 'gift')))
+      .orderBy(desc(douyinLinkMessages.atMs))
+      .limit(PORTRAIT_SAMPLE_LIMITS.sentGifts)
+
+    // 6) 最近收到的礼物（谁送的）
+    const receivedGiftRows = await db
+      .select({
+        atMs: douyinLinkMessages.atMs,
+        webRid: douyinLinkMessages.webRid,
+        content: douyinLinkMessages.content,
+        count: douyinLinkMessages.count,
+        diamonds: douyinLinkMessages.diamonds,
+        name: douyinLinkMessages.userName
+      })
+      .from(douyinLinkMessages)
+      .where(and(inArray(douyinLinkMessages.toUserId, ids), eq(douyinLinkMessages.kind, 'gift')))
+      .orderBy(desc(douyinLinkMessages.atMs))
+      .limit(PORTRAIT_SAMPLE_LIMITS.receivedGifts)
+
+    let firstSeen = 0
+    let lastSeen = 0
+    let sentDiamonds = 0
+    let receivedDiamonds = 0
+    for (const room of rooms) {
+      if (room.firstSeen > 0) firstSeen = firstSeen > 0 ? Math.min(firstSeen, room.firstSeen) : room.firstSeen
+      lastSeen = Math.max(lastSeen, room.lastSeen)
+      sentDiamonds += room.diamonds
+      receivedDiamonds += room.receivedDiamonds
+    }
+
+    return {
+      rooms,
+      recentChat: chatRows.map((row) => ({
+        atMs: row.atMs,
+        webRid: row.webRid,
+        content: row.content,
+        count: 0,
+        diamonds: 0,
+        counterpart: ''
+      })),
+      sentGifts: sentRows.map((row) => ({
+        atMs: row.atMs,
+        webRid: row.webRid,
+        content: row.content,
+        count: row.count,
+        diamonds: row.diamonds,
+        counterpart: row.name ?? ''
+      })),
+      receivedGifts: receivedGiftRows.map((row) => ({
+        atMs: row.atMs,
+        webRid: row.webRid,
+        content: row.content,
+        count: row.count,
+        diamonds: row.diamonds,
+        counterpart: row.name ?? ''
+      })),
+      sentDiamonds,
+      receivedDiamonds,
+      firstSeen,
+      lastSeen
+    }
+  })
+}
+
+/**
+ * 「最近一次出现」（跨全部直播间，ms）。
+ *
+ * 只给 AI 画像的**数据指纹**用（判断「这份画像生成之后数据又涨了吗」），所以刻意做得极轻：
+ * 两条聚合（消息流水的最大时间 + 档案行的最大 `last_seen`）取更大者，不碰用户表以外的任何东西。
+ * 为什么不复用 `userPortraitExtras`：那个要摊房间、拉样本，是生成时的重查询，不该挂在「打开弹窗」的路径上。
+ */
+export async function userLastSeenAnyRoom(userIds: string[]): Promise<number> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  if (ids.length === 0) return 0
+  await schemaReady
+  return withOrm('douyin-link.userLastSeenAnyRoom', async (db) => {
+    const fromMessages = await db
+      .select({ at: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision` })
+      .from(douyinLinkMessages)
+      .where(inArray(douyinLinkMessages.userId, ids))
+    const fromUsers = await db
+      .select({ at: sql<number>`coalesce(max(${douyinLinkUsers.lastSeen}), 0)::double precision` })
+      .from(douyinLinkUsers)
+      .where(inArray(douyinLinkUsers.userId, ids))
+    return Math.max(fromMessages[0]?.at ?? 0, fromUsers[0]?.at ?? 0)
+  })
+}
+
+/* ------------------------------------------------------------------ AI 画像缓存 */
+/** AI 画像的一行（主进程内部形状；渲染层拿到的是 shared/types 的 `AiPortrait`） */
+export interface UserPortraitRow {
+  key: string
+  userId: string
+  identityId: number
+  version: number
+  providerId: number
+  providerName: string
+  model: string
+  structured: boolean
+  /** 结构化报告的 JSON 文本（未结构化时空串） */
+  report: string
+  raw: string
+  fingerprint: string
+  interactions: number
+  inputTokens: number
+  outputTokens: number
+  generatedAt: number
+}
+
+/** 读某个人的 AI 画像（没生成过 = null） */
+export async function getUserPortrait(key: string): Promise<UserPortraitRow | null> {
+  const id = String(key ?? '')
+  if (!id) return null
+  await schemaReady
+  return withOrm('douyin-link.getUserPortrait', async (db) => {
+    const rows = await db
+      .select()
+      .from(douyinLinkUserPortraits)
+      .where(eq(douyinLinkUserPortraits.portraitKey, id))
+      .limit(1)
+    const row = rows[0]
+    if (!row) return null
+    return {
+      key: row.portraitKey,
+      userId: row.userId,
+      identityId: row.identityId,
+      version: row.version,
+      providerId: row.providerId,
+      providerName: row.providerName,
+      model: row.model,
+      structured: row.structured,
+      report: row.report,
+      raw: row.raw,
+      fingerprint: row.fingerprint,
+      interactions: row.interactions,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      generatedAt: row.generatedAt
+    }
+  })
+}
+
+/**
+ * 写 AI 画像（**只留最新一版**，主键冲突就整行覆盖）。
+ *
+ * `version` 由调用方给（服务层负责「上一版 +1」）——放在这里而不是 `max(version)+1` 的子查询，
+ * 是因为版本号还要参与提示词（「这是第 N 版，上一版说了什么」），服务层本来就要先读一遍。
+ */
+export async function saveUserPortrait(row: UserPortraitRow): Promise<void> {
+  if (!row.key) return
+  await schemaReady
+  const now = Date.now()
+  await withOrm('douyin-link.saveUserPortrait', async (db) => {
+    await db
+      .insert(douyinLinkUserPortraits)
+      .values({
+        portraitKey: row.key,
+        userId: row.userId,
+        identityId: row.identityId,
+        version: row.version,
+        providerId: row.providerId,
+        providerName: row.providerName,
+        model: row.model,
+        structured: row.structured,
+        report: row.report,
+        raw: row.raw,
+        fingerprint: row.fingerprint,
+        interactions: row.interactions,
+        inputTokens: row.inputTokens,
+        outputTokens: row.outputTokens,
+        generatedAt: row.generatedAt > 0 ? row.generatedAt : now,
+        updatedAt: now
+      })
+      .onConflictDoUpdate({
+        target: douyinLinkUserPortraits.portraitKey,
+        set: {
+          userId: row.userId,
+          identityId: row.identityId,
+          version: row.version,
+          providerId: row.providerId,
+          providerName: row.providerName,
+          model: row.model,
+          structured: row.structured,
+          report: row.report,
+          raw: row.raw,
+          fingerprint: row.fingerprint,
+          interactions: row.interactions,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          generatedAt: row.generatedAt > 0 ? row.generatedAt : now,
+          updatedAt: now
+        }
+      })
+  })
+}
+
+/** 删掉一个人的 AI 画像（「重新生成」不需要它——覆盖写入即可；留给清数据与工装用） */
+export async function deleteUserPortrait(key: string): Promise<number> {
+  const id = String(key ?? '')
+  if (!id) return 0
+  await schemaReady
+  return withOrm('douyin-link.deleteUserPortrait', async (db) => {
+    const rows = await db
+      .delete(douyinLinkUserPortraits)
+      .where(eq(douyinLinkUserPortraits.portraitKey, id))
+      .returning({ key: douyinLinkUserPortraits.portraitKey })
+    return rows.length
   })
 }
 

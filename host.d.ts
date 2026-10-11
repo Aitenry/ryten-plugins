@@ -197,3 +197,50 @@ declare module '@host/renderer/route/RouteSkeleton' {
   const RouteSkeleton: ComponentType<{ variant?: string; showTag?: boolean }>
   export default RouteSkeleton
 }
+
+/* ------------------------------------------------- 大模型（AI 画像那一条链要用） */
+
+/**
+ * 宿主的大模型供应商服务（`src/main/provider/service.ts`）。
+ *
+ * 为什么插件要借它而不是自己发 HTTP：**api_key 只存在宿主那边**（加密落库、只在主进程解密），
+ * 插件自己拿着密钥就等于多一份泄漏面；而且借它之后「harness 换供应商/换模型，插件这边跟着变」，
+ * 两边的采样参数、思考模式、Top K 之类也天然一致。
+ *
+ * `createModel(providerId)` **不回落默认供应商**（宿主刻意如此：聊天轮次由前端显式给 id），
+ * 所以调用方要自己走「设置里指定的 → 宿主默认 → 已启用第一个」这条链（见插件 main/portrait.ts）。
+ */
+declare module '@host/main/provider/service' {
+  import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
+  export interface HostProviderConfig {
+    id: number
+    name: string
+    /** 供应商类型（openai / anthropic / deepseek / custom…） */
+    provider: string
+    base_url: string | null
+    model: string
+    is_default: boolean
+    is_enabled: boolean
+    [key: string]: unknown
+  }
+  export function getProviderService(): {
+    /** 按供应商 id 建一个 LangChain ChatModel（支持 stream/invoke） */
+    createModel(providerId?: number): Promise<BaseChatModel>
+    /** 取配置快照（含模型名、供应商名；`api_key` 也是解密后的明文——**不要发给渲染层**） */
+    getConfig(providerId?: number): Promise<HostProviderConfig>
+    clearCache(): void
+  }
+}
+
+/**
+ * 宿主的供应商配置表（`src/main/database/mapper/provider.ts`）。
+ *
+ * 注意：`getEnabledProviders` / `getDefaultProvider` 返回的配置**含解密后的 api_key**
+ * （运行时路径要拿它建模型实例）。任何要送到渲染层的清单都必须**逐字段挑**地映射一遍。
+ */
+declare module '@host/main/database/mapper/provider' {
+  import type { HostProviderConfig } from '@host/main/provider/service'
+  export function getEnabledProviders(): Promise<HostProviderConfig[]>
+  export function getDefaultProvider(): Promise<HostProviderConfig | null>
+  export function getProviderById(id: number): Promise<HostProviderConfig | null>
+}

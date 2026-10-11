@@ -6,6 +6,7 @@ import {
   RiLinkM,
   RiLinkUnlinkM,
   RiPencilLine,
+  RiQuillPenLine,
   RiRadarLine,
   RiTeamLine,
   RiUserSearchLine
@@ -54,6 +55,7 @@ import { UserAvatar, forgetAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
 import { GiftCalendarModal } from './components/GiftCalendar'
+import { AiPortraitModal } from './components/AiPortrait'
 import { MODAL_Z } from './components/modal-z'
 import { DayRail } from './components/DayRail'
 import { UsersPanel } from './components/UsersPanel'
@@ -212,6 +214,15 @@ export default function Page(): React.JSX.Element {
   const [giftCalendar, setGiftCalendar] = useState(false)
   const [giftCalendarName, setGiftCalendarName] = useState('')
   const [giftDay, setGiftDay] = useState<{ from: number; to: number } | null>(null)
+  /**
+   * 「AI 画像」弹窗（2026-10-13 新增）：从档案的名字行那枚图标按钮打开，**独立宽弹窗**。
+   *
+   * 为什么不在档案右栏里出（那里已经有确定性画像）：大模型写的画像有 4-7 节 + 证据 + 建议，
+   * 336px 的窄栏放不下；而且这两份东西口径不同（算法量事实 / 模型做解读），摆在一起容易看混。
+   * 这里也不跟房间走（跨全部直播间），`aiPortraitName` 只是打开那一刻的显示名。
+   */
+  const [aiPortrait, setAiPortrait] = useState(false)
+  const [aiPortraitName, setAiPortraitName] = useState('')
   /**
    * 时间范围（概览看的是哪一段）：`null` = 用「这一天」的默认整段（今天 = 00:00 → 现在）。
    * 两个入口都往这里写：概览的时间进度条、左侧「每日记录」点某一天。
@@ -1149,13 +1160,33 @@ export default function Page(): React.JSX.Element {
           webRid={activeRoom}
           userId={openUser}
           rooms={rooms}
-          onClose={() => setOpenUser('')}
+          onClose={() => {
+            setOpenUser('')
+            // 关档案就把上面那层 AI 画像也收掉：它的开关状态留着的话，下次点开别人会直接弹出来
+            setAiPortrait(false)
+          }}
           onOpenCalendar={(name) => {
             setGiftCalendarName(name)
             setGiftCalendar(true)
           }}
+          onOpenAiPortrait={(name) => {
+            setAiPortraitName(name)
+            setAiPortrait(true)
+          }}
         />
       ) : null}
+
+      {/*
+        「AI 画像」（用大模型写的那份）：与档案、日历都**同级挂在页面**（antd 弹窗 portal 到 body，
+        嵌在档案里会让两个弹窗的开关互相牵连）。userId 传空即关闭——它比日历还长，
+        关掉档案时不该把它留在屏幕上。
+      */}
+      <AiPortraitModal
+        webRid={activeRoom}
+        userId={aiPortrait ? openUser : ''}
+        name={aiPortraitName}
+        onClose={() => setAiPortrait(false)}
+      />
 
       {/* 礼物榜点开的历史（他送的 / 他收到的）：与榜单同一段范围——今天就是今天，不翻旧账。
           数据大屏里的榜单是跨房间的，所以 webRid 传空串（走跨房查询），也不再要求选中房间。 */}
@@ -1281,6 +1312,11 @@ function UserProfileModal(props: {
    * 内层的 onCancel 又冒泡到外层）。放在页面同级，两个弹窗各管各的开关。
    */
   onOpenCalendar: (name: string) => void
+  /**
+   * 点「AI 画像」→ 由**页面**开那个宽弹窗。理由与 `onOpenCalendar` 逐字相同：
+   * 弹窗是 portal 到 body 的，嵌一层会让两个弹窗的开关互相牵连。
+   */
+  onOpenAiPortrait: (name: string) => void
 }): React.JSX.Element {  const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
@@ -1640,6 +1676,17 @@ function UserProfileModal(props: {
                       aria-label={t('douyin-link.users.analyzeButton')}
                       icon={<RiRadarLine size={15} />}
                       onClick={doAnalyze}
+                    />
+                    {/* 「AI 画像」：第三枚纯图标按钮（与「查看真实资料 / 分析用户」同款）。
+                        它**要花钱**（一次大模型调用），所以文案写清是「大模型」并且点开后先给
+                        一个说明 + 「生成画像」按钮——不点不会调模型（见 components/AiPortrait.tsx） */}
+                    <Button
+                      size="small"
+                      type="text"
+                      title={t('douyin-link.users.aiButton')}
+                      aria-label={t('douyin-link.users.aiButton')}
+                      icon={<RiQuillPenLine size={15} />}
+                      onClick={() => props.onOpenAiPortrait(identityTitle)}
                     />
                   </span>
                 </div>

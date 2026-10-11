@@ -125,6 +125,31 @@ const DDL: string[] = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_douyin_link_identity_account_owner ON douyin_link_identity_accounts (identity_id)`,
   /**
+   * **AI 画像**（大模型生成，0.15.29 起）：一个人一版、只留最新。
+   *
+   * 生成一次要花 token，所以整份报告落库（`report` 是结构化 JSON，`raw` 是模型原文）；
+   * `fingerprint`/`interactions` 是生成当时的数据侧快照，用来判断「之后数据又涨了」。
+   * 缓存键（`portrait_key`）口径见 `shared/ai-portrait.ts`。
+   */
+  `CREATE TABLE IF NOT EXISTS douyin_link_user_portraits (
+     portrait_key  TEXT PRIMARY KEY,
+     user_id       TEXT NOT NULL DEFAULT '',
+     identity_id   BIGINT NOT NULL DEFAULT 0,
+     version       INTEGER NOT NULL DEFAULT 0,
+     provider_id   INTEGER NOT NULL DEFAULT 0,
+     provider_name TEXT NOT NULL DEFAULT '',
+     model         TEXT NOT NULL DEFAULT '',
+     structured    BOOLEAN NOT NULL DEFAULT FALSE,
+     report        TEXT NOT NULL DEFAULT '',
+     raw           TEXT NOT NULL DEFAULT '',
+     fingerprint   TEXT NOT NULL DEFAULT '',
+     interactions  INTEGER NOT NULL DEFAULT 0,
+     input_tokens  INTEGER NOT NULL DEFAULT 0,
+     output_tokens INTEGER NOT NULL DEFAULT 0,
+     generated_at  DOUBLE PRECISION NOT NULL DEFAULT 0,
+     updated_at    DOUBLE PRECISION NOT NULL DEFAULT 0
+   )`,
+  /**
    * 礼物功能的列迁移（**幂等**，0.7.1 起）。
    *
    * 背景：0.7.0 曾把礼物整体下线，并在这里 `DROP COLUMN` 掉了这些列（含「收礼人」两列）。
@@ -170,7 +195,7 @@ export const schemaReady: Promise<void> = (async () => {
   await withOrm('douyin-link.ensureSchema', async (db) => {
     for (const statement of DDL) await db.execute(sql.raw(statement))
   })
-  logger.info('[douyin-link] 表结构已就绪（8 张 douyin_link_* 表）')
+  logger.info('[douyin-link] 表结构已就绪（9 张 douyin_link_* 表）')
 })().catch((error) => {
   logger.error('[douyin-link] 建表失败，插件将无法读写数据:', error)
   throw error
@@ -186,5 +211,7 @@ export const PURGE_TABLES = [
   'douyin_link_rooms',
   // 画像与账号绑定也算「这个插件的数据」：卸载时勾了删数据就一起清（不给用户留残影）
   'douyin_link_identity_accounts',
-  'douyin_link_identities'
+  'douyin_link_identities',
+  // AI 画像（大模型花的 token 换来的结果）同理：勾了删数据就一起清
+  'douyin_link_user_portraits'
 ]

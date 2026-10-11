@@ -13,7 +13,7 @@ dialog on Windows/Linux cannot select files and folders at the same time.)
 | Task Planner | `plugins/task-planner` | `task-planner` | Task tree, Gantt chart and list view with dependencies, plus a `manage_planner` tool for the AI assistant |
 | Music Player | `plugins/music-player` | `music-player` | Playlists, tracks, cover art, mini player and a bottom-bar entry, plus a `manage_music` tool for the AI assistant |
 | Personal Ledger | `plugins/personal-ledger` | `personal-ledger` | Multi-account, multi-currency ledger: categories/tags/merchants, budgets and savings goals, recurring entries and instalments, money lent and borrowed, credit-card and deposit reminders, net-worth charts, CSV import/export, plus a `personal_ledger` tool for the AI assistant |
-| Douyin Link | `plugins/douyin-link` | `douyin-link` | Multi-room Douyin live analyzer: one hidden collector window per room (`websocket` danmaku capture), audio follows the selected room only, every message/user/minute/session dropped into the plugin's own tables with keyword search, KPI and trend panels, chatter and gift leaderboards, side-by-side room comparison and per-user danmaku history, plus a `douyin_live` tool for the AI assistant |
+| Douyin Link | `plugins/douyin-link` | `douyin-link` | Multi-room Douyin live analyzer: one hidden collector window per room (`websocket` danmaku capture), audio follows the selected room only, every message/user/minute/session dropped into the plugin's own tables with keyword search, KPI and trend panels, chatter and gift leaderboards, side-by-side room comparison and per-user danmaku history, plus a `douyin_live` tool for the AI assistant. User profiles carry both a **deterministic portrait** (RFM, Big Five proxy, emotion lexicon — free, reproducible) and an **AI portrait** written by the host's own model service: LLM-picked persona and one-liner, speaking style, spending motives, social role, activity rhythm, churn/upgrade signals, evidence quoted verbatim from the user's own comments and retention advice — streamed live, cached per user in the database (never billed twice) and regenerated as an *iteration* on the previous version |
 
 ## What a plugin package looks like
 
@@ -79,6 +79,32 @@ Real credentials stay out of the repo — measure a copy instead (prints counts,
 ```bash
 node plugins/douyin-link/spike/cookie-check.mjs "--cookie-file=$env:TEMP\my-cookie.txt" --live
 ```
+
+### AI portrait probes
+
+The AI portrait spends real money (one LLM call per generation), so its checks are split by what they cost.
+Everything below runs the **real** code (prompt packing, report parsing, generation service, renderer bundle):
+
+```bash
+# 1. prompt + parser contract, offline: what the model is told, what it may return, how bad replies are handled
+node plugins/douyin-link/spike/ai-portrait-contract-check.mjs
+
+# 2. the whole generation chain against a real PGlite copy, with a scripted model (streaming, caching,
+#    busy guard, no-model/no-data guards, failure must not destroy an existing portrait, provider fallback)
+node plugins/douyin-link/spike/ai-portrait-model-check.mjs "$env:TEMP\rbdb-copy"
+
+# 3. the real renderer bundle in jsdom: entry icon, no spending before the user clicks, live streaming,
+#    full report, cached reopen, "data grew" hint, all four failure texts, disabled button without a model
+node plugins/douyin-link/spike/ai-portrait-render-check.mjs
+
+# 4. ONE real model call on real data (opt in with --live; without it, dry-run and cost preview only)
+Copy-Item "$env:APPDATA\ryten-bench\RytenBenchDB" "$env:TEMP\rbdb-copy" -Recurse
+node plugins/douyin-link/spike/ai-portrait-live.mjs "$env:TEMP\rbdb-copy"
+node plugins/douyin-link/spike/ai-portrait-live.mjs "$env:TEMP\rbdb-copy" --live
+```
+
+The live probe decrypts the host's provider API key (same PBKDF2 + AES-256-GCM derivation as
+`src/main/crypto/provider-key.ts`) from a **copy** of the database and prints counts, never the key.
 
 ## Releasing
 
