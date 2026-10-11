@@ -128,11 +128,26 @@ export async function fetchUserProfile(userId: string): Promise<ProfileFetch> {
 
 /**
  * 还原某个用户 id 的真实资料（弹窗用）：在原始字段之上把头**下载成 data URL**。
+ *
+ * `onRaw`：拿到原始字段（**还没下载头像**）时的回调。用户 2026-10-11 要求
+ * 「点击后更新用户的信息，回填页面上面的内容」——主进程用它在下载头像之前先把静态字段
+ * 写回我们自己那份档案（见 `hub.revealMystery` 的 `upsertUserStatic`），
+ * 这样头像下载失败也不影响回填。回调抛错不影响返回值（界面照常显示查到的内容）。
  */
-export async function revealMysteryProfile(userId: string): Promise<MysteryReveal> {
+export async function revealMysteryProfile(
+  userId: string,
+  onRaw?: (profile: RawUserProfile) => Promise<void> | void
+): Promise<MysteryReveal> {
   const result = await fetchUserProfile(userId)
   if (!result.ok) return result
   const raw = result.profile
+  if (onRaw) {
+    try {
+      await onRaw(raw)
+    } catch {
+      /* 回填失败不影响这次查询的结果：界面该显示什么还显示什么 */
+    }
+  }
   const avatar = raw.avatarUrl ? await avatarCache.dataUrl(raw.avatarUrl) : ''
   return {
     ok: true,

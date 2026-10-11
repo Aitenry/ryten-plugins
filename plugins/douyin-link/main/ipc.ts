@@ -159,8 +159,10 @@ export function createIpcHandlers(): Record<string, (...args: never[]) => unknow
     },
     /** 界面不再看全局分析（切回单房间模式/卸载）：停掉它的实时推送 */
     'plugin:douyin-link:all-analysis-unwatch': () => hub.unwatchAllAnalysis(),
-    // 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）
-    'plugin:douyin-link:reveal-mystery': (userId?: string) => hub.revealMystery(String(userId ?? '')),
+    // 查看真实资料：拿用户 id 去抖音查这个账号的平台资料（真名/头像/粉丝数等），
+    // 查到之后**回填**到这个房间的档案行（第二个参数是房间号；空串就只查不写）
+    'plugin:douyin-link:reveal-mystery': (userId?: string, webRid?: string) =>
+      hub.revealMystery(String(userId ?? ''), String(webRid ?? '')),
     // 每一天的直播记录（左侧房间旁边的列表）：查一次 + 登记推送（登记语义同 room-summary）
     'plugin:douyin-link:day-records': (webRid?: string, limit?: number) => {
       const id = String(webRid ?? '')

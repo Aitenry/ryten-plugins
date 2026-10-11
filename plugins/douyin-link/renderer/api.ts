@@ -479,11 +479,14 @@ export const api = {
   dayRecords: async (webRid: string, limit = 90): Promise<DayRecordRow[]> =>
     asList<DayRecordRow>(await invoke(`${PREFIX}day-records`, webRid, limit)),
   /**
-   * 查看神秘人信息：拿用户 id 去抖音查这个匿名账号的真实资料（真名/头像/粉丝数等）。
+   * 查看真实资料：拿用户 id 去抖音查这个账号的平台资料（真名/头像/粉丝数等）。
+   *
+   * `webRid` 一起传过去：主进程查到之后会**回填**到这个房间的档案行（只写静态字段），
+   * 界面随后重拉一次档案就能看到更新后的内容——不需要另开一块「真实资料」。
    * 主进程没回复（桥没挂上）时回 `null`，界面按失败渲染。
    */
-  revealMystery: async (userId: string): Promise<MysteryReveal | null> => {
-    const raw = await invoke(`${PREFIX}reveal-mystery`, userId)
+  revealMystery: async (userId: string, webRid = ''): Promise<MysteryReveal | null> => {
+    const raw = await invoke(`${PREFIX}reveal-mystery`, userId, webRid)
     return isRecord(raw) ? (raw as unknown as MysteryReveal) : null
   },
   roomsCompare: async (minutes = 60): Promise<RoomCompareRow[]> =>

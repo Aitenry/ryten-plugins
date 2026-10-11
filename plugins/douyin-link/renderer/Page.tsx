@@ -18,7 +18,6 @@ import type {
   DayRecordRow,
   FailureInfo,
   LiveSettings,
-  MysteryProfile,
   MysteryReveal,
   RoomRuntime,
   UserAnalysis,
@@ -50,7 +49,7 @@ import {
 import type { PillTabItem, PluginPalette } from './components/ui'
 import { RoomRail } from './components/RoomRail'
 import { SearchPanel } from './components/SearchPanel'
-import { UserAvatar } from './components/UserAvatar'
+import { UserAvatar, forgetAvatar } from './components/UserAvatar'
 import { UserHistory } from './components/UserHistory'
 import { GiftHistoryModal } from './components/GiftHistory'
 import { DayRail } from './components/DayRail'
@@ -1426,12 +1425,27 @@ function UserProfileModal(props: {
 
   const doReveal = useCallback((): void => {
     setRevealing(true)
+    setReveal(null)
     void api
-      .revealMystery(props.userId)
-      .then((result) => setReveal(result ?? { ok: false, code: 'network' }))
+      .revealMystery(props.userId, props.webRid)
+      .then((result) => {
+        setReveal(result ?? { ok: false, code: 'network' })
+        if (!result?.ok) return
+        /**
+         * 查到就当**回填**用（用户 2026-10-11：「点击后更新用户的信息，回填页面上面的内容，
+         * 不要独立开个内容」）：
+         * - 主进程已经把静态字段写回这个房间的档案行（`upsertUserStatic`），所以先让头像缓存
+         *   作废、再重拉一次档案，上面那块（昵称/抖音号/地区/粉丝…）就是真实资料了；
+         * - 作品数 / 获赞 / 认证这几个字段我们库里没有列，只在本弹窗里补一行事实（见下面的 FactLine）。
+         */
+        forgetAvatar(props.webRid, props.userId)
+        refreshUser()
+      })
       .catch(() => setReveal({ ok: false, code: 'network' }))
       .finally(() => setRevealing(false))
-  }, [props.userId])
+    // refreshUser 只依赖 props（webRid/userId），和下面那个 useCallback 同一批
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.userId, props.webRid, refreshUser])
 
   /**
    * 「分析用户」：把库里的数据交给主进程的**确定性规则算法**（RFM + Bartle 原型 + 情感词典 + …）
@@ -1478,7 +1492,15 @@ function UserProfileModal(props: {
         ) : (
           <>
             <div className="flex items-center gap-3">
-              <UserAvatar webRid={props.webRid} userId={profile.id} nickname={profile.nickname} size={48} />
+              {/* 头像：点了「查看真实资料」就拿抖音那份当场显示（`src` 优先于按 id 取缓存），
+                  同时上面的 `forgetAvatar` 让缓存作废，重开弹窗也是真实头像 */}
+              <UserAvatar
+                webRid={props.webRid}
+                userId={profile.id}
+                nickname={profile.nickname}
+                size={48}
+                src={reveal?.ok ? reveal.profile.avatar : undefined}
+              />
               <div className="flex min-w-0 flex-1 flex-col gap-1">
                 {/* 荣誉等级 / 粉丝团 / 「分析用户」都跟在名字这一行的**最右端**
                     （原来荣誉等级单独占一行，把名字行也拉长了；分析按钮原在页脚，现在收进图标） */}
@@ -1538,8 +1560,21 @@ function UserProfileModal(props: {
                         {t('douyin-link.users.fansClub')} {profile.fansClubLevel}
                       </Tag>
                     ) : null}
-                    {/* 只用图标：文案进 title / aria-label，鼠标悬停可见、读屏可读；
-                        分析中 antd 会把图标换成转圈，不需要再来一套「分析中…」文案 */}
+                    {/* 查看真实资料 / 分析用户：两枚**纯图标**按钮并排（用户 2026-10-11：
+                        「查看真实资料的按钮，要和分析用户按钮一样，放在其旁边，只要图标」）。
+                        文案进 title / aria-label，鼠标悬停可见、读屏可读；加载中 antd 换转圈。
+                        查到之后**回填上面那块内容**，不再另开一块「真实资料」 */}
+                    {revealable ? (
+                      <Button
+                        size="small"
+                        type="text"
+                        loading={revealing}
+                        title={t('douyin-link.users.revealButton')}
+                        aria-label={t('douyin-link.users.revealButton')}
+                        icon={<RiUserSearchLine size={15} />}
+                        onClick={doReveal}
+                      />
+                    ) : null}
                     <Button
                       size="small"
                       type="text"
@@ -1647,6 +1682,19 @@ function UserProfileModal(props: {
                   `${t('douyin-link.users.span')} ${duration(profile.lastSeen - profile.firstSeen)}`
                 ]}
               />
+              {/* 真实资料带回来、而我们库里没有列的几项（作品数 / 获赞 / 认证）：补成同款的一行事实，
+                  不另开一块内容（用户 2026-10-11：「回填页面上面的内容，不要独立开个内容」） */}
+              {reveal?.ok ? (
+                <FactLine
+                  items={[
+                    reveal.profile.verified
+                      ? `${t('douyin-link.users.revealVerified')} ${reveal.profile.verified}`
+                      : '',
+                    `${t('douyin-link.users.revealWorks')} ${formatNumber(reveal.profile.awemeCount)}`,
+                    `${t('douyin-link.users.revealLikes')} ${formatNumber(reveal.profile.totalFavorited)}`
+                  ].filter(Boolean)}
+                />
+              ) : null}
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -1668,36 +1716,20 @@ function UserProfileModal(props: {
           </>
         )}
 
-        {/* 神秘人还原：**不挂在档案分支里** —— 纯匿名的送礼人往往连档案都没有，只剩一个 id，
-            这种时候也要能查看（用户 2026-10-09：「如果是神秘人，增加一个按钮可以查看其信息」） */}
-        {revealable ? (
-          <div className="flex flex-col gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
-            {reveal && reveal.ok ? (
-              <RevealedIdentity profile={reveal.profile} palette={palette} t={t} />
-            ) : (
-              <>
-                <div className="flex items-center gap-2">
-                  <RiUserSearchLine size={14} style={{ color: palette.warn, flexShrink: 0 }} />
-                  <span className="min-w-0 flex-1 text-xs opacity-80">{t('douyin-link.users.revealSecret')}</span>
-                  <Button size="small" type="primary" loading={revealing} onClick={doReveal}>
-                    {revealing ? t('douyin-link.users.revealLoading') : t('douyin-link.users.revealButton')}
-                  </Button>
-                </div>
-                {reveal && !reveal.ok ? (
-                  <span className="text-xs" style={{ color: palette.down }}>
-                    {revealErrorText(t, reveal.code)}
-                  </span>
-                ) : null}
-              </>
-            )}
-          </div>
-        ) : anonymousOnly ? (
-          /* 抖音的匿名占位 id（111111）：帧里的 id/抖音号/secUid 全被抹平，没有可查的账号标识——
-             与其给一个点了必然失败的按钮，不如把话说明白（本插件的纪律：宁可没有，不给错的）。 */
-          <div className="flex items-start gap-2 rounded-md px-2.5 py-2" style={{ backgroundColor: palette.soft }}>
-            <RiUserSearchLine size={14} style={{ color: palette.warn, flexShrink: 0, marginTop: 1 }} />
-            <span className="min-w-0 flex-1 text-xs opacity-70">{t('douyin-link.users.revealAnonymousOnly')}</span>
-          </div>
+        {/*
+          匿名占位 id（111111）：抖音给所有隐藏身份的人共用的 id，帧里的 id/抖音号/secUid 全被抹平，
+          没有可查的账号标识——与其给一个点了必然失败的按钮，不如把话说明白
+          （本插件的纪律：宁可没有，不给错的）。**一行灰字**，不另开一块内容。
+        */}
+        {anonymousOnly ? (
+          <span className="text-xs opacity-60">{t('douyin-link.users.revealAnonymousOnly')}</span>
+        ) : null}
+
+        {/* 「查看真实资料」失败：一行如实的失败原因（不占一块面板；成功时不出现，因为内容已经回填上去了） */}
+        {reveal && !reveal.ok ? (
+          <span className="text-xs" style={{ color: palette.down }}>
+            {revealErrorText(t, reveal.code)}
+          </span>
         ) : null}
 
         {/* 这个人说过什么：**不挂在档案分支里** —— 用户记录被清掉后档案查不到，但消息流水还在 */}
@@ -2359,69 +2391,12 @@ function UserAnalysisPanel(props: {
 }
 
 /**
- * 「神秘人真实信息」卡片：抖音那边**按用户 id 查回来**的账号资料（见 `main/douyin/mystery.ts`）。
+ * 「查看真实资料」的失败码 → 文案（翻不到就退回通用失败句）。
  *
- * 与上面那一段（我们自己观察到的档案）刻意分开：这里的昵称、粉丝数、地区都是账号本人的，
- * 跟直播间里的匿名马甲无关——这正是「脱马甲」要看的东西。头像由主进程下载成 data URL。
+ * 成功时**什么都不渲染**：查到的资料已经回填到上面的档案里了（用户 2026-10-11：
+ * 「点击后更新用户的信息，回填页面上面的内容，不要独立开个内容」），
+ * 原来那张独立的「真实资料」卡片（`RevealedIdentity`）因此删掉了。
  */
-function RevealedIdentity(props: {
-  profile: MysteryProfile
-  palette: PluginPalette
-  t: Translate
-}): React.JSX.Element {
-  const { profile, palette, t } = props
-  const letter = (profile.nickname || '?').trim().slice(0, 1).toUpperCase()
-  return (
-    <div className="flex flex-col gap-2">
-      <span className="text-[10px] opacity-50">{t('douyin-link.users.revealTitle')}</span>
-      <div className="flex items-center gap-2">
-        {profile.avatar ? (
-          <img
-            src={profile.avatar}
-            alt=""
-            width={36}
-            height={36}
-            className="shrink-0 rounded-full"
-            style={{ objectFit: 'cover' }}
-          />
-        ) : (
-          <span
-            className="flex shrink-0 items-center justify-center rounded-full text-[12px]"
-            style={{ width: 36, height: 36, color: palette.surface, backgroundColor: palette.accent }}
-          >
-            {letter}
-          </span>
-        )}
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-          <span className="min-w-0 truncate text-sm font-semibold">{profile.nickname}</span>
-          {profile.verified ? (
-            <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-              {t('douyin-link.users.revealVerified')} {profile.verified}
-            </Tag>
-          ) : null}
-        </div>
-      </div>
-      <FactLine
-        items={[
-          `${t('douyin-link.users.displayId')} ${profile.displayId || '-'}`,
-          `${t('douyin-link.users.gender')} ${genderText(t, profile.gender)}`,
-          profile.region ? `${t('douyin-link.users.revealRegion')} ${profile.region}` : ''
-        ].filter(Boolean)}
-      />
-      <FactLine
-        items={[
-          `${t('douyin-link.users.revealFollower')} ${formatNumber(profile.follower)}`,
-          `${t('douyin-link.users.revealFollowing')} ${formatNumber(profile.following)}`,
-          `${t('douyin-link.users.revealWorks')} ${formatNumber(profile.awemeCount)}`,
-          `${t('douyin-link.users.revealLikes')} ${formatNumber(profile.totalFavorited)}`
-        ]}
-      />
-      {profile.signature ? <span className="text-xs opacity-70">{profile.signature}</span> : null}
-    </div>
-  )
-}
-
-/** 神秘人还原的失败码 → 文案（翻不到就退回通用失败句） */
 function revealErrorText(t: Translate, code: 'badInput' | 'network' | 'notFound' | 'badResponse'): string {
   const key = `douyin-link.users.revealError${code[0].toUpperCase()}${code.slice(1)}`
   const text = t(key)

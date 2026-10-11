@@ -2781,14 +2781,38 @@ export class AnalyzerHub {
   }
 
   /**
-   * **查看神秘人信息**：拿用户 id 去抖音的 web 端资料接口，把匿名马甲下的人还原出来
-   * （真名、头像、粉丝数等，见 `../douyin/mystery`）。
+   * **查看真实资料**：拿用户 id 去抖音的 web 端资料接口，把这个账号的平台资料取回来
+   * （真名、头像、粉丝数等，见 `../douyin/mystery`），并**回填到我们自己那份档案**里。
    *
-   * 这是**按需**的：用户档案弹窗里发现是匿名的人才会点这个按钮，所以不做缓存、不写库——
-   * 抖音那边的资料随时可能变，每次点都拿最新的一份。
+   * 两条口径：
+   * - **不缓存**：抖音那边的资料随时可能变，每次点都拿最新的一份；
+   * - **回填只写静态字段**（昵称/抖音号/头像/签名/地区/粉丝/关注/secUid），走 `upsertUserStatic`
+   *   ——它不动统计与首末时间，所以界面上的互动数字不会因为这个按钮变化
+   *   （用户 2026-10-11：「点击后更新用户的信息，回填页面上面的内容」）。
    */
-  async revealMystery(userId: string): Promise<MysteryReveal> {
-    return revealMysteryProfile(userId)
+  async revealMystery(userId: string, webRid = ''): Promise<MysteryReveal> {
+    const id = String(userId ?? '').trim()
+    if (!id) return { ok: false, code: 'badInput' }
+    return revealMysteryProfile(id, async (raw) => {
+      if (!webRid) return
+      await store.upsertUserStatic(webRid, [
+        {
+          userId: raw.userId,
+          displayId: raw.displayId,
+          nickname: raw.nickname,
+          gender: raw.gender,
+          signature: raw.signature,
+          city: raw.region,
+          avatar: raw.avatarUrl,
+          following: raw.following,
+          follower: raw.follower,
+          secUid: raw.secUid
+        }
+      ])
+      // `avatarCache` 按 url 缓存，所以这里不用管它：回填进来的是一个**新的** CDN 地址，
+      // 下次 `user-avatar` 自然会去下载那一份（渲染层那边按「房间 + 用户」缓存，见 forgetAvatar）
+      logger.info(`[douyin-link] 真实资料已回填：${raw.userId} @ ${webRid}（${raw.nickname}）`)
+    })
   }
 
   async clearUsers(webRid = ''): Promise<void> {

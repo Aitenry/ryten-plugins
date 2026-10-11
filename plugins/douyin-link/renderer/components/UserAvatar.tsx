@@ -43,6 +43,16 @@ export function clearAvatarCache(): void {
   cache.clear()
 }
 
+/**
+ * 让**某一个人**的头像缓存作废：下次渲染重新向主进程要一份。
+ *
+ * 用在哪：用户档案弹窗里点了「查看真实资料」——主进程把账号的真实头像回填进档案了，
+ * 而这里缓存的是回填之前那一份（常常是空的），不作废就一直显示首字色块。
+ */
+export function forgetAvatar(webRid: string, userId: string): void {
+  cache.delete(keyOf(webRid, userId))
+}
+
 export function UserAvatar(props: {
   /** 头像按房间缓存（同一个人在 A 房与 B 房可能是不同的历史头像） */
   webRid: string
@@ -51,6 +61,8 @@ export function UserAvatar(props: {
   size?: number
   /** 传 false 就不下载，只用首字色块（聊天流用） */
   fetch?: boolean
+  /** 直接给一份 data URL（「查看真实资料」当场拿回来的头像）：优先于按 id 取缓存 */
+  src?: string
 }): React.JSX.Element {
   const palette = usePluginPalette()
   const size = props.size ?? 22
@@ -68,6 +80,7 @@ export function UserAvatar(props: {
   }, [props.webRid, props.userId, props.fetch])
 
   const letter = (props.nickname || '?').trim().slice(0, 1).toUpperCase()
+  const shown = props.src || url
   return (
     <span
       className="flex shrink-0 items-center justify-center overflow-hidden rounded-full text-[10px]"
@@ -79,7 +92,7 @@ export function UserAvatar(props: {
       }}
       title={props.nickname}
     >
-      {url ? <img src={url} alt="" width={size} height={size} style={{ objectFit: 'cover' }} /> : letter}
+      {shown ? <img src={shown} alt="" width={size} height={size} style={{ objectFit: 'cover' }} /> : letter}
     </span>
   )
 }

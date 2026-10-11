@@ -329,17 +329,15 @@ export const DouyinLinkZhCN = {
       historyTo: '结束日期',
       historyEmpty: '库里还没有这个人的消息（先监控一会儿，或换个房间 / 时间区间）',
       historyRefresh: '重新查一次',
-      /* 真实资料还原（用户档案弹窗里，对所有有 id 的人都出现） */
-      revealSecret: '按用户 id 查一下这个人在抖音上的真实资料',
+      /*
+       * 查看真实资料（用户档案弹窗里，名字行右边那枚**纯图标**按钮）：
+       * 查到的资料**回填到上面的档案里**，不再另开一块内容，所以这里只需要
+       * 按钮名（title / aria-label）、匿名占位 id 的说明、几个库里没有的字段名与失败文案。
+       */
       revealAnonymousOnly: '抖音对这个匿名用户只发了占位 id（111111），真实账号标识被抹掉了，数据里查不到这个人',
       revealButton: '查看真实资料',
-      revealLoading: '正在查询…',
-      revealTitle: '抖音真实资料',
-      revealFollower: '粉丝',
-      revealFollowing: '关注',
       revealWorks: '作品',
       revealLikes: '获赞',
-      revealRegion: '地区',
       revealVerified: '认证',
       revealFailed: '这个人的资料没查到',
       revealErrorBadInput: '这个用户 id 不对，查不了',

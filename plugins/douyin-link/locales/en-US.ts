@@ -320,18 +320,17 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       historyTo: 'End date',
       historyEmpty: 'No stored messages from this user yet (monitor for a while, or change room / date range)',
       historyRefresh: 'Query again',
-      /* Real-profile reveal (shows up for every user with an id in the profile dialog) */
-      revealSecret: 'Look up this user’s real Douyin profile by id',
+      /*
+       * Reveal real profile (the icon-only button next to the portrait actions in the profile
+       * dialog): what comes back is written into the profile above, so only the button name
+       * (title / aria-label), the anonymous-placeholder note, the few extra field names and the
+       * failure copy are needed here.
+       */
       revealAnonymousOnly:
         'Douyin only sends a placeholder id (111111) for this anonymous user — the real account is not recoverable from the data',
       revealButton: 'Reveal real profile',
-      revealLoading: 'Looking up…',
-      revealTitle: 'Real Douyin profile',
-      revealFollower: 'Followers',
-      revealFollowing: 'Following',
       revealWorks: 'Videos',
       revealLikes: 'Likes',
-      revealRegion: 'Region',
       revealVerified: 'Verified',
       revealFailed: "Couldn't find this user's profile",
       revealErrorBadInput: 'Invalid user id, cannot look it up',
