@@ -1324,8 +1324,91 @@ export async function getAnonymousCandidates(
   })
 }
 
-/* --------------------------------------------------------------- 画像（多账号） */
 /**
+ * **空名字回填**（一次性迁移）：消息行里 `user_name` 是空的，而我们自己的用户档案里**有**这个名字时，
+ * 把名字补回去（发送者列与收礼人列各一条语句）。
+ *
+ * 由来（2026-10-11 用户报障「神秘人七阶获取不了名称」）：补名字那条链以前**只对礼物类帧**做，
+ * 弹幕/进场帧没带名字时从来没查过库；而且 `identifyBatch` 还会把「神秘人/匿名」这类名字当占位清掉。
+ * 运行期两处都已修（见 `hub.resolveMissingNames` 与 `shared/anonymous.ts` 的 `isUsableNickname`），
+ * 但**已经落库的那些空名字行不会自己变好**——这份迁移就是补它们。
+ *
+ * 三条口径：
+ * 1. **只补空的**（`user_name = ''`），已有名字的一个字都不动；
+ * 2. **只补真名字**：档案里的昵称不能是空、也不能是打码名（`%**`）或占位名（`%匿名%`）——
+ *    把 `秋***` 这种写进消息行毫无意义（下次拆分时还得再判断一次）；
+ * 3. **按 (房间, 用户 id) 精确对齐**：名字取自同一房间的档案行，绝不跨房间借名字
+ *    （同一个 id 在 A 房叫「张三」、在 B 房叫别的，跨房借就是张冠李戴）。
+ *
+ * 幂等：跑第二遍时 `user_name = ''` 的行已经补上了，自然什么都不改。返回补了多少行。
+ *
+ * 顺带**清掉历史垃圾名**（第 4 条口径，见 `clearMaskNames`）：修复前把 `张**` / `秋***` / `***`
+ * 这类打码名写进了消息行，那是没有任何信息量的假名字——留着只会在界面上假装是个名字。
+ * 只清「打码名」这一种形状，真昵称（哪怕叫「神秘人七阶」）一个字都不动。
+ */
+export async function backfillMessageNames(): Promise<number> {
+  await schemaReady
+  return withOrm('douyin-link.backfillNames', async (db) => {
+    /**
+     * 名字可用性判据（与 `shared/anonymous.ts` 的 `isUsableNickname` 对齐）：
+     * 非空、且不是打码名（`秋***`）、也不是占位名（`匿名`/`神秘人*` 那种**通用**占位）。
+     * 注意只排除**通用**占位：真账号自己起名「神秘人七阶」是允许的，那种要留下。
+     */
+    const usable = (column: SQL): SQL =>
+      sql`(${column} <> '' and ${column} not like '%**' and ${column} not like '匿名' and ${column} not like '神秘人')`
+    const sent = await db.execute(sql`
+      update douyin_link_messages m
+      set user_name = u.nickname
+      from douyin_link_users u
+      where m.web_rid = u.web_rid and m.user_id = u.user_id
+        and m.user_name = '' and m.user_id <> ''
+        and ${usable(sql`u.nickname`)}`)
+    const received = await db.execute(sql`
+      update douyin_link_messages m
+      set to_user_name = u.nickname
+      from douyin_link_users u
+      where m.web_rid = u.web_rid and m.to_user_id = u.user_id
+        and m.to_user_name = '' and m.to_user_id <> ''
+        and ${usable(sql`u.nickname`)}`)
+    return (Number(sent.affectedRows ?? 0) || 0) + (Number(received.affectedRows ?? 0) || 0)
+  })
+}
+
+/**
+ * **清掉「打码名当名字」的历史垃圾**：修复前有两条路会把 `张**` / `秋***` / `***` 这类
+ * 打码名写进消息行（`displayNickname` 只在部分路径生效 + 老的 `isAnonymousName` 不认打码名）。
+ *
+ * 判断很保守：
+ * - **消息行**：名字以 `**` 结尾 → 清空（那种形状不可能是真昵称）；若这一行有 id，
+ *   再拿**同房间的档案**里的可用名字补上（顺手救回真名）；
+ * - **档案行**：昵称本身是打码名 → 清空（档案里留着它，用户榜上就会出现一排「张**」）。
+ *
+ * 幂等：清完的行名字是空串，第二遍没有匹配项。返回清了多少行。
+ */
+export async function clearMaskNames(): Promise<number> {
+  await schemaReady
+  return withOrm('douyin-link.clearMaskNames', async (db) => {
+    const cleared = await db.execute(sql`
+      update douyin_link_messages
+      set user_name = ''
+      where user_name like '%**'`)
+    const clearedRecipient = await db.execute(sql`
+      update douyin_link_messages
+      set to_user_name = ''
+      where to_user_name like '%**'`)
+    const clearedProfiles = await db.execute(sql`
+      update douyin_link_users
+      set nickname = ''
+      where nickname like '%**'`)
+    return (
+      (Number(cleared.affectedRows ?? 0) || 0) +
+      (Number(clearedRecipient.affectedRows ?? 0) || 0) +
+      (Number(clearedProfiles.affectedRows ?? 0) || 0)
+    )
+  })
+}
+
+/* --------------------------------------------------------------- 画像（多账号） *//**
  * 画像：**一个人可以有多个抖音账号，但画像只有一个**（用户 2026-10-11 的要求）。
  *
  * 三条口径：

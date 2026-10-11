@@ -626,6 +626,115 @@ const namedProfile = (await mapper.listUsersPage(NAMED_ROOM, 'recent', '', 50)).
 check('档案里的粉丝数没被这次补名弄丢', namedProfile?.follower, 362)
 check('档案里的抖音号还在', namedProfile?.displayId, '1023428548')
 
+/* ------------------------------------------------ 历史空名字行的一次性回填 */
+
+console.log('\n=== 8. 历史回填：老的空名字行按档案补上（幂等、只补空的） ===')
+/**
+ * 造三条历史行（模拟修复前落库的形态）与一条**已有名字**的行：
+ * - 空名字 + 档案里有 → 该补上（就是用户截图那条的形态）；
+ * - 空名字 + 档案里是打码名（`秋***`）→ **不补**（写进消息行没意义）；
+ * - 空名字 + 档案里没有这个人 → 不补；
+ * - 已有名字 → 一个字都不许动。
+ */
+const BF_ROOM = '880000000104'
+await mapper.upsertRoom({ webRid: BF_ROOM, roomId: '1004', title: '回填房间', anchor: '', cover: '', onlineText: '', status: 'live' })
+await mapper.insertMessages([
+  { webRid: BF_ROOM, sessionId: 1, kind: 'chat', userId: MYSTERY_ID, userName: '', content: '空名字要补', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt },
+  { webRid: BF_ROOM, sessionId: 1, kind: 'chat', userId: 'anon:111111#M***', userName: '', content: '打码名不补', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt + 1 },
+  { webRid: BF_ROOM, sessionId: 1, kind: 'chat', userId: '99999999999', userName: '', content: '查无此人不补', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt + 2 },
+  { webRid: BF_ROOM, sessionId: 1, kind: 'chat', userId: MYSTERY_ID, userName: '原来的名字', content: '已有名字不动', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt + 3 }
+])
+await mapper.upsertUserDeltas([
+  {
+    webRid: BF_ROOM,
+    userId: MYSTERY_ID,
+    displayId: '1023428548',
+    nickname: '神秘人七阶',
+    gender: 0,
+    signature: '',
+    city: '',
+    avatar: '',
+    following: 296,
+    follower: 362,
+    honorLevel: 35,
+    fansClubLevel: 0,
+    badges: '[]',
+    secUid: '',
+    delta: { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 },
+    firstSeen: startedAt,
+    lastSeen: startedAt
+  },
+  {
+    webRid: BF_ROOM,
+    userId: 'anon:111111#M***',
+    displayId: '',
+    nickname: 'M***',
+    gender: 0,
+    signature: '',
+    city: '',
+    avatar: '',
+    following: 0,
+    follower: 0,
+    honorLevel: 0,
+    fansClubLevel: 0,
+    badges: '[]',
+    secUid: '',
+    delta: { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 },
+    firstSeen: startedAt,
+    lastSeen: startedAt
+  }
+])
+const beforeBackfill = await mapper.queryMessages({ webRid: BF_ROOM, limit: 50 })
+const filled = await mapper.backfillMessageNames()
+console.log(`      回填了 ${filled} 行`)
+const afterBackfill = (await mapper.queryMessages({ webRid: BF_ROOM, limit: 50 })).rows
+const nameOf = (text) => afterBackfill.find((row) => row.text === text)?.user
+check('空名字 + 档案有真名 → 补上', nameOf('空名字要补'), '神秘人七阶')
+check('打码名（`M***`）不往消息行里写', nameOf('打码名不补'), '')
+check('档案里没有这个人 → 不补', nameOf('查无此人不补'), '')
+check('已有名字的行一个字都没动', nameOf('已有名字不动'), '原来的名字')
+check('回填行数 = 1（只补该补的那一行）', filled, 1)
+check('幂等：再跑一遍 0 行', await mapper.backfillMessageNames(), 0)
+check('回填前后总行数不变（只改名字，不增删行）', afterBackfill.length, beforeBackfill.rows.length)
+
+/** 装载时那一步（`hub.backfillNamesOnce`）的契约：清垃圾 → 回填真名 → 写一次性标记 */
+const BF2_ROOM = '880000000105'
+/** 这个工装全程是**内存库同一次装载**，所以先把上一个用例写的标记清掉，模拟「新装一版第一次启动」 */
+await mapper.setMeta('messages.names-backfilled', '')
+await mapper.upsertRoom({ webRid: BF2_ROOM, roomId: '1005', title: '装载回填房间', anchor: '', cover: '', onlineText: '', status: 'live' })
+await mapper.insertMessages([
+  { webRid: BF2_ROOM, sessionId: 1, kind: 'chat', userId: MYSTERY_ID, userName: '', content: '装载时补我', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt },
+  { webRid: BF2_ROOM, sessionId: 1, kind: 'chat', userId: '817656103699223', userName: '张**', content: '垃圾名要清', count: 0, diamonds: 0, toUserId: '', toUserName: '', orderKey: '', atMs: startedAt + 1 }
+])
+await mapper.upsertUserDeltas([
+  {
+    webRid: BF2_ROOM,
+    userId: MYSTERY_ID,
+    displayId: '1023428548',
+    nickname: '神秘人七阶',
+    gender: 0,
+    signature: '',
+    city: '',
+    avatar: '',
+    following: 296,
+    follower: 362,
+    honorLevel: 35,
+    fansClubLevel: 0,
+    badges: '[]',
+    secUid: '',
+    delta: { chat: 0, enter: 0, like: 0, follow: 0, gift: 0, diamonds: 0 },
+    firstSeen: startedAt,
+    lastSeen: startedAt
+  }
+])
+await analyzerHub.backfillNamesForTest()
+const bootRows = (await mapper.queryMessages({ webRid: BF2_ROOM, limit: 20 })).rows
+check('装载时那一步把空名字补上了', bootRows.find((row) => row.text === '装载时补我')?.user, '神秘人七阶')
+check('装载时那一步把历史打码名清掉了', bootRows.find((row) => row.text === '垃圾名要清')?.user, '')
+check('跑过一次后写了标记（下次启动不再全表扫）', await mapper.getMeta('messages.names-backfilled'), '1')
+await analyzerHub.backfillNamesForTest()
+check('再跑一次不再改动任何行（有标记直接返回）', await mapper.backfillMessageNames(), 0)
+
 /* ------------------------------------------------ 真库副本上的历史重排（另开一个进程做） */
 if (sourceDir) {
   console.log('\n=== 6. 真库副本上的重排 ===')

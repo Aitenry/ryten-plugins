@@ -243,6 +243,14 @@ const USERS_REPAIRED_KEY = 'users.repaired'
  */
 const ANON_SPLIT_KEY = 'identity.anon-split'
 
+/**
+ * 「空名字回填」跑没跑过的标记（见 `backfillNamesOnce`）。
+ *
+ * 与补档案/匿名拆分同一个道理：那是一次性的历史修复（补名字那条链以前只对礼物类生效），
+ * 跑完之后新数据写入时名字就是对的，没必要每次启动再全表扫一遍。
+ */
+const NAMES_BACKFILLED_KEY = 'messages.names-backfilled'
+
 export const DEFAULT_SETTINGS: LiveSettings = {
   // 只放声音，档位越低越省流量（实测各档音频轨是一样的）
   quality: 'SD2',
@@ -461,6 +469,7 @@ export class AnalyzerHub {
     void this.cleanup()
     void this.repairUserRowsOnce()
     void this.splitAnonymousOnce()
+    void this.backfillNamesOnce()
     /**
      * 打开应用时**默认选中最近在监控的那个房间**：清单恢复了但一个都没选中的话，
      * 详情页是「先从左边选一个直播间」的空态——用户每次打开都要多点一下（而且我自己的
@@ -522,6 +531,14 @@ export class AnalyzerHub {
   }
 
   /**
+   * 工装用：把「空名字回填」那一步真跑一遍（`backfillNamesOnce` 是装载时 fire-and-forget 的私有方法，
+   * 工装要能直接调它验证「清垃圾 + 回填真名 + 写标记」三件事）。
+   */
+  async backfillNamesForTest(): Promise<void> {
+    await this.backfillNamesOnce()
+  }
+
+  /**
    * **补档案（跑一次）**：把 0.15.9 以前那个配额 bug 漏掉的历史档案行按消息流水补出来。
    *
    * 三个决定：
@@ -548,6 +565,41 @@ export class AnalyzerHub {
       }
     } catch (error) {
       logger.warn('[douyin-link] 补档案失败（下次启动会再试）:', describe(error))
+    }
+  }
+
+  /**
+   * **空名字回填（跑一次）**：把「消息行没名字、但我们档案里有」的历史行补上名字。
+   *
+   * 由来（2026-10-11 用户报障「神秘人七阶获取不了名称」）：补名字那条链以前只对**礼物类帧**生效，
+   * 弹幕/进场帧没带名字时从来没查过库；再叠上「名字被当占位清掉」那个 bug，
+   * 库里就留下一批「档案有名字、消息行空着」的历史行。运行期两处都已修，这份迁移补历史。
+   *
+   * 三个决定（照 `repairUserRowsOnce` 的口径）：
+   * 1. **装载时 fire-and-forget**：全表回填不该拖慢装载；
+   * 2. **只跑一次**（`messages.names-backfilled` 标记）：跑失败不写标记，下次启动再试；
+   * 3. 补上名字会把房间列表的「用户 N / 消息数」口径带准，所以顺手作废两个缓存。
+   */
+  private async backfillNamesOnce(): Promise<void> {
+    try {
+      if ((await store.getMeta(NAMES_BACKFILLED_KEY)) === '1') return
+      const startedAt = Date.now()
+      /**
+       * **顺序要紧**：先清历史垃圾名（`张**`/`秋***`），再按档案回填真名。
+       * 反过来的话，那些垃圾名会先被「保存下来」当证据——它们本来就不该存在。
+       */
+      const cleared = await store.clearMaskNames()
+      const filled = await store.backfillMessageNames()
+      await store.setMeta(NAMES_BACKFILLED_KEY, '1')
+      logger.info(
+        `[douyin-link] 名字修复：清掉 ${cleared} 行历史打码名、按档案补回 ${filled} 行真名（+${since(startedAt)}）`
+      )
+      if (filled > 0 || cleared > 0) {
+        this.storeCache.at = 0
+        this.dbCache.at = 0
+      }
+    } catch (error) {
+      logger.warn('[douyin-link] 名字修复失败（下次启动会再试）:', describe(error))
     }
   }
 

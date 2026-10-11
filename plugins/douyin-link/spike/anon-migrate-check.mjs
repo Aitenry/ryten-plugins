@@ -226,6 +226,34 @@ if (room) {
   }
 }
 
+/**
+ * 接着做**空名字回填 + 历史打码名清理**（同一份副本、同一进程）：
+ * 这是「神秘人七阶获取不了名称」那个报障的历史修复。顺序与 `hub.backfillNamesOnce` 一致：
+ * 先清垃圾（打码名），再按同一房间的档案回填真名。
+ */
+console.log('\n=== 空名字回填 + 历史打码名清理（副本）===')
+const maskBefore = await count('douyin_link_messages', `user_name like '%**' or to_user_name like '%**'`)
+const clearedRows = await mapper.clearMaskNames()
+const maskAfter = await count('douyin_link_messages', `user_name like '%**' or to_user_name like '%**'`)
+console.log(`      打码名行 ${maskBefore} → ${maskAfter}（清了 ${clearedRows} 行）`)
+check('历史打码名清干净了', maskAfter, 0)
+check('清理也是幂等的：再跑一遍 0 行', await mapper.clearMaskNames(), 0)
+
+const emptyBefore = await count('douyin_link_messages', `user_name = '' and user_id <> ''`)
+const fillable = await rawQuery(
+  `select count(*)::int as value from douyin_link_messages m
+     join douyin_link_users u on u.web_rid = m.web_rid and u.user_id = m.user_id
+    where m.user_name = '' and m.user_id <> '' and u.nickname <> ''
+      and u.nickname not like '%**' and u.nickname not like '匿名' and u.nickname not like '神秘人'`
+)
+console.log(`      回填前：空名字行 ${emptyBefore} 条，其中档案里有可用名字的 ${fillable.rows?.[0]?.value ?? 0} 条`)
+const filledRows = await mapper.backfillMessageNames()
+const emptyAfter = await count('douyin_link_messages', `user_name = '' and user_id <> ''`)
+console.log(`      回填了 ${filledRows} 行；空名字行 ${emptyBefore} → ${emptyAfter}`)
+check('回填行数 == 档案里有可用名字的那些行', filledRows, Number(fillable.rows?.[0]?.value ?? 0))
+check('幂等：再跑一遍 0 行', await mapper.backfillMessageNames(), 0)
+check('清完之后消息行里依然没有打码名', await count('douyin_link_messages', `user_name like '%**' or to_user_name like '%**'`), 0)
+
 await closeOrm()
 console.log(`\n=== 小结 ===\n${failures === 0 ? '✓ 全部断言通过' : `✗ ${failures} 项断言失败`}`)
 rmSync(workDir, { recursive: true, force: true })
