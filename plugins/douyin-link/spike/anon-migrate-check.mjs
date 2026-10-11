@@ -129,6 +129,8 @@ console.log(`=== 副本：${dataDir} ===`)
 const UNSET = `(user_id = '111111' or (user_id like 'anon:%' and position('#' in user_id) = 0))`
 const beforeMessages = await count('douyin_link_messages', UNSET)
 const beforeUsers = await count('douyin_link_users', UNSET)
+/** 已经拆好的行（重排前就存在的）——真库可能已经迁过，所以要用**增量**核，不能只看总数 */
+const beforeSplitMessages = await count('douyin_link_messages', `user_id like 'anon:%#%'`)
 const beforeNames = await rawQuery(
   `select count(distinct (web_rid || '|' || user_name))::int as value from douyin_link_messages where ${UNSET}`
 )
@@ -159,7 +161,16 @@ console.log(
     `按马甲分开的档案 ${splitUsers} 条、消息 ${splitMessages} 条`
 )
 check('旧的共享档案行清零', afterUsers, 0)
-check('消息行全部换到按马甲分的身份上（占位名帧除外）', afterMessages + splitMessages, beforeMessages)
+/**
+ * 用**增量**核：`还挤在共用 id 上的行` 减少了多少，`按马甲分开的行` 就该增加多少。
+ * （不能直接比总数：真库可能已经迁过一轮，那时 before 里就已经有拆好的行了。）
+ */
+check(
+  '消息行是「换身份」不是「复制/丢弃」：两边增量相等',
+  beforeMessages - afterMessages,
+  splitMessages - beforeSplitMessages
+)
+check('消息行总数没变（合计守恒）', afterMessages + splitMessages, beforeMessages + beforeSplitMessages)
 /**
  * 「拆出来的身份数」= **每个房间各自**的马甲数，所以对不上「所有房间的马甲并集」。
  * 用 `(房间, 马甲)` 这个组合数来核：拆出来的档案应该正好等于它（同一房间同一个马甲只留一行）。
@@ -194,6 +205,25 @@ if (room) {
    */
   const overloaded = (rows.rows ?? []).filter((row) => Number(row.chat) < Number(row.chat_rows)).length
   check('没有「档案比流水还少」的人（那说明行被算到别人头上）', overloaded, 0)
+
+  /**
+   * 「匿名的人能不能还原成真账号」——**这条断言是真库现状的结论**（用户 2026-10-12 的要求）：
+   * 主进程的候选查询（`getAnonymousCandidates`：id 以马甲尾段结尾 或 昵称就是这个马甲名）
+   * 在这份真库上**一条都收不到** → 「查看真实资料」按钮点了只会如实回 `anonymousMasked`。
+   *
+   * 为什么真库里必然没有：马甲名尾段是**真实 id 的尾段**，而一个真实 id 是它自己的账号，
+   * 昵称不会是这个马甲名；所以这个索引只有「那人自己在别的房间露过真名/真 id」时才可能命中。
+   * 哪天这条断言变红（收得到候选了），就说明真库形态变了——那时再回来看还原这条路。
+   */
+  const probe = (rows.rows ?? []).find((row) => /^dou\d+$/.test(String(row.nickname))) ?? rows.rows?.[0]
+  if (probe) {
+    const candidates = await mapper.getAnonymousCandidates(room, String(probe.nickname), String(probe.nickname).replace(/^dou/, ''))
+    console.log(
+      `      匿名还原线索（房间 ${room} / 马甲 ${probe.nickname}）：` +
+        `库里候选 ${candidates.length} 个（id 尾段或同名）`
+    )
+    check('真库现状：匿名还原的本地候选为空 → 按钮只会如实回「还原不了」', candidates.length, 0)
+  }
 }
 
 await closeOrm()

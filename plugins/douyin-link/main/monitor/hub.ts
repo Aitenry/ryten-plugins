@@ -65,7 +65,8 @@ import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { since, withTimeout } from '../util/deadline'
-import { anonymousUserId, displayDisplayId, displayNickname, isAnonymousName } from '../../shared/anonymous'
+import { anonymousMaskTail, anonymousUserId, displayDisplayId, displayNickname, isAnonymousId, isAnonymousName } from '../../shared/anonymous'
+import { revealAnonymousProfile } from '../douyin/anonymous-reveal'
 import { COOKIE_MAX_LENGTH, clampCookie } from '../../shared/cookie'
 import { monthBucketRange, monthOf } from '../../shared/gift-calendar'
 
@@ -3005,6 +3006,13 @@ export class AnalyzerHub {
   async revealMystery(userId: string, webRid = ''): Promise<MysteryReveal> {
     const id = String(userId ?? '').trim()
     if (!id) return { ok: false, code: 'badInput' }
+    /**
+     * **匿名的人走另一条路**（用户 2026-10-12：「我需要匿名用户，可以和神秘人一样获取其信息」）：
+     * 帧里给的 id 是所有人共用的占位串、昵称是马甲名，拿占位 id 去查抖音只会拿到 `3170`。
+     * 那条路会先按**马甲名尾段**在我们自己库里核对候选，核上才去查抖音——细节与三条实测死路
+     * 见 `../douyin/anonymous-reveal.ts`。
+     */
+    if (isAnonymousId(id)) return this.revealAnonymous(id, webRid)
     return revealMysteryProfile(id, async (raw) => {
       if (!webRid) return
       await store.upsertUserStatic(webRid, [
@@ -3025,6 +3033,46 @@ export class AnalyzerHub {
       // 下次 `user-avatar` 自然会去下载那一份（渲染层那边按「房间 + 用户」缓存，见 forgetAvatar）
       logger.info(`[douyin-link] 真实资料已回填：${raw.userId} @ ${webRid}（${raw.nickname}）`)
     })
+  }
+
+  /**
+   * 匿名档案的「查看真实资料」：拿**马甲名**找线索，找到真 id 再查抖音。
+   *
+   * 回填与神秘人那条链共用同一套（`upsertUserStatic` 只写静态字段、不动统计）。
+   * 查不到的两种情况（没有线索 / 本地也核不上）都回 `anonymousMasked`，
+   * 界面照实说明「匿名身份在抖音那边不可还原」，而不是留一个转圈到超时的按钮。
+   */
+  private async revealAnonymous(userId: string, webRid: string): Promise<MysteryReveal> {
+    const profile = webRid ? await store.getUser(webRid, userId) : undefined
+    const mask = profile?.nickname ?? ''
+    return revealAnonymousProfile(
+      {
+        webRid,
+        userId,
+        mask,
+        follower: profile?.follower ?? 0,
+        following: profile?.following ?? 0
+      },
+      () => store.getAnonymousCandidates(webRid, mask, anonymousMaskTail(mask)),
+      async (raw) => {
+        if (!webRid) return
+        await store.upsertUserStatic(webRid, [
+          {
+            userId: raw.userId,
+            displayId: raw.displayId,
+            nickname: raw.nickname,
+            gender: raw.gender,
+            signature: raw.signature,
+            city: raw.region,
+            avatar: raw.avatarUrl,
+            following: raw.following,
+            follower: raw.follower,
+            secUid: raw.secUid
+          }
+        ])
+        logger.info(`[douyin-link] 匿名还原的资料已回填：${raw.userId} @ ${webRid}（${raw.nickname}）`)
+      }
+    )
   }
 
   async clearUsers(webRid = ''): Promise<void> {

@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# 真库副本（工装排练用，绝不入库）
+RytenBenchDB/
+

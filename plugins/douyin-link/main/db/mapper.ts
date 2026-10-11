@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, ilike, inArray, like, lte, ne, notInArray, notLike, or, sql, type SQL } from 'drizzle-orm'
 import logger from 'electron-log'
 import { withOrm } from '@host/main/database/orm'
 import type {
@@ -1276,6 +1276,42 @@ export async function splitAnonymousIdentities(): Promise<number> {
     touched += Number(received.affectedRows ?? 0) || 0
 
     return touched
+  })
+}
+
+/**
+ * **匿名身份还原用的候选账号**（2026-10-12，见 `main/douyin/anonymous-reveal.ts`）。
+ *
+ * 为什么需要它：匿名观众的真实 id 在抖音那边查不到（三条实测死路见那个文件），
+ * 唯一还可能指向真人的线索是**马甲名里那截数字**（`dou2056511` → `2056511`，实测是真实 id 的尾段）。
+ * 所以拿它在**我们自己已经见过的身份**里收窄一遍——`(用户 id 以该尾段结尾)` 或者
+ * `(昵称就是这个马甲名)`，外加本房间画像里已经绑定的账号。
+ *
+ * **这只是「收窄」，不是结论**：判定必须再过 `matchAnonymousCandidate`（尾段 + 粉丝 + 关注三条全中）。
+ * 顺序按「最近出现」排，界面上真要还原时也只认全中的那一条。
+ */
+export async function getAnonymousCandidates(
+  webRid: string,
+  mask: string,
+  tail: string,
+  limit = 40
+): Promise<UserRankRow[]> {
+  if (!tail && !mask) return []
+  void webRid
+  await schemaReady
+  return withOrm('douyin-link.anonymousCandidates', async (db) => {
+    const filters = []
+    if (tail) filters.push(like(douyinLinkUsers.userId, `%${tail}`))
+    if (mask) filters.push(eq(douyinLinkUsers.nickname, mask))
+    const rows = await db
+      .select()
+      .from(douyinLinkUsers)
+      .where(
+        and(ne(douyinLinkUsers.userId, ANONYMOUS_ID), notLike(douyinLinkUsers.userId, `${ANON_ID_PREFIX}%`), or(...filters))
+      )
+      .orderBy(desc(douyinLinkUsers.lastSeen))
+      .limit(Math.min(Math.max(1, limit), 200))
+    return rows.map(toRankRow)
   })
 }
 

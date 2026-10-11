@@ -126,6 +126,7 @@ export { analyzerHub } from '${slash(join(PLUGIN, 'main/monitor/hub.ts'))}'
 export * as mapper from '${slash(join(PLUGIN, 'main/db/mapper.ts'))}'
 export { schemaReady } from '${slash(join(PLUGIN, 'main/db/ddl.ts'))}'
 export * as anon from '${slash(join(PLUGIN, 'shared/anonymous.ts'))}'
+export { matchAnonymousCandidate, revealAnonymousProfile } from '${slash(join(PLUGIN, 'main/douyin/anonymous-reveal.ts'))}'
 export { closeOrm } from '@host/main/database/orm'
 `,
     loader: 'ts',
@@ -154,7 +155,7 @@ export { closeOrm } from '@host/main/database/orm'
 })
 
 const mod = await import(pathToFileURL(outfile).href)
-const { analyzerHub, mapper, anon } = mod
+const { analyzerHub, mapper, anon, matchAnonymousCandidate, revealAnonymousProfile } = mod
 
 let failures = 0
 const check = (label, actual, expected) => {
@@ -384,8 +385,36 @@ check('每条弹幕只算在说那句话的人头上（旧的合账被丢掉、�
 /** 三个身份加起来仍是 4 条（没有凭空多出行来） */
 check('总行数没变（拆分不复制数据）', afterRows.length, 4)
 
-/* ------------------------------------------------ 真库副本上的历史重排（另开一个进程做） */
+/* ------------------------------------------------ 「查看真实资料」：匿名的人也要能点（用户要求） */
 
+console.log('\n=== 6. 匿名档案的「查看真实资料」：按钮能点、判定要严 ===')
+const mask = 'dou2056511'
+const target = { mask, follower: 9974, following: 12 }
+const candidate = (userId, nickname, follower, following) => ({ userId, nickname, follower, following })
+check(
+  '四条全中才算同一个人（id 尾段 + 昵称尾段 + 粉丝 + 关注）',
+  matchAnonymousCandidate(candidate('73500002056511', mask, 9974, 12), target),
+  true
+)
+check('id 尾段不对 → 不算', matchAnonymousCandidate(candidate('73500002056512', mask, 9974, 12), target), false)
+check('昵称尾段不对（另一个人）→ 不算', matchAnonymousCandidate(candidate('73500002056511', 'dou9999999', 9974, 12), target), false)
+check('粉丝数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9973, 12), target), false)
+check('关注数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9974, 13), target), false)
+check('昵称不是马甲名（真名字）→ 不算', matchAnonymousCandidate(candidate('73500002056511', '张三', 9974, 12), target), false)
+
+/** 正式链路：库里没有全中的候选 → 如实回 `anonymousMasked`，绝不给「猜的那个人」 */
+const masked = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111#dou2056511', ...target }, async () => [])
+check('核不上 → 回 anonymousMasked（如实说还原不了）', masked, { ok: false, code: 'anonymousMasked' })
+/** 连马甲名都没有（空名帧）→ 同样如实回，不去打抖音 */
+const noLead = await revealAnonymousProfile(
+  { webRid: ROOM, userId: 'anon:111111', mask: '', follower: 0, following: 0 },
+  async () => {
+    throw new Error('不该查库')
+  }
+)
+check('没有线索 → 回 anonymousMasked，且不查库', noLead, { ok: false, code: 'anonymousMasked' })
+
+/* ------------------------------------------------ 真库副本上的历史重排（另开一个进程做） */
 if (sourceDir) {
   console.log('\n=== 6. 真库副本上的重排 ===')
   console.log(`      ⚠️ 这个工装的内存库已经建好了，不能中途换库——真库副本请跑：`)

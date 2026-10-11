@@ -215,6 +215,8 @@ const handlers = () => {
   map.set(`${PREFIX}user-badges`, () => [])
   map.set(`${PREFIX}user-avatar`, () => '')
   map.set(`${PREFIX}user-get`, () => anonProfile)
+  /** 「查看真实资料」：匿名的人现在也点得动；主进程核不上就回 `anonymousMasked`（如实说还原不了） */
+  map.set(`${PREFIX}reveal-mystery`, () => ({ ok: false, code: 'anonymousMasked' }))
   map.set(`${PREFIX}user-identity`, () => ({
     identityId: 0,
     name: '',
@@ -469,10 +471,29 @@ console.log('\n=== 4. 身份展示与入口 ===')
 check('「用户 id」显示抖音真给的 111111（不是内部键）', text().includes('用户 id 111111'), true)
 check('内部键（anon:…）不泄漏到界面', text().includes('anon:'), false)
 check('没有「关联账号」入口（匿名占位 id 绑了没意义）', Boolean(buttonByLabel(zh['douyin-link'].users.identityBind)), false)
-check('没有「查看真实资料」按钮（拿占位 id 查也查不到）', Boolean(buttonByLabel(zh['douyin-link'].users.revealButton)), false)
 check('给「分析用户」入口', Boolean(buttonByLabel(zh['douyin-link'].users.analyzeButton)), true)
 check('弹幕里点昵称查的就是这个身份', calls.filter((call) => call.channel === `${PREFIX}user-get`).at(-1)?.args?.[1], ANON_ID)
 check('历史弹幕按这个身份查（不是占位 111111）', calls.filter((call) => call.channel === `${PREFIX}messages-query`).at(-1)?.args?.[0]?.userId, ANON_ID)
+
+console.log('\n=== 5. 匿名的人也能点「查看真实资料」（用户 2026-10-12 的要求）===')
+/**
+ * 用户原话：「我需要匿名用户，可以和神秘人一样获取其信息」。
+ * 界面这边要保证的是**按钮在、点了真查、查不到如实说**——
+ * 「能不能查到」由主进程那条链决定（三条实测死路见 `main/douyin/anonymous-reveal.ts`）。
+ */
+const revealButton = buttonByLabel(zh['douyin-link'].users.revealButton)
+check('有「查看真实资料」按钮（0.15.22 里是藏着不给的）', Boolean(revealButton), true)
+check('按钮只要图标（文案在 title / aria-label）', revealButton?.textContent?.trim() ?? 'x', '')
+check('点它', await clickElement(revealButton), true)
+await settle(400)
+const revealCall = calls.filter((call) => call.channel === `${PREFIX}reveal-mystery`).at(-1)
+check('查的是这个匿名身份 + 当前房间', revealCall?.args, [ANON_ID, ROOM])
+check(
+  '核不上时给一行如实的失败文案',
+  text().includes(zh['douyin-link'].users.revealErrorAnonymousMasked),
+  true
+)
+check('旧的「数据里查不到这个人」灰字不再出现', text().includes('数据里查不到这个人'), false)
 
 console.log(`\n=== 小结 ===\n${failures === 0 ? '✓ 全部断言通过' : `✗ ${failures} 项断言失败`}`)
 rmSync(workDir, { recursive: true, force: true })

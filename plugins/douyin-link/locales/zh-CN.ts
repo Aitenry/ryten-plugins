@@ -359,8 +359,10 @@ export const DouyinLinkZhCN = {
        * 查看真实资料（用户档案弹窗里，名字行右边那枚**纯图标**按钮）：
        * 查到的资料**回填到上面的档案里**，不再另开一块内容，所以这里只需要
        * 按钮名（title / aria-label）、匿名占位 id 的说明、几个库里没有的字段名与失败文案。
+       *
+       * 匿名的人（0.15.24 起）**也走同一个按钮**：点下去主进程会按马甲名尾段在我们自己库里
+       * 核对候选，核上才去查抖音；核不上回 `anonymousMasked`，用下面那条文案如实说明。
        */
-      revealAnonymousOnly: '抖音对这个匿名用户只发了占位 id（111111），真实账号标识被抹掉了，数据里查不到这个人',
       revealButton: '查看真实资料',
       revealWorks: '作品',
       revealLikes: '获赞',
@@ -370,6 +372,7 @@ export const DouyinLinkZhCN = {
       revealErrorNetwork: '查询失败（网络被挡或接口没响应）',
       revealErrorNotFound: '抖音那边没有这个账号的资料（可能已注销）',
       revealErrorBadResponse: '抖音返回的内容看不懂',
+      revealErrorAnonymousMasked: '抖音只给了共用的占位 id，搜名字也搜不到这个人，还原不了',
       /* 「分析用户」：按库里的数据用确定性规则算法生成画像（不依赖大模型） */
       analyzeButton: '分析用户',
       analyzeTitle: '用户画像',

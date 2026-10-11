@@ -349,11 +349,11 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       /*
        * Reveal real profile (the icon-only button next to the portrait actions in the profile
        * dialog): what comes back is written into the profile above, so only the button name
-       * (title / aria-label), the anonymous-placeholder note, the few extra field names and the
-       * failure copy are needed here.
+       * (title / aria-label), the failure copy and the few extra field names are needed here.
+       *
+       * Anonymous viewers use the SAME button since 0.15.24: the main process first checks the
+       * mask's trailing digits against accounts we already know, and only then asks Douyin.
        */
-      revealAnonymousOnly:
-        'Douyin only sends a placeholder id (111111) for this anonymous user — the real account is not recoverable from the data',
       revealButton: 'Reveal real profile',
       revealWorks: 'Videos',
       revealLikes: 'Likes',
@@ -363,6 +363,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       revealErrorNetwork: 'Lookup failed (network blocked or no response)',
       revealErrorNotFound: 'Douyin has no profile for this account (may be deactivated)',
       revealErrorBadResponse: 'Unrecognized response from Douyin',
+      revealErrorAnonymousMasked: 'Douyin only sent the shared placeholder id, and the masked name is not searchable — this identity cannot be recovered',
       /* "Analyze user": deterministic rules over stored data (no LLM) */
       analyzeButton: 'Analyze user',
       analyzeTitle: 'User portrait',

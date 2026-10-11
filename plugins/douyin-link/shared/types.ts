@@ -195,7 +195,18 @@ export interface MysteryProfile {
 /** 「查看神秘人信息」的结果：成功给资料，失败给一个可翻译的失败码 */
 export type MysteryReveal =
   | { ok: true; profile: MysteryProfile }
-  | { ok: false; code: 'badInput' | 'network' | 'notFound' | 'badResponse'; detail?: string }
+  | {
+      ok: false
+      /**
+       * - `badInput`：不是可查的用户 id；
+       * - `network` / `badResponse`：抖音那边没回话 / 回的看不懂；
+       * - `notFound`：抖音明说没有这个账号的资料；
+       * - `anonymousMasked`：**这是匿名观众**（帧里只有共用占位 id `111111` + 一个马甲名），
+       *   抖音的资料接口、昵称搜索、id 反查三条路都实测查不到（见 `main/douyin/anonymous-reveal.ts`）。
+       */
+      code: 'badInput' | 'network' | 'notFound' | 'badResponse' | 'anonymousMasked'
+      detail?: string
+    }
 
 /** 一个房间的互动计数（内存运行态与库里统计都用它） */
 export interface LiveInteractions {

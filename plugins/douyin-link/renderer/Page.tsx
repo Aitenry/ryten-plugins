@@ -1324,17 +1324,17 @@ function UserProfileModal(props: {
   /**
    * 能不能「查看真实资料」：只要有**可查的用户 id**（数字串）就放出来——不再猜谁「算匿名」。
    *
-   * 唯一的例外是抖音的匿名**占位 id `111111`**：帧里的 id/抖音号/secUid 全是它，真实账号标识被抹掉，
-   * 拿它查一定 `notFound`（2026-10-09 批量抓帧实测），所以不给按钮、改成一句如实说明。
-   *
    * ⚠️ 这里的 `props.userId` 可能是**内部身份键**（`anon:111111#dou2056511`，见
    * `shared/anonymous.ts`）：匿名的人按马甲分开记账之后，档案弹窗拿到的就是它。
    * 所以判「是不是匿名」要先 `rawDouyinId()` 脱壳，展示抖音 id 的地方也一样。
    */
   const rawId = rawDouyinId(props.userId)
-  const revealable = !loading && /^\d{4,}$/.test(props.userId) && !isAnonymousId(props.userId)
-  /** 这条档案是匿名占位身份（可能已经按马甲分开）：真实账号标识在抖音那边就不可还原 */
-  const anonymousOnly = !loading && isAnonymousId(rawId)
+  /**
+   * 匿名的人**也给这枚按钮**（用户 2026-10-12：「我需要匿名用户，可以和神秘人一样获取其信息」）：
+   * 点下去主进程会按马甲名尾段在库里核对候选、核上才去查抖音，核不上由失败文案如实说明
+   * （见 `main/douyin/anonymous-reveal.ts`）。所以这里不再按匿名与否区分按钮。
+   */
+  const revealable = !loading && (/^\d{4,}$/.test(props.userId) || isAnonymousId(rawId))
 
   useEffect(() => {
     let alive = true
@@ -1592,7 +1592,7 @@ function UserProfileModal(props: {
                   ) : null}
                   {/* 关联账号：一个图标入口（不另开平行按钮），点开才出现搜索框。
                       匿名占位 id（111111）是抖音给所有隐藏身份的人共用的，绑它没有意义，不给入口 */}
-                  {!anonymousOnly ? (
+                  {!isAnonymousId(rawId) ? (
                     <Button
                       size="small"
                       type={bindOpen ? 'primary' : 'text'}
@@ -1788,13 +1788,11 @@ function UserProfileModal(props: {
         )}
 
         {/*
-          匿名占位 id（111111）：抖音给所有隐藏身份的人共用的 id，帧里的 id/抖音号/secUid 全被抹平，
-          没有可查的账号标识——与其给一个点了必然失败的按钮，不如把话说明白
-          （本插件的纪律：宁可没有，不给错的）。**一行灰字**，不另开一块内容。
+          匿名占位 id 的那条「数据里查不到这个人」的灰字**去掉了**（用户 2026-10-12：
+          「我需要匿名用户，可以和神秘人一样获取其信息」）——现在匿名的人也走同一枚
+          「查看真实资料」按钮：主进程先按马甲名尾段在库里核对候选，核上就去查抖音；
+          核不上就由失败文案如实说明（见 `revealErrorAnonymousMasked`）。
         */}
-        {anonymousOnly ? (
-          <span className="text-xs opacity-60">{t('douyin-link.users.revealAnonymousOnly')}</span>
-        ) : null}
 
         {/* 「查看真实资料」失败：一行如实的失败原因（不占一块面板；成功时不出现，因为内容已经回填上去了） */}
         {reveal && !reveal.ok ? (
@@ -2528,7 +2526,10 @@ function UserAnalysisPanel(props: {
  * 「点击后更新用户的信息，回填页面上面的内容，不要独立开个内容」），
  * 原来那张独立的「真实资料」卡片（`RevealedIdentity`）因此删掉了。
  */
-function revealErrorText(t: Translate, code: 'badInput' | 'network' | 'notFound' | 'badResponse'): string {
+function revealErrorText(
+  t: Translate,
+  code: 'badInput' | 'network' | 'notFound' | 'badResponse' | 'anonymousMasked'
+): string {
   const key = `douyin-link.users.revealError${code[0].toUpperCase()}${code.slice(1)}`
   const text = t(key)
   return text.startsWith('douyin-link.') ? t('douyin-link.users.revealFailed') : text

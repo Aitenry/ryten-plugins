@@ -56,6 +56,19 @@ export function isAnonymousId(id: string | null | undefined): boolean {
 }
 
 /**
+ * 马甲名里那截数字（`dou2056511` → `dou` 后面的 `2056511`）。
+ *
+ * 为什么留着它（2026-10-12）：真机实测马甲名就是 `dou` + **真实 id 的尾段**，
+ * 所以这串数字是唯一一条还可能指向真人的线索——虽然它单独**不足以**反查出账号
+ * （见 `main/douyin/anonymous-reveal.ts` 的三条实测死路），但拿它去**我们自己库里已有**
+ * 的身份上核一遍是免费的，核上就是白捡的还原。
+ */
+export function anonymousMaskTail(mask: string | null | undefined): string {
+  const match = /^dou(\d{5,})$/i.exec(String(mask ?? '').trim())
+  return match?.[1] ?? ''
+}
+
+/**
  * 一个名字是不是**信息量为零**的占位名（空串 / 「匿名」/「神秘人」/「anonymous」）。
  *
  * 与马甲名（`dou2056511` 这类）的区别：马甲名是抖音**给这个人**的名字，可以用来区分人；
