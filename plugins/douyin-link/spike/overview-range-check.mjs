@@ -23,10 +23,15 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = new URL('../../../', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
-const bundlePath = join(ROOT, 'dist/douyin-link/renderer.mjs')
-const distDir = join(ROOT, 'dist/douyin-link')
+/**
+ * 被测产物目录：默认是本地构建的 `dist/douyin-link`。
+ * `DY_DIST=<解压出来的目录>` 可以指到**已发布的 zip**（把 Release 资产解开跑同一套断言，
+ * 验的就是「发出去的那份字节」而不只是「我本地编出来的那份」）。
+ */
+const distDir = process.env.DY_DIST ? process.env.DY_DIST.replace(/^\/([A-Za-z]:)/, '$1') : join(ROOT, 'dist/douyin-link')
+const bundlePath = join(distDir, 'renderer.mjs')
 if (!existsSync(bundlePath)) {
-  console.error('先跑 node scripts/build.mjs --plugin douyin-link（找不到 dist/douyin-link/renderer.mjs）')
+  console.error(`找不到渲染层产物：${bundlePath}（先跑 node scripts/build.mjs --plugin douyin-link）`)
   process.exit(2)
 }
 
