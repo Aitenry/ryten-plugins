@@ -26,11 +26,13 @@ import {
   userHostSignal,
   userLastSeenAnyRoom,
   userPortraitExtras,
+  userRoomContext,
   userStatsAnyRoom,
   resolveAccountIds,
   userIdentity,
   userAnalysisData
 } from './db/mapper'
+import { buildRoomContext } from './analysis/context'
 
 /**
  * 「AI 画像」：用**宿主里配置的大模型**（与 harness 同一个 `ProviderService`）生成用户画像。
@@ -353,9 +355,22 @@ export async function generateAiPortrait(input: {
   const data = await userAnalysisData(ids)
   const now = Date.now()
   const analysis = buildUserAnalysis(data, now)
-  if (!analysis.hasData) return failure('no-data')
 
   const extras = await userPortraitExtras(ids)
+  /**
+   * 房间上下文（用户 2026-10-13：「个播的直播间，他本人不输出弹幕……需要分析直播间的整体数据」）：
+   * 先按角色定位观察窗并取出窗内**整个房间**的弹幕，再用纯逻辑层把它压成「整体统计 + 代表性样本」。
+   * 本人材料（`extras`）与房间材料（`context`）都进提示词——前者是「他说了什么」，后者是「他在什么场景里」。
+   */
+  const rawContext = await userRoomContext({ userIds: ids, role, now })
+  const context = buildRoomContext({ windows: rawContext.windows, rows: rawContext.rows, selfIds: ids })
+
+  /**
+   * 「没有材料」的判定要连房间一起看：本人沉默（个播主播尤其如此）但房间很热闹时**不是没数据**，
+   * 只是数据在他所处的环境里——这种情况必须放行，否则正是用户抱怨的那种「明明有信息却说没有」。
+   */
+  if (!analysis.hasData && context.totalMessages === 0) return failure('no-data')
+
   const totals = {
     chat: data.chat,
     enter: data.enter,
@@ -415,6 +430,7 @@ export async function generateAiPortrait(input: {
     activityHours: data.hours,
     analysis,
     extras,
+    context,
     previous,
     language: safeLanguage(),
     now,
@@ -430,6 +446,7 @@ export async function generateAiPortrait(input: {
       `${providerName || providerId}/${modelName || '?'} · ` +
       `材料 ${prompt.chars.total} 字符（system ${prompt.chars.system} + user ${prompt.chars.user}）· ` +
       `互动 ${prompt.interactions} 条 · 弹幕样本 ${extras.recentChat.length} · 送礼样本 ${extras.sentGifts.length} · ` +
+      `房间弹幕 ${context.totalMessages}（去重 ${context.sampledFrom} → 抽样 ${context.samples.length}）· ` +
       `静默上限 ${Math.round(PORTRAIT_BUDGETS.stallMs / 1000)}s / 总上限 ${Math.round(PORTRAIT_BUDGETS.totalMs / 60000)}min`
   )
 

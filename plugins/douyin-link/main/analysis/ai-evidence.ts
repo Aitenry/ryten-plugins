@@ -6,6 +6,7 @@ import type {
   UserDetail
 } from '../../shared/types'
 import type { UserPortraitExtras } from '../db/mapper'
+import type { RoomContext } from './context'
 import { portraitFingerprint, portraitInteractions } from '../../shared/ai-portrait'
 
 /**
@@ -51,6 +52,10 @@ const zh = {
   ],
   rulesHostExtra:
     '材料里的发言记录是**他本人在房间里发的话**（本插件只记录文字消息，不记录语音），不要把观众的发言当成他的表现；房间播 / 语音房里同一场可能有多个主播，判断某句话是不是他本人输出时以发言人 id 为准，不确定就少说。',
+  rulesDifferentiate:
+    '「算法层事实」只是**事实底稿**：界面上另有一块确定性的算法分析就是那些数字。**不要把它的分数、维度名、标签换个说法重抄一遍**——那是重复劳动。你的价值在于它给不出的东西：把数字背后的原因讲清楚、把这个人和这个场景串成一个连贯的故事、给出下一步能落地的做法。另外，**每一节都要落到这个人的具体事实上**（他的原话、他的礼物、他出现的时段、房间里当时在聊什么），不要写换个人也成立的套话——那正是这一版要避免的。',
+  rulesRoomContext:
+    '「房间上下文」是**直播间里其他人的发言**与房间整体统计（标注 ★ 的才是本人）。它讲的是**场景**：这场直播在聊什么、他是在什么氛围里出现的、他说那句话时房间在讨论什么。**不要把别人的话当成他说的**，也不要把房间整体的情绪当成他的情绪。',
   shapeTitle: '输出 JSON 的形状（字段名必须完全一致）',
   shape: [
     '{',
@@ -89,22 +94,32 @@ const zh = {
   identity: '一、身份与账号',
   totals: '二、跨全部直播间的累计数据',
   behavior: '三、互动结构（五类互动构成）',
-  algorithm: '四、算法层事实（确定性规则算出来的，不要重算，只用于解读与印证）',
+  algorithm: '四、算法层事实（确定性规则算出来的**事实底稿**：不要重算、更不要复述，只用于解读与印证）',
   rhythm: '五、活跃节律（24 小时分布，本地时区）',
   rooms: '六、出现过的直播间（按房间摊开）',
-  chatSamplesViewer: '七、弹幕样本（最近 %s 条，新 → 旧，带时间）',
-  chatSamplesHost: '七、发言记录样本（他本人在房间里发的话，最近 %s 条，新 → 旧，带时间）',
-  sentGiftsViewer: '八、送礼流水（最近 %s 条，新 → 旧）',
-  sentGiftsHost: '八、送礼流水（他自己送出去的，最近 %s 条，新 → 旧）',
-  receivedGiftsViewer: '九、收礼流水（最近 %s 条，新 → 旧）',
-  receivedGiftsHost: '九、收礼流水（别人送给他的，最近 %s 条，新 → 旧，这是他的收益）',
-  network: '十、人物关系网（算法算出的送礼 / 收礼排行）',
+  roomContext: '七、房间上下文（观察窗内**整个直播间**的弹幕：本人可能几乎不说话，但房间在说话）',
+  roomWindow: '观察窗',
+  roomTotals: '房间整体',
+  roomBaseline: '房间基线',
+  roomAvgLength: '平均字数',
+  roomEmojiRate: '含表情',
+  roomSpeakers: '发言最多的人',
+  roomSamples: '代表性弹幕',
+  roomSampleNote: '原始 → 去重 → 抽样；★ = 本人发言',
+  chatSamplesViewer: '八、弹幕样本（最近 %s 条，新 → 旧，带时间）',
+  chatSamplesHost: '八、发言记录样本（他本人在房间里发的话，最近 %s 条，新 → 旧，带时间）',
+  sentGiftsViewer: '九、送礼流水（最近 %s 条，新 → 旧）',
+  sentGiftsHost: '九、送礼流水（他自己送出去的，最近 %s 条，新 → 旧）',
+  receivedGiftsViewer: '十、收礼流水（最近 %s 条，新 → 旧）',
+  receivedGiftsHost: '十、收礼流水（别人送给他的，最近 %s 条，新 → 旧，这是他的收益）',
+  network: '十一、人物关系网（算法算出的送礼 / 收礼排行）',
   networkOutHost: '他送礼最多的人（他主动维护的关系）',
   networkInHost: '送礼给他最多的人（他的主要收入来源）',
   hostNote:
-    '角色说明：这份材料分析的是**主播**本人——他在房间里的发言是他的工作输出，收到的礼物是他的收益；房间播 / 语音房里一场可能有多个主播，别把其他主播或观众的行为算到他头上。',
-  previous: '十一、上一版画像（第 %s 版）',
+    '角色说明：这份材料分析的是**主播**本人——他在房间里的发言是他的工作输出，收到的礼物是他的收益；房间上下文那一节里的观众反应是他直播效果的现场证据（他本人常常几乎不发言）。房间播 / 语音房里一场可能有多个主播，别把其他主播或观众的行为算到他头上。',
+  previous: '十二、上一版画像（第 %s 版）',
   noData: '（没有）',
+  self: '本人',
   nickname: '昵称',
   douyinId: '抖音号',
   userId: '用户 id',
@@ -257,6 +272,10 @@ const en: typeof zh = {
   ],
   rulesHostExtra:
     'The message samples are lines **he himself posted** in the room (this plugin records text messages only, never audio); do not mistake viewer messages for his performance. A voice room may have several hosts in one session \u2014 decide authorship by sender id and stay quiet when unsure.',
+  rulesDifferentiate:
+    'The "Algorithmic facts" section is only a **fact sheet**: the interface already shows those exact numbers in a separate deterministic analysis block. **Do not restate its scores, dimension names or tags in different words** \u2014 that is wasted effort. Add what it cannot: explain the reasons behind the numbers, turn this person and this scene into a coherent story, and give concrete next steps. Also, **ground every section in facts specific to this person** (his own lines, his gifts, his hours, what the room was discussing); do not write generic filler that would fit anyone \u2014 that is exactly what this version must avoid.',
+  rulesRoomContext:
+    'The "Room context" section is **other people\u2019s messages** in the room plus room-level statistics (lines marked \u2605 are his own). It describes the **scene**: what this stream is about, what atmosphere he appeared in, what the room was discussing when he spoke. **Do not attribute others\u2019 lines to him**, and do not treat the room\u2019s overall mood as his mood.',
   shapeTitle: 'JSON shape (field names must match exactly)',
   shape: [
     '{',
@@ -295,22 +314,32 @@ const en: typeof zh = {
   identity: '1. Identity and accounts',
   totals: '2. Cumulative numbers across all rooms',
   behavior: '3. Interaction structure (share of the five interaction kinds)',
-  algorithm: '4. Algorithmic facts (computed by deterministic rules — do not recompute, use them to interpret and corroborate)',
+  algorithm: '4. Algorithmic facts (deterministic rules \u2014 a **fact sheet**: do not recompute and do not restate, use them to interpret and corroborate)',
   rhythm: '5. Activity rhythm (24-hour distribution, local time)',
   rooms: '6. Rooms they appeared in (per room)',
-  chatSamplesViewer: '7. Danmaku samples (latest %s, newest first, with timestamps)',
-  chatSamplesHost: '7. Message samples he himself posted (latest %s, newest first, with timestamps)',
-  sentGiftsViewer: '8. Gifts they sent (latest %s, newest first)',
-  sentGiftsHost: '8. Gifts he sent out (latest %s, newest first)',
-  receivedGiftsViewer: '9. Gifts they received (latest %s, newest first)',
-  receivedGiftsHost: '9. Gifts he received (latest %s, newest first \u2014 this is his revenue)',
-  network: '10. Relationship graph (top senders / recipients computed by the algorithm)',
+  roomContext: '7. Room context (danmaku from the **whole room** inside the observation windows: he may say nothing, but the room is talking)',
+  roomWindow: 'windows',
+  roomTotals: 'room overall',
+  roomBaseline: 'room baseline',
+  roomAvgLength: 'avg characters',
+  roomEmojiRate: 'with emoji',
+  roomSpeakers: 'top speakers',
+  roomSamples: 'representative danmaku',
+  roomSampleNote: 'raw \u2192 deduped \u2192 sampled; \u2605 = his own line',
+  chatSamplesViewer: '8. Danmaku samples (latest %s, newest first, with timestamps)',
+  chatSamplesHost: '8. Message samples he himself posted (latest %s, newest first, with timestamps)',
+  sentGiftsViewer: '9. Gifts they sent (latest %s, newest first)',
+  sentGiftsHost: '9. Gifts he sent out (latest %s, newest first)',
+  receivedGiftsViewer: '10. Gifts they received (latest %s, newest first)',
+  receivedGiftsHost: '10. Gifts he received (latest %s, newest first \u2014 this is his revenue)',
+  network: '11. Relationship graph (top senders / recipients computed by the algorithm)',
   networkOutHost: 'people he gifts most (relationships he actively maintains)',
   networkInHost: 'people who gift him most (his main revenue source)',
   hostNote:
-    'Role note: this material profiles the **streamer** himself \u2014 his messages are his work output and received gifts are his revenue. A voice room may host several streamers in one session, so do not attribute other hosts\u2019 or viewers\u2019 behaviour to him.',
-  previous: '11. Previous version (v%s)',
+    'Role note: this material profiles the **streamer** himself \u2014 his messages are his work output and received gifts are his revenue; the audience reaction in the "Room context" section is on-site evidence of how his stream lands (he himself often says almost nothing). A voice room may host several streamers in one session, so do not attribute other hosts\u2019 or viewers\u2019 behaviour to him.',
+  previous: '12. Previous version (v%s)',
   noData: '(none)',
+  self: 'himself',
   nickname: 'nickname',
   douyinId: 'douyin id',
   userId: 'user id',
@@ -550,6 +579,13 @@ export interface PortraitEvidenceInput {
   analysis: UserAnalysis
   /** 原始层材料（按房间摊开 + 带时间戳的流水样本） */
   extras: UserPortraitExtras
+  /**
+   * 观察窗内的**房间上下文**（房间里其他人的弹幕 + 房间整体统计）。
+   *
+   * 用户 2026-10-13：「个播的直播间，他本人不输出弹幕，但房间里有大量用户弹幕……不能说没有信息，
+   * 需要分析直播间的整体数据」。所以它是**本人材料之外的另一半**：本人沉默时，材料就靠它撑着。
+   */
+  context: RoomContext | null
   previous: PortraitPrevious | null
   /** 界面语言（决定提示词与输出语言） */
   language: string
@@ -742,7 +778,52 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
     }
   }
 
-  /* 七、弹幕样本（主播视角下这是他自己的发言记录） */
+  /* 七、房间上下文（观察窗内**整个房间**的弹幕；本人可能几乎不说话，但房间在说话） */
+  lines.push('', `## ${t.roomContext}`)
+  const context = input.context
+  if (!context || context.totalMessages === 0) {
+    lines.push(t.noData)
+  } else {
+    lines.push(
+      `${t.roomWindow}: ` +
+        context.windows
+          .map((w) => `${w.title || w.webRid}（${w.webRid}｜${stamp(w.start)} → ${stamp(w.end)}）`)
+          .join('；')
+    )
+    lines.push(
+      facts([
+        [t.roomTotals, `${compact(context.totalMessages)} ${t.chat}`],
+        [t.people, context.totalSpeakers],
+        [
+          t.roomBaseline,
+          `${t.valence} ${Math.round(context.baseline.valence * 100)} · ${t.arousal} ` +
+            `${Math.round(context.baseline.arousal * 100)} · ${t.roomAvgLength} ` +
+            `${Math.round(context.baseline.avgLength * 10) / 10} · ${t.roomEmojiRate} ` +
+            `${Math.round(context.baseline.emojiRate * 100)}%`
+        ]
+      ])
+    )
+    if (context.speakers.length > 0) {
+      lines.push(
+        `${t.roomSpeakers}: ` +
+          context.speakers
+            .map((speaker) => `${squash(speaker.name) || '—'} ${compact(speaker.count)}${speaker.self ? `（${t.self}）` : ''}`)
+            .join(' · ')
+      )
+    }
+    lines.push(
+      `${t.roomSamples}（${compact(context.totalMessages)} → ${compact(context.sampledFrom)} → ${context.samples.length}）：${t.roomSampleNote}`
+    )
+    if (context.samples.length === 0) {
+      lines.push(t.noData)
+    } else {
+      for (const sample of context.samples) {
+        lines.push(`- [${stamp(sample.atMs)}] ${sample.self ? '★ ' : ''}${squash(sample.author)}: ${squash(sample.content)}`)
+      }
+    }
+  }
+
+  /* 八、弹幕样本（主播视角下这是他自己的发言记录） */
   lines.push('', `## ${chatSamplesTitle.replace('%s', String(input.extras.recentChat.length))}`)
   if (input.extras.recentChat.length === 0) {
     lines.push(t.noData)
@@ -813,8 +894,9 @@ export function buildPortraitPrompt(input: PortraitEvidenceInput): PortraitPromp
         .replace('{{suggestions}}', host ? t.shapeSuggestionsHost : t.shapeSuggestionsViewer)
     )
     .join('\n')
-  const rules = (host ? [...t.rules, t.rulesHostExtra] : t.rules).map((rule, index) =>
-    `${index + 1}. ${rule.replace('{{language}}', languageName(input.language)).replace('{{samples}}', samplesShort)}`
+  const rules = [...t.rules, t.rulesDifferentiate, t.rulesRoomContext, ...(host ? [t.rulesHostExtra] : [])].map(
+    (rule, index) =>
+      `${index + 1}. ${rule.replace('{{language}}', languageName(input.language)).replace('{{samples}}', samplesShort)}`
   )
   const header: string[] = [
     roleText,

@@ -66,6 +66,7 @@ import { RoomRecorder, minuteOf } from './recorder'
 import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
 import { buildUserAnalysis } from '../analysis/portrait'
+import { buildRoomContext, roomBaselineOf } from '../analysis/context'
 import {
   aiPortraitState as readAiPortraitState,
   cancelAiPortrait as cancelPortrait,
@@ -2955,8 +2956,17 @@ export class AnalyzerHub {
    */
   async userAnalysis(userId: string): Promise<UserAnalysis> {
     const ids = await this.accountIdsOf(userId)
-    const data = await store.userAnalysisData(ids)
-    return buildUserAnalysis(data, Date.now())
+    /**
+     * 再顺手算一份**房间基线**（观察窗内整个直播间的弹幕统计），交给算法做「相对房间」的校准：
+     * 语言类信号（打字量 / 外放 / @点名 / 情绪唤起）跟房间文化强相关，绝对阈值必然偏。
+     * 这一步只读不写、也不调模型；拿不到房间弹幕就退回绝对口径（`roomBaselineOf` 给 null）。
+     */
+    const [data, raw] = await Promise.all([
+      store.userAnalysisData(ids),
+      store.userRoomContext({ userIds: ids, role: 'viewer' }).catch(() => ({ windows: [], rows: [] }))
+    ])
+    const context = buildRoomContext({ windows: raw.windows, rows: raw.rows, selfIds: ids, sampleBudget: 200 })
+    return buildUserAnalysis({ ...data, roomBaseline: roomBaselineOf(context) }, Date.now())
   }
 
   /**

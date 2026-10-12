@@ -40,6 +40,7 @@ writeFileSync(
   join(workDir, 'entry.ts'),
   `export { buildPortraitPrompt, portraitProviderSetting } from ${JSON.stringify(join(PLUGIN, 'main/analysis/ai-evidence.ts'))}\n` +
     `export { buildUserAnalysis } from ${JSON.stringify(join(PLUGIN, 'main/analysis/portrait.ts'))}\n` +
+    `export { buildRoomContext } from ${JSON.stringify(join(PLUGIN, 'main/analysis/context.ts'))}\n` +
     `export * from ${JSON.stringify(join(PLUGIN, 'shared/ai-portrait.ts'))}\n`,
   'utf8'
 )
@@ -58,6 +59,7 @@ const pure = await import(pathToFileURL(outfile).href)
 const {
   buildPortraitPrompt,
   buildUserAnalysis,
+  buildRoomContext,
   portraitKeyOf,
   portraitFingerprint,
   portraitInteractions,
@@ -204,6 +206,24 @@ function fixtureExtras() {
   }
 }
 
+function fixtureContext() {
+  const self = 'anon:111111#dou2056511'
+  const rows = [
+    { atMs: NOW - 2 * 3600000 - 300000, webRid: ROOM, userId: 'x1', userName: '路过的老王', content: '主播今天嗓子有点哑，注意休息' },
+    { atMs: NOW - 2 * 3600000 - 240000, webRid: ROOM, userId: 'x2', userName: '小美', content: '这首歌我也好喜欢' },
+    { atMs: NOW - 2 * 3600000 - 120000, webRid: ROOM, userId: self, userName: '夜猫子小张', content: '今晚唱得太好听了' },
+    { atMs: NOW - 2 * 3600000 - 90000, webRid: ROOM, userId: 'x3', userName: '阿强', content: '点一首《太聪明》行吗' },
+    { atMs: NOW - 2 * 3600000 - 60000, webRid: ROOM, userId: 'x1', userName: '路过的老王', content: '666' },
+    { atMs: NOW - 2 * 3600000 - 30000, webRid: ROOM, userId: 'x4', userName: '夜宵摊', content: '每天这个点都来听，习惯了' }
+  ]
+  return buildRoomContext({
+    windows: [{ webRid: ROOM, title: '深夜电台', start: NOW - 3 * 3600000, end: NOW - 3600000 }],
+    rows,
+    selfIds: [self],
+    sampleBudget: 60
+  })
+}
+
 function fixturePrompt(overrides = {}) {
   const data = fixtureData()
   return buildPortraitPrompt({
@@ -244,6 +264,7 @@ function fixturePrompt(overrides = {}) {
     activityHours: data.hours,
     analysis: buildUserAnalysis(data, NOW),
     extras: fixtureExtras(),
+    context: fixtureContext(),
     previous: null,
     language: 'zh-CN',
     now: NOW,
@@ -258,7 +279,7 @@ console.log('=== 1. 材料（模型看到的东西）')
 const prompt = fixturePrompt()
 const material = prompt.user
 check('system 里有角色设定', prompt.system.length > 0)
-check('材料有 10+ 个分节', (material.match(/\n## /g) ?? []).length >= 10)
+check('材料有 11+ 个分节', (material.match(/\n## /g) ?? []).length >= 11)
 for (const heading of [
   '一、身份与账号',
   '二、跨全部直播间的累计数据',
@@ -266,10 +287,11 @@ for (const heading of [
   '四、算法层事实',
   '五、活跃节律',
   '六、出现过的直播间',
-  '七、弹幕样本',
-  '八、送礼流水',
-  '九、收礼流水',
-  '十、人物关系网'
+  '七、房间上下文',
+  '八、弹幕样本',
+  '九、送礼流水',
+  '十、收礼流水',
+  '十一、人物关系网'
 ]) {
   has(`材料含「${heading}」`, material, heading)
 }
@@ -298,6 +320,16 @@ has('送礼流水带礼物名与对方', material, '比心 ×5（500 抖币） �
 has('收礼流水带来源', material, '大啤酒 ×2（500 抖币） ← 送礼的人')
 has('关系网：送礼最多的人', material, '他送礼最多的人: 工装主播')
 
+console.log('\n=== 1b. 房间上下文（个播主播不说话时的另一半材料）')
+has('观察窗写出来（房间名 + 房间号 + 起止）', material, '观察窗: 深夜电台（880000000001')
+has('房间整体统计（原始条数 + 说话人数）', material, '房间整体 6 弹幕')
+has('房间基线（情绪 / 唤起 / 字数 / 表情）', material, '房间基线')
+has('发言最多的人排行', material, '发言最多的人: 路过的老王 2')
+has('写清压缩比（原始 → 去重 → 抽样）', material, '代表性弹幕（6 → 6 → 6）')
+has('代表弹幕带作者名（不是本人也会标出来）', material, '路过的老王: 主播今天嗓子有点哑，注意休息')
+has('本人发言标 ★', material, '★ 夜猫子小张: 今晚唱得太好听了')
+not('房间上下文里不泄露匿名内部键', material, 'anon:')
+
 console.log('\n=== 2. 引用可行性：每条弹幕样本都逐字在材料里（含时间）')
 for (const row of fixtureExtras().recentChat) {
   const stampText = (() => {
@@ -319,6 +351,9 @@ has('要求引用逐字取自弹幕样本', material, '取自「弹幕样本」'
 has('不许猜现实身份', material, '不要猜测真实姓名')
 has('数字必须与材料一致', material, '所有数字必须与材料一致')
 has('要求交代数据局限', material, 'caveats 里如实说明样本量')
+has('要求不要复述算法层分数（去重叠）', material, '换个说法重抄一遍')
+has('要求不要把别人的话当成他说的', material, '不要把别人的话当成他说的')
+has('要求区分「房间整体情绪」与「个人情绪」', material, '也不要把房间整体的情绪当成他的情绪')
 for (const field of ['"persona"', '"headline"', '"overview"', '"tags"', '"sections"', '"evidence"', '"suggestions"', '"caveats"']) {
   has(`JSON 形状里有 ${field}`, material, field)
 }
@@ -467,8 +502,9 @@ has('任务说的是这位主播（不是观众）', host.user, '为这位抖音
 has('明说了不是把他当观众', host.user, '不是把他当观众')
 has('多了一条「他本人发的话」的硬性要求', host.user, '不要把观众的发言当成他的表现')
 has('写明房间播 / 语音房一场可能有多个主播', host.user, '房间播 / 语音房里同一场可能有多个主播')
-has('第七节换成「发言记录样本」', host.user, '七、发言记录样本（他本人在房间里发的话')
-has('收礼那一节点明这是他的收益', host.user, '九、收礼流水（别人送给他的，最近 1 条，新 → 旧，这是他的收益）')
+has('第八节换成「发言记录样本」', host.user, '八、发言记录样本（他本人在房间里发的话')
+has('收礼那一节点明这是他的收益', host.user, '十、收礼流水（别人送给他的，最近 1 条，新 → 旧，这是他的收益）')
+has('主播版：房间上下文是他直播效果的现场证据', host.user, '房间上下文那一节里的观众反应')
 has('关系网按主播口径问（收入来源）', host.user, '送礼给他最多的人（他的主要收入来源）')
 has('关系网按主播口径问（主动维护）', host.user, '他送礼最多的人（他主动维护的关系）')
 has('角色说明写进材料（别把别人的行为算到他头上）', host.user, '这份材料分析的是**主播**本人')
@@ -504,7 +540,7 @@ check('主播那版的成本仍在闸门内（多了一条规则与角色说明�
 console.log(`     主播版材料字符：system ${host.chars.system} + user ${host.chars.user} = ${host.chars.total}`)
 const hostEn = fixturePrompt({ role: 'host', language: 'en-US' })
 has('英文主播版：任务说的是主播', hostEn.user, '**streamer** profile')
-has('英文主播版：发言样本那一节换了标题', hostEn.user, '7. Message samples he himself posted')
+has('英文主播版：发言样本那一节换了标题', hostEn.user, '8. Message samples he himself posted')
 not('英文主播版里没有中文残留', hostEn.user, '主播类型名')
 not('英文观众版里没有主播专属角度', en.user, 'streaming style and scripting')
 

@@ -10,6 +10,7 @@ import type {
   UserAnalysisScore
 } from '../../shared/types'
 import { analyzeChat, type ChatTextSignals } from './text'
+import type { RoomBaseline } from './context'
 import type { EmotionKey } from './lexicon'
 /**
  * 夹逼与对数归一化、以及消费评分用的参考量级，都来自 `shared/score.ts`：
@@ -114,6 +115,15 @@ export interface UserAnalysisData {
   sessionSpans: number[]
   /** 首次关注的时间（ms；0 = 从来没关注过） */
   firstFollowAt: number
+  /**
+   * **房间基线**（观察窗内整个直播间的弹幕统计；见 `main/analysis/context.ts`）。
+   *
+   * 为什么要有它：语言类信号（打字量、外放、@点名、情绪唤起）**本身就跟房间文化强相关**——
+   * 同样的「平均 5 个字」，在一个平均 3 字的房间里是话痨，在平均 12 字的房间里是寡言。
+   * 拿绝对阈值去量必然偏（用户 2026-10-13 的「整体都感觉偏」），所以有基线时改成**相对房间**。
+   * 拿不到（无房间弹幕 / 旧调用方）就是 `null`，退回原来的绝对口径。
+   */
+  roomBaseline?: RoomBaseline | null
 }
 
 /** 互动太少就不出画像（样本不够时「画像」只是噪声） */
@@ -135,6 +145,25 @@ function topKeyOf(list: UserAnalysisScore[]): string {
     }
   }
   return best
+}
+
+/* ------------------------------------------------------------------- 相对房间的校准 */
+
+/** 参与「相对房间」校准的最小床：本人弹幕太少时，比率本身就是噪声，宁可退回绝对口径 */
+const CALIBRATION_MIN_SAMPLES = 8
+/** 房间基线至少要有这么多条弹幕才可信 */
+const CALIBRATION_MIN_BASELINE = 20
+
+/**
+ * 把「个体相对房间整体」的偏移映射到 0-1（房间平均 = 0.5）。
+ *
+ * 用 log2：**正好 2 倍 → 0.75，正好一半 → 0.25**，偏离 4 倍以上封顶（0 / 1）。
+ * 只给那些天生跟房间文化绑定的语言信号用；计数类的量（送礼、点赞）不适用——那些是绝对量。
+ */
+function relativeSignal(base: number, value: number): number {
+  if (!(base > 0)) return 0.5
+  const ratio = Math.max(0.01, Math.max(0, value) / base)
+  return clamp01(0.5 + 0.25 * Math.log2(ratio))
 }
 
 /* ------------------------------------------------------------------------------- 子信号 */
@@ -265,6 +294,19 @@ function derive(data: UserAnalysisData, now: number): Derived {
   const topicCount = (key: string): number => chat.topicCounts.find((item) => item.key === key)?.count ?? 0
   const sample = chat.sampleCount > 0 ? chat.sampleCount : 1
 
+  /**
+   * 相对房间的校准（有基线、且两边样本都够时才启用）。
+   * 这些信号用**绝对阈值**本来就不成立：一个人算不算「话多」取决于房间的平均水平。
+   */
+  const base = data.roomBaseline ?? null
+  const calibrate = base !== null && base.sampleCount >= CALIBRATION_MIN_BASELINE && chat.sampleCount >= CALIBRATION_MIN_SAMPLES
+  const lengthSignal = calibrate ? relativeSignal(base.avgLength, chat.avgLength) : logNorm(chat.avgLength, 30)
+  const expressiveSignal = calibrate
+    ? relativeSignal(base.questionRate + base.exclaimRate, chat.questionRate + chat.exclaimRate)
+    : clamp01(chat.questionRate + chat.exclaimRate)
+  const mentionSignal = calibrate ? relativeSignal(base.mentionRate, chat.mentionRate) : chat.mentionRate
+  const arousalSignal = calibrate ? relativeSignal(base.arousal, chat.arousal) : chat.arousal
+
   const total = interactions > 0 ? interactions : 1
   const signals: Signals = {
     spend: logNorm(monetary, SPEND_FULL_COINS),
@@ -288,15 +330,15 @@ function derive(data: UserAnalysisData, now: number): Derived {
     enterShare: clamp01(data.enter / total),
     regularity,
     valence: chat.valence,
-    arousal: chat.arousal,
+    arousal: arousalSignal,
     topicDiversity: chat.topicDiversity,
     emojiVariety: chat.emojiVariety,
-    length: logNorm(chat.avgLength, 30),
+    length: lengthSignal,
     praise: clamp01(topicCount('praise') / sample),
     greet: clamp01(topicCount('greet') / sample),
     negRate: chat.negativeRate,
-    expressive: clamp01(chat.questionRate + chat.exclaimRate),
-    mention: chat.mentionRate,
+    expressive: expressiveSignal,
+    mention: mentionSignal,
     giftSteady: logNorm(giftPerDay, 20),
     giftBurst: avgGift > 0 ? clamp01((Math.max(0, data.giftMax) / avgGift - 1) / 4) : 0,
     giftFocus: topRecipientShare

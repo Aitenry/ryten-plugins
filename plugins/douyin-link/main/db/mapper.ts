@@ -36,6 +36,7 @@ import { schemaReady } from './ddl'
 import { ANON_ID_PREFIX, ANONYMOUS_ID } from '../../shared/anonymous'
 import { mergeGiftRows, storedGiftMergeInput } from '../gift/merge'
 import type { UserAnalysisData } from '../analysis/portrait'
+import type { ContextDanmakuRow, ContextWindow } from '../analysis/context'
 
 /**
  * 抖音直播分析器 的数据访问层。
@@ -2653,6 +2654,162 @@ export async function userPortraitExtras(userIds: string[]): Promise<UserPortrai
       firstSeen,
       lastSeen
     }
+  })
+}
+
+/** 观察窗最多取几个（最近优先） */
+const CONTEXT_WINDOW_LIMIT = 12
+/** 每个房间最多取几场（最近优先） */
+const CONTEXT_SESSIONS_PER_ROOM = 3
+/** 窗内原始弹幕的**安全上限**：正常一场直播远达不到，只是防止异常数据把内存打爆 */
+const CONTEXT_ROW_SAFETY_CAP = 40000
+/** 拿不到会话时，兜底窗口的宽度（ms） */
+const CONTEXT_FALLBACK_SPAN = 2 * 3600_000
+
+/**
+ * 「时段上下文」的取数：定位**观察窗**（观众 = 他自己的会话窗口；主播 / 沉默者 = 房间的直播场次），
+ * 再把窗内**整个房间**的弹幕拉出来，交给 `main/analysis/context.ts` 做聚合与抽样。
+ *
+ * 与 `userPortraitExtras` 的分工：那一份给「本人发的」原始流水（谁说了什么、谁给谁送了礼），
+ * 这一份给「他所处的**环境**」——房间里其他人在聊什么。两者都进 AI 材料，但角色不同：
+ * 前者是「他的话」，后者是「他说话时房间在说什么」，也是**主播 / 沉默观众唯一有的东西**。
+ *
+ * 输入**不设条数上限**（只给一个防爆的保护值），压缩交给纯逻辑那一层去做。
+ */
+export async function userRoomContext(input: {
+  userIds: string[]
+  /** 观众走「他自己的会话窗口」，主播 / 沉默者走「房间的直播场次」 */
+  role: 'viewer' | 'host'
+  maxWindows?: number
+  /** 现在（正在直播的那一场没有结束时间，拿它兜底） */
+  now?: number
+}): Promise<{ windows: ContextWindow[]; rows: ContextDanmakuRow[] }> {
+  const ids = [...new Set((input.userIds ?? []).filter((id) => id.length > 0))]
+  const empty = { windows: [], rows: [] }
+  if (ids.length === 0) return empty
+  const limit = Math.min(CONTEXT_WINDOW_LIMIT, Math.max(1, Math.round(input.maxWindows ?? CONTEXT_WINDOW_LIMIT)))
+  const now = input.now && input.now > 0 ? input.now : Date.now()
+  await schemaReady
+  return withOrm('douyin-link.userRoomContext', async (db) => {
+    const roomTitleRows = await db
+      .select({ webRid: douyinLinkRooms.webRid, title: douyinLinkRooms.title, anchor: douyinLinkRooms.anchor })
+      .from(douyinLinkRooms)
+    const titles = new Map(roomTitleRows.map((row) => [row.webRid, row.title || row.anchor || '']))
+
+    /** 观察窗（房间 + 时间范围） */
+    const windows: ContextWindow[] = []
+    const push = (webRid: string, start: number, end: number): void => {
+      if (!webRid || !(end >= start)) return
+      windows.push({ webRid, title: titles.get(webRid) ?? '', start, end })
+    }
+
+    // 1) 观众的优先路径：他自己的**会话窗口**（session_id 不为 0 的那几场，有明确的起止）
+    if (input.role === 'viewer') {
+      const rows = await db
+        .select({
+          webRid: douyinLinkMessages.webRid,
+          start: sql<number>`coalesce(min(${douyinLinkMessages.atMs}), 0)::double precision`,
+          end: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+        })
+        .from(douyinLinkMessages)
+        .where(
+          and(
+            inArray(douyinLinkMessages.userId, ids),
+            eq(douyinLinkMessages.kind, 'chat'),
+            ne(douyinLinkMessages.sessionId, 0)
+          )
+        )
+        .groupBy(douyinLinkMessages.webRid, douyinLinkMessages.sessionId)
+        .orderBy(desc(sql`coalesce(max(${douyinLinkMessages.atMs}), 0)`))
+        .limit(limit)
+      for (const row of rows) push(row.webRid, row.start, row.end)
+    }
+
+    // 2) 兜底（也是主播的唯一路径）：他在哪些房间出现过 → 拿房间**最近的直播场次**当观察窗。
+    //    「出现过」的证据：本人档案行（进场/发言都会落一行），或有人给他送过礼。
+    if (windows.length === 0) {
+      const profileRows = await db
+        .select({ webRid: douyinLinkUsers.webRid, lastSeen: douyinLinkUsers.lastSeen })
+        .from(douyinLinkUsers)
+        .where(inArray(douyinLinkUsers.userId, ids))
+        .orderBy(desc(douyinLinkUsers.lastSeen))
+      const giftRows = await db
+        .select({
+          webRid: douyinLinkMessages.webRid,
+          lastAt: sql<number>`coalesce(max(${douyinLinkMessages.atMs}), 0)::double precision`
+        })
+        .from(douyinLinkMessages)
+        .where(and(inArray(douyinLinkMessages.toUserId, ids), eq(douyinLinkMessages.kind, 'gift')))
+        .groupBy(douyinLinkMessages.webRid)
+        .orderBy(desc(sql`coalesce(max(${douyinLinkMessages.atMs}), 0)`))
+
+      const ranked = new Map<string, number>()
+      for (const row of profileRows) {
+        if (row.webRid) ranked.set(row.webRid, Math.max(ranked.get(row.webRid) ?? 0, row.lastSeen ?? 0))
+      }
+      for (const row of giftRows) {
+        if (row.webRid) ranked.set(row.webRid, Math.max(ranked.get(row.webRid) ?? 0, row.lastAt ?? 0))
+      }
+      const roomIds = [...ranked.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit)
+        .map(([webRid]) => webRid)
+      if (roomIds.length > 0) {
+        const sessionRows = await db
+          .select({
+            webRid: douyinLinkSessions.webRid,
+            startedAt: douyinLinkSessions.startedAt,
+            endedAt: douyinLinkSessions.endedAt
+          })
+          .from(douyinLinkSessions)
+          .where(inArray(douyinLinkSessions.webRid, roomIds))
+          .orderBy(desc(douyinLinkSessions.startedAt))
+        const perRoom = new Map<string, number>()
+        for (const row of sessionRows) {
+          const used = perRoom.get(row.webRid) ?? 0
+          if (used >= CONTEXT_SESSIONS_PER_ROOM) continue
+          perRoom.set(row.webRid, used + 1)
+          push(row.webRid, row.startedAt, row.endedAt > 0 ? row.endedAt : now)
+        }
+        // 房间没有会话记录（历史数据 / 从没跑过监控）：用「最近一次出现」往回开一个兜底窗
+        for (const webRid of roomIds) {
+          if (perRoom.has(webRid)) continue
+          const last = ranked.get(webRid) ?? 0
+          if (last > 0) push(webRid, Math.max(0, last - CONTEXT_FALLBACK_SPAN), last)
+        }
+      }
+    }
+
+    const picked = windows
+      .sort((a, b) => b.end - a.end)
+      .slice(0, limit)
+      .sort((a, b) => a.start - b.start)
+    if (picked.length === 0) return { windows: [], rows: [] }
+
+    // 3) 取窗内**整个房间**的弹幕（含本人；本人由纯逻辑层标 self）
+    const scope = or(
+      ...picked.map((w) =>
+        and(
+          eq(douyinLinkMessages.webRid, w.webRid),
+          gte(douyinLinkMessages.atMs, w.start),
+          lte(douyinLinkMessages.atMs, w.end)
+        )
+      )
+    )
+    const rows = await db
+      .select({
+        atMs: douyinLinkMessages.atMs,
+        webRid: douyinLinkMessages.webRid,
+        userId: douyinLinkMessages.userId,
+        userName: douyinLinkMessages.userName,
+        content: douyinLinkMessages.content
+      })
+      .from(douyinLinkMessages)
+      .where(and(eq(douyinLinkMessages.kind, 'chat'), scope))
+      .orderBy(asc(douyinLinkMessages.atMs))
+      .limit(CONTEXT_ROW_SAFETY_CAP)
+
+    return { windows: picked, rows }
   })
 }
 
