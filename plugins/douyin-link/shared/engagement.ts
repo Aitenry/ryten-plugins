@@ -110,27 +110,32 @@ export interface HostPerformanceInput {
 }
 
 /**
- * **绩效指标 0-100**：由**这场直播的内容**构成，四项加权。
+ * **绩效指标 0-100**：**收入占绝对大头**，互动只做小幅修正。
  *
- * - **变现 35%**：今日收到的抖币（直播的直接结果）；
- * - **内容热度 30%**：本场弹幕量 60% + 独立观众数 40%
- *   （「有没有人说话、有多少不同的人愿意待着」比单纯人数更能反映内容吸引力）；
- * - **留人 20%**：本场进场次数（内容能持续把人拉进来）；
- * - **输出 15%**：主播自己的发言条数（内容是不是他在持续产出，而不是干坐着）。
+ * 权重（用户 2026-10-12）：「绩效指标要按照抖币的收入来计算大的占比，不能靠弹幕数量拉伸整体的绩效」——
+ * 上一版权重是 变现 35% + 热度 30% + 留人 20% + 输出 15%，弹幕量（30% 里的 60%）一个人就能把绩效撑到 70 分，
+ * 而一场「满弹幕、没收入」的直播和一个「高收入、零互动」的主播会被拉成同一个分数。现在：
  *
+ * - **变现 70%**：今日收到的抖币（直播的直接结果，绩效就是它）；
+ * - **内容热度 15%**：本场弹幕量 40% + 独立观众数 60%
+ *   （弹幕量只占 6% 的总权重，不再能拉伸整体绩效；「有多少不同的人愿意待着」比刷屏更值钱）；
+ * - **留人 10%**：本场进场次数（内容能把人持续拉进来）；
+ * - **输出 5%**：主播自己的发言条数（内容是不是他在持续产出，而不是干坐着）。
+ *
+ * 效果：只热闹不变现的直播最多 30 分；「高收入零互动」压过「低收入满互动」（工装里有这两条断言）。
  * 没在监控这个房间时，后三项拿不到（都是 0），于是分数主要由今日收入撑起来——
  * 这不是 bug：没有观察到的内容，就不该被凭空评估。
  */
 export function hostPerformance(input: HostPerformanceInput): number {
   const income = logNorm(Math.max(0, input.todayReceived), PERF_INCOME_FULL)
   const heat = clamp01(
-    0.6 * logNorm(Math.max(0, input.sessionChat), PERF_CHAT_FULL) +
-      0.4 * logNorm(Math.max(0, input.audience), PERF_AUDIENCE_FULL)
+    0.4 * logNorm(Math.max(0, input.sessionChat), PERF_CHAT_FULL) +
+      0.6 * logNorm(Math.max(0, input.audience), PERF_AUDIENCE_FULL)
   )
   const retention = logNorm(Math.max(0, input.sessionEnter), PERF_ENTER_FULL)
   const output = logNorm(Math.max(0, input.hostOutput), PERF_OUTPUT_FULL)
 
-  return Math.round(clamp01(0.35 * income + 0.3 * heat + 0.2 * retention + 0.15 * output) * 100)
+  return Math.round(clamp01(0.7 * income + 0.15 * heat + 0.1 * retention + 0.05 * output) * 100)
 }
 
 /**

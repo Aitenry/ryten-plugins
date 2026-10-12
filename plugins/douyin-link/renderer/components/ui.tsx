@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Card, Table, Tabs, theme as antdTheme, type ModalProps, type TableProps } from 'antd'
 import { useTheme } from '@host/renderer/hooks/useTheme'
 
@@ -693,4 +693,78 @@ export function ChartBox(props: {
       {size.width > 0 && size.height > 0 ? props.children({ width: size.width, height: size.height }) : null}
     </div>
   )
+}
+
+/* ------------------------------------------------------------------------ 金额口径（抖币 / 人民币） */
+
+/**
+ * 抖币 → 人民币的换算率（用户 2026-10-12 明确的口径：**1 元 = 10 抖币**）。
+ *
+ * 强调一遍那个容易搞错的点：**10 抖币不是 10 块钱，是 1 块钱**——换算永远是**除以 10**，
+ * 别拿抖币数字当金额直接相加。库里存的、主进程算的一律是抖币原值，
+ * 人民币只在**界面展示**这一层换（见下面的 `MoneyFormat`）。
+ */
+export const COINS_PER_CNY = 10
+
+/**
+ * 金额口径（由 `MoneyProvider` 按设置里的「按人民币显示金额」开关下发）。
+ *
+ * 为什么要有这个上下文（用户 2026-10-12：「打开后整体的页面，都是按照人民币来显示金额」）：
+ * 页面上有四十来处金额展示（KPI、排行榜、图表 tooltip、日历格、实时列表行首……），
+ * 如果各处自己写「除以 10」，round 的方式稍有不同同一个数就会出现两种写法。
+ * 所以统一收口在这：组件**只负责排版**，换算与数字格式一律走 `value` / `text`。
+ *
+ * 又是一层纯粹的展示换算：主进程与数据库**一个字都不改**（换回抖币口径不需要动数据）。
+ */
+export interface MoneyFormat {
+  /** 是否按人民币显示（设置开关；关 = 抖币原值，老观感） */
+  cny: boolean
+  /** 金额单位文案的 i18n key（「抖币」/「元」）——组件用自己的 `t` 取，不把 t 塞进上下文 */
+  unitKey: string
+  /** 抖币 → **展示数值**：人民币模式除以 10（保留一位小数），否则原样。给图表数据/模板插值用 */
+  value: (diamonds: number) => number
+  /** 抖币 → **展示数字串**（千分位；人民币模式最多一位小数，抖币模式取整）。给普通文本用 */
+  text: (diamonds: number) => string
+}
+
+/** 人民币展示最多一位小数（抖币价都是整数，除以 10 后一位小数刚好；不写 `1234.5000`） */
+function cnyValue(diamonds: number): number {
+  const coins = Number.isFinite(diamonds) ? diamonds : 0
+  return Math.round((coins / COINS_PER_CNY) * 10) / 10
+}
+
+/** 抖币口径：原样（非有限数按 0——展示层不为 NaN 崩溃，也不编数） */
+const coinMoney: MoneyFormat = {
+  cny: false,
+  unitKey: 'douyin-link.page.unitCoins',
+  value: (diamonds) => (Number.isFinite(diamonds) ? diamonds : 0),
+  // 与 `OverviewPanel.formatNumber` 同口径（取整 + 千分位）：老观感一个字不变
+  text: (diamonds) => Math.round(Number.isFinite(diamonds) ? diamonds : 0).toLocaleString('en-US')
+}
+
+/** 人民币口径：数值 ÷ 10，最多一位小数 */
+const cnyMoney: MoneyFormat = {
+  cny: true,
+  unitKey: 'douyin-link.page.unitCny',
+  value: cnyValue,
+  text: (diamonds) => cnyValue(diamonds).toLocaleString('en-US', { maximumFractionDigits: 1 })
+}
+
+/**
+ * 默认 = **抖币口径**：没包 Provider 时（工装里直接挂某个面板）行为与历史版本一致，
+ * 不会因为少一层 Provider 就把金额悄悄换算了。
+ */
+const MoneyContext = createContext<MoneyFormat>(coinMoney)
+
+/** 当前页面的金额口径（见 `MoneyProvider`） */
+export function useMoney(): MoneyFormat {
+  return useContext(MoneyContext)
+}
+
+/**
+ * 把「按人民币显示金额」开关下发到整页——**在 Page 根部包一次**，
+ * 弹窗（antd portal 到 body）也能拿到（React 上下文会穿过 portal）。
+ */
+export function MoneyProvider(props: { cny: boolean; children: React.ReactNode }): React.JSX.Element {
+  return <MoneyContext.Provider value={props.cny ? cnyMoney : coinMoney}>{props.children}</MoneyContext.Provider>
 }

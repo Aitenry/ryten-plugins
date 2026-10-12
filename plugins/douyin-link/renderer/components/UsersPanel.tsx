@@ -5,7 +5,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type { GiftBreakdownRow, RoomRuntime, UserRankRow } from '../../shared/types'
 import api from '../api'
 import { clearAvatarCache } from './UserAvatar'
-import { EmptyHint, FitTable, Panel, type PluginPalette, usePluginPalette } from './ui'
+import { EmptyHint, FitTable, Panel, type PluginPalette, useMoney, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -34,6 +34,8 @@ export function UsersPanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
+  /** 金额口径（「按人民币显示金额」开关）：礼物价值列与列头都跟着走 */
+  const money = useMoney()
   const [sort, setSort] = useState<'recent' | 'chat' | 'gift'>('chat')
   const [keyword, setKeyword] = useState('')
   const [rows, setRows] = useState<UserRankRow[]>([])
@@ -221,13 +223,14 @@ export function UsersPanel(props: {
                 )
               },
               {
-                title: t('douyin-link.page.colDiamonds'),
+                /* 列头 = 当前金额单位（抖币 / 元），与这一列的数同口径 */
+                title: t(money.unitKey),
                 dataIndex: 'diamonds',
                 width: 84,
                 align: 'right',
                 render: (_value, row) => (
                   <span className={row.stats.diamonds > 0 ? undefined : 'opacity-40'}>
-                    {formatNumber(row.stats.diamonds)}
+                    {money.text(row.stats.diamonds)}
                   </span>
                 )
               },
@@ -262,6 +265,8 @@ function UserGiftsTip(props: {
   children: React.ReactNode
 }): React.JSX.Element {
   const [rows, setRows] = useState<GiftBreakdownRow[] | null>(null)
+  /** 悬停明细里的金额按当前口径显示（人民币开关） */
+  const money = useMoney()
 
   const load = (): void => {
     if (rows !== null) return
@@ -288,7 +293,8 @@ function UserGiftsTip(props: {
             <span style={{ color: props.palette.warn }}>
               {props.t('douyin-link.page.userGiftsTotal', {
                 count: formatNumber(total.count),
-                diamonds: formatNumber(total.diamonds)
+                diamonds: money.text(total.diamonds),
+                unit: props.t(money.unitKey)
               })}
             </span>
           </div>
@@ -306,7 +312,10 @@ function UserGiftsTip(props: {
                     <span className="opacity-60">
                       {' · '}
                       {row.diamonds > 0
-                        ? props.t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                        ? props.t('douyin-link.page.giftDiamonds', {
+                            count: money.text(row.diamonds),
+                            unit: props.t(money.unitKey)
+                          })
                         : props.t('douyin-link.page.giftValueUnknown')}
                     </span>
                   </span>

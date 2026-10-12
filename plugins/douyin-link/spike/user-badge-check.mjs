@@ -361,6 +361,22 @@ async function main() {
     hostPerformance({ todayReceived: 8000, sessionChat: 0, audience: 0, sessionEnter: 0, hostOutput: 0 }) > 0,
     true
   )
+  /*
+   * 用户 2026-10-12 的核心诉求：**收入占大头，弹幕数量不许把整体绩效拉起来**。
+   * 下面两条把新权重钉住：①「高收入、零互动」必须压过「低收入、满互动」；
+   * ②只热闹不变现（弹幕/观众/进场/输出全拉满、收入为 0）的绩效封在 30 分（= 非收入权重之和）。
+   */
+  check(
+    '绩效以收入为大头：高收入零互动 > 低收入满互动',
+    hostPerformance({ todayReceived: 15000, sessionChat: 0, audience: 0, sessionEnter: 0, hostOutput: 0 }) >
+      hostPerformance({ todayReceived: 200, sessionChat: 500, audience: 200, sessionEnter: 100, hostOutput: 100 }),
+    true
+  )
+  check(
+    '只热闹不变现的绩效封顶 30 分（弹幕拉不动整体）',
+    hostPerformance({ todayReceived: 0, sessionChat: 500, audience: 200, sessionEnter: 100, hostOutput: 100 }),
+    30
+  )
 
   /* ------------------------------- 8. 多账号：绑定后所有数按「这个人」汇聚 */
   console.log('\n=== 8. 多账号汇聚（M1 + M2 绑成同一个人）===')

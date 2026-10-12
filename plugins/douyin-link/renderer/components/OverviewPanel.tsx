@@ -3,7 +3,7 @@ import { Slider, theme } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftRankRow, MonitorSession, RoomRuntime, RoomSummary, UserRankRow } from '../../shared/types'
 import api, { normalizeRoomSummary } from '../api'
-import { EmptyHint, Panel, ScrollStyle, type PluginPalette, usePluginPalette } from './ui'
+import { EmptyHint, Panel, ScrollStyle, type PluginPalette, useMoney, usePluginPalette } from './ui'
 import { EChart } from './EChart'
 import type { ChartOption } from '../lib/echarts'
 
@@ -57,6 +57,8 @@ export function OverviewPanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
+  /** 金额口径（「按人民币显示金额」开关，见 ui.tsx 的 MoneyProvider） */
+  const money = useMoney()
   const [summary, setSummary] = useState<RoomSummary | null>(null)
   const [sessions, setSessions] = useState<MonitorSession[]>([])
   const [loading, setLoading] = useState(false)
@@ -181,7 +183,8 @@ export function OverviewPanel(props: {
             <Kpi
               label={t('douyin-link.page.kpiDiamonds')}
               value={summary?.diamonds ?? 0}
-              hint={t('douyin-link.page.kpiDiamondsUnit')}
+              money
+              hint={t(money.unitKey)}
               accent={palette.warn}
               palette={palette}
             />
@@ -298,14 +301,17 @@ function Kpi(props: {
   hint?: string
   accent?: string
   palette: PluginPalette
+  /** 这个数值是**金额**（抖币）：按当前口径换算显示（人民币开关）；计数一律不传它 */
+  money?: boolean
 }): React.JSX.Element {
+  const format = useMoney()
   return (
     <div className="flex min-w-0 flex-col rounded-md px-2 py-1.5" style={{ backgroundColor: props.palette.soft }}>
       <span className="truncate text-[10px] opacity-60">{props.label}</span>
       {/* 数字与单位**同一行**（单位靠右）：分开两行会把「礼物价值 15,070 抖币」读成两条 */}
       <span className="flex min-w-0 items-baseline justify-between gap-1">
         <span className="truncate text-sm font-semibold" style={{ color: props.accent }}>
-          {formatNumber(props.value)}
+          {props.money ? format.text(props.value) : formatNumber(props.value)}
         </span>
         {props.hint ? <span className="shrink-0 text-[10px] opacity-50">{props.hint}</span> : null}
       </span>
@@ -511,6 +517,8 @@ export function GiftRankBoard(props: {
   onOpenUser: (userId: string) => void
 }): React.JSX.Element {
   const { rows, direction, t, palette } = props
+  /** 行尾的金额按当前口径显示（人民币开关） */
+  const money = useMoney()
   if (rows.length === 0) {
     return (
       <span className="text-xs opacity-50">
@@ -560,7 +568,7 @@ export function GiftRankBoard(props: {
               <span className="w-8 shrink-0 text-right opacity-60">×{formatNumber(row.count)}</span>
               <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
                 {row.diamonds > 0
-                  ? t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                  ? t('douyin-link.page.giftDiamonds', { count: money.text(row.diamonds), unit: t(money.unitKey) })
                   : t('douyin-link.page.giftValueUnknown')}
               </span>
             </button>

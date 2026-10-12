@@ -92,6 +92,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       /* metrics (dashboard): compare rooms side by side */
       metrics: {
         kpiTitle: 'Coin revenue overview',
+        /* CNY variants (used when "show amounts in CNY" is on) */
+        kpiTitleCny: 'CNY revenue overview',
         roomsWithGift: 'Rooms with gifts',
         totalGifts: 'Gifts',
         totalGiftsUnit: 'pcs',
@@ -99,8 +101,10 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
         raceTitle: 'Live room revenue ranking',
         raceAt: 'now {{time}}',
         intradayTitle: 'Revenue per minute by room',
+        intradayTitleCny: 'CNY revenue per minute by room',
         intradayHint: 'One line per room (top {{count}}); use the slider below to zoom in',
         rankTitle: 'Coin revenue ranking',
+        rankTitleCny: 'CNY revenue ranking',
         rankHint: 'Click to open that room',
         empty: 'No gift revenue in this window (start monitoring, or pick another range)'
       },
@@ -113,7 +117,9 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       kpiSocial: 'Follows',
       kpiGift: 'Gifts',
       kpiDiamonds: 'Gift value',
-      kpiDiamondsUnit: 'coins',
+      /* Amount unit (one per display mode); templates use it via {{unit}} */
+      unitCoins: 'coins',
+      unitCny: 'CNY',
       kpiUsers: 'Active users',
       kpiRate: 'Avg rate',
       perMinute: 'msg/min',
@@ -159,7 +165,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       colEnter: 'Joins',
       colLike: 'Likes',
       colGift: 'Gifts',
-      colDiamonds: 'Coins',
+      /* the value column header uses the amount unit (unitCoins / unitCny) */
       colLastSeen: 'Last seen',
       searchTitle: 'Message search (stored in the database)',
       roomAny: 'All rooms',
@@ -220,7 +226,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       unknownUser: '(unknown user)',
       /** Shown when only the id is known (used for both the sender and the recipient) */
       idOnly: 'ID {{id}}',
-      giftDiamonds: '{{count}} coins',
+      giftDiamonds: '{{count}} {{unit}}',
       giftValueUnknown: 'value unknown',
       giftReceivedBoard: 'Received gifts',
       giftSentBoard: 'Sent gifts',
@@ -241,7 +247,7 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       giftBoardEmpty: 'No gifts in this window yet',
       giftNameUnknown: '(gift name unknown)',
       userGiftsTitle: 'Gifts from this user',
-      userGiftsTotal: '{{count}} items · {{diamonds}} coins',
+      userGiftsTotal: '{{count}} items · {{diamonds}} {{unit}}',
       interactions:
         'Session: chat {{chat}} · join {{enter}} · follow {{follow}} · like {{like}} · gift {{gift}}',
       sessionUsers: '{{count}} users this session',
@@ -307,9 +313,9 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       /* Gift value split into sent / received; clicking opens the daily-earnings calendar */
       statsGiftSent: 'Sent',
       statsGiftReceived: 'Received',
-      giftCalendarOpen: 'See every day\u2019s sent and received coins, month by month',
+      giftCalendarOpen: 'See every day\u2019s sent and received amounts, month by month',
       /* The gift-value tile shows two bare numbers, so the hint carries their meaning */
-      giftCalendarHint: '{{sent}} (green) \u00b7 {{received}} (amber) \u2014 click for every day\u2019s sent and received coins',
+      giftCalendarHint: '{{sent}} (green) \u00b7 {{received}} (amber) \u2014 click for every day\u2019s sent and received amounts',
       giftCalendarTitle: '{{name}} \u00b7 daily earnings',
       giftCalendarSentRow: 'Sent',
       giftCalendarReceivedRow: 'Received',
@@ -318,8 +324,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       giftCalendarNext: 'Next month',
       giftCalendarEmpty: 'No gift records this month',
       giftCalendarPickMonth: 'Months with records',
-      giftCalendarDaySent: 'Sent {{count}} gifts \u00b7 {{diamonds}} coins',
-      giftCalendarDayReceived: 'Received {{count}} gifts \u00b7 {{diamonds}} coins',
+      giftCalendarDaySent: 'Sent {{count}} gifts \u00b7 {{diamonds}} {{unit}}',
+      giftCalendarDayReceived: 'Received {{count}} gifts \u00b7 {{diamonds}} {{unit}}',
       weekdayMon: 'Mon',
       weekdayTue: 'Tue',
       weekdayWed: 'Wed',
@@ -455,6 +461,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       analyzeFactRecency: 'Last seen',
       analyzeFactActiveDays: 'Active days',
       analyzeFactMonetary: 'Coins sent',
+      /* CNY counterpart of the same tile (unit word is baked into the phrase) */
+      analyzeFactMonetaryCny: 'Sent (CNY)',
       analyzeFactAvgGift: 'Avg per gift',
       analyzeFactPeakHour: 'Peak hour',
       analyzeFactSentiment: 'Sentiment',
@@ -503,8 +511,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       analysisTagMultiTarget: 'Gifts to many',
       /* Findings (with params, composed by the UI) */
       analysisInsightSpendNone: 'Has not gifted yet — currently a pure content consumer.',
-      analysisInsightSpendMid: 'Has sent {{coins}} coins in total, about {{avg}} per gift — small but frequent gifting.',
-      analysisInsightSpendHigh: 'Has sent {{coins}} coins in total, about {{avg}} per gift — a heavy tipping user.',
+      analysisInsightSpendMid: 'Has sent {{coins}} {{unit}} in total, about {{avg}} per gift — small but frequent gifting.',
+      analysisInsightSpendHigh: 'Has sent {{coins}} {{unit}} in total, about {{avg}} per gift — a heavy tipping user.',
       analysisInsightRelationNew: 'First appeared only recently — a brand-new viewer.',
       analysisInsightRelationReturning: 'Has shown up on {{days}} days — a returning visitor still getting familiar.',
       analysisInsightRelationDeep: 'Active on {{days}} days across about {{span}} days — a long-settled loyal fan.',
@@ -649,12 +657,12 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       /* Gifting findings */
       analysisInsightGiftingFocus: 'Gifts concentrate on {{name}} — {{share}}% of everything sent, a clear favourite.',
       analysisInsightGiftingSpread: 'Gifts spread across {{n}} recipients — a broad-support style.',
-      analysisInsightGiftingBurst: 'Largest single gift {{max}} coins vs. an average of {{avg}} — occasional big bursts.',
+      analysisInsightGiftingBurst: 'Largest single gift {{max}} {{unit}} vs. an average of {{avg}} — occasional big bursts.',
       analysisInsightGiftingSteady: 'About {{n}} gifts per gifting day — steady and frequent, small amounts.',
       analysisInsightGiftingSingleKind: 'Gifts are highly concentrated on “{{name}}” ({{share}}%) — once loyal, always loyal.',
       analysisInsightGiftingVariety: 'Sent {{kinds}} kinds of gifts — varied taste, likes to try things.',
       analysisInsightGiftingRhythm: 'Gifting peaks around {{hour}}:00.',
-      analysisInsightGiftingInbound: 'They also received {{coins}} coins in gifts — a mutual-giving relationship exists.'
+      analysisInsightGiftingInbound: 'They also received {{coins}} {{unit}} in gifts — a mutual-giving relationship exists.'
     },
     failure: {
       title: 'Failure',
@@ -699,6 +707,10 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       maxItemsLabel: 'Messages kept in memory',
       kindsLabel: 'Danmaku kinds to show',
       autoScrollLabel: 'Auto-scroll to the newest message',
+      /* "Show amounts in CNY" (2026-10-12): 1 CNY = 10 coins, display-only */
+      cnyDisplayLabel: 'Show amounts in CNY',
+      cnyDisplayHint:
+        'When on, the whole page shows amounts in CNY, converted at 1 CNY = 10 coins (10 coins is 1 yuan, not 10). Display-only: values stay stored in coins, flip it back anytime.',
       cookieLabel: 'Logged-in cookie',
       cookieHint:
         'Douyin only pushes gift messages to logged-in sessions; an anonymous session gets no gifts in regular rooms (chat-room gifts work because they arrive as song requests). Paste the full Douyin web Cookie here and the realtime channel will send it, so gifts also arrive in regular rooms. Empty = anonymous. The cookie is stored only in the local database and never shipped with the plugin; do not share it.',

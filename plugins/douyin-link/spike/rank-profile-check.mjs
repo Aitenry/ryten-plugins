@@ -223,13 +223,18 @@ const summary = () => ({
   }))
 })
 
+/**
+ * 主进程那份设置（可改）：第 9 节把 `cnyDisplay` 打开重挂一次页面，
+ * 验证「整页金额按 1 元 = 10 抖币换算」——快照每次 invoke 都按当前值回。
+ */
+let snapshotSettings = {}
 const handlers = () => {
   const map = new Map()
   map.set(`${PREFIX}snapshot`, () => ({
     rooms: [roomRuntime()],
     activeRoom: ROOM,
     audioRoom: '',
-    settings: {},
+    settings: snapshotSettings,
     recent: [],
     db: {},
     updatedAt: Date.now()
@@ -876,6 +881,55 @@ check(
   true
 )
 check('翻过去之后回的是 9 月', bodyText(calendarModal()).includes('2026-09'), true)
+
+/* ------------- 9. 「按人民币显示金额」：整页金额 ÷10、单位换「元」（用户 2026-10-12） ------------- */
+console.log('\n=== 9. 人民币口径（设置开关打开后整页金额换算）===')
+/*
+ * 口径：**1 元 = 10 抖币**（10 抖币只有 1 块钱，不是 10 块）。开关打开后**整页**金额都要 ÷10
+ * 并换单位——这里打开设置里的开关、重挂一次页面，走「档案 → 礼物价值 → 日历格子 → 某天明细」
+ * 这条链，每一处数字都必须正好是原来的十分之一（1,200 → 120、1,300 → 130、500 → 50），
+ * 单位文案也从「抖币」换成「元」。
+ */
+snapshotSettings = { cnyDisplay: true }
+await act(async () => {
+  root.unmount()
+})
+const cnyRoot = createRoot(dom.window.document.getElementById('root'))
+await act(async () => {
+  cnyRoot.render(React.createElement(Page))
+})
+await settle(600)
+
+const cnyChatRows = rankRows(zh['douyin-link'].page.topChat)
+await click(clickableIn(cnyChatRows[1]))
+check('打开了档案（重挂后依然是同一个人）', bodyText(profileModal()).includes(CHAT_USERS[1].nickname), true)
+const cnyGiftBlock = profileModal()?.querySelector('[data-rb-gift-value]')
+check(
+  '礼物价值两个数都 ÷10（1,200 → 120 元、1,300 → 130 元）',
+  [
+    (cnyGiftBlock?.querySelector('[data-rb-gift-sent]')?.textContent ?? '').trim(),
+    (cnyGiftBlock?.querySelector('[data-rb-gift-received]')?.textContent ?? '').trim()
+  ],
+  ['120', '130']
+)
+check('档案里不再出现「抖币」字样（单位已换成元）', bodyText(profileModal()).includes('抖币'), false)
+
+calls.length = 0
+await click(cnyGiftBlock)
+check('日历月份条按人民币写（本月送礼 120 · 收礼 60）', bodyText(calendarModal()).includes('本月送礼 120 · 收礼 60'), true)
+const cnyCells = [...(calendarModal()?.querySelectorAll('button[data-rb-row]') ?? [])]
+const cnyCellOf = (day) => cnyCells.find((node) => (node.textContent ?? '').trim().startsWith(String(day)))
+/** 格子里的三个 span 依次是「几号 / 送礼 / 收礼」（与第 6 节同一读法） */
+const cnyAmountsOf = (cell) =>
+  [...(cell?.querySelectorAll('span') ?? [])].slice(1).map((node) => (node.textContent ?? '').trim())
+check('8 号格子：送礼 120、收礼 10（格内缩写也跟着换算）', cnyAmountsOf(cnyCellOf(8)), ['120', '10'])
+check('9 号格子：收礼 50（送的那行仍是空点）', cnyAmountsOf(cnyCellOf(9)), ['·', '50'])
+
+await click(cnyCellOf(9))
+const cnyDetail = [...doc.querySelectorAll('.ant-modal')].find((node) =>
+  bodyText(node).includes(zh['douyin-link'].page.giftHistoryBoth)
+)
+check('某天明细的金额带「元」（500 → 50 元）', bodyText(cnyDetail).includes('50 元'), true)
 
 console.log(`\n=== 小结 ===\n${failures === 0 ? '✓ 全部断言通过' : `✗ ${failures} 项断言失败`}`)
 rmSync(workDir, { recursive: true, force: true })

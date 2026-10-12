@@ -96,6 +96,8 @@ export const DouyinLinkZhCN = {
       /* 指标（数据大屏）：把每个直播间拆开并排比 */
       metrics: {
         kpiTitle: '抖币收入总览',
+        /* 人民币口径（设置里打开「按人民币显示金额」时走这几条）——单位词直接内嵌，两条句式各自成立 */
+        kpiTitleCny: '人民币收入总览',
         roomsWithGift: '有流水直播间',
         totalGifts: '礼物件数',
         totalGiftsUnit: '件',
@@ -103,8 +105,10 @@ export const DouyinLinkZhCN = {
         raceTitle: '直播间动态收入排序',
         raceAt: '当前 {{time}}',
         intradayTitle: '直播间每分钟抖币收入走势图',
+        intradayTitleCny: '直播间每分钟人民币收入走势图',
         intradayHint: '每个直播间一条曲线（最多前 {{count}} 个），底部滑块可放大局部时段',
         rankTitle: '抖币收入排行',
+        rankTitleCny: '人民币收入排行',
         rankHint: '点击切到该直播间',
         empty: '这个窗口内没有礼物收入（先开始监控，或换个时间区间）'
       },
@@ -118,7 +122,9 @@ export const DouyinLinkZhCN = {
       kpiSocial: '关注',
       kpiGift: '礼物',
       kpiDiamonds: '礼物价值',
-      kpiDiamondsUnit: '抖币',
+      /* 金额单位（两种口径各一条）：所有「{{count}} {{unit}}」式模板与单位格都用它 */
+      unitCoins: '抖币',
+      unitCny: '元',
       kpiUsers: '活跃用户',
       kpiRate: '平均速率',
       perMinute: '条/分',
@@ -165,7 +171,7 @@ export const DouyinLinkZhCN = {
       colEnter: '进场',
       colLike: '点赞',
       colGift: '礼物',
-      colDiamonds: '抖币',
+      /* 礼物价值那一列的列头用金额单位（`unitCoins` / `unitCny`），列头随口径走 */
       colLastSeen: '最近出现',
       /* 检索 */
       searchTitle: '消息检索（存在数据库里）',
@@ -230,7 +236,7 @@ export const DouyinLinkZhCN = {
       unknownUser: '（未知用户）',
       /** 只有 id 没有昵称时照实显示（送礼人 / 收礼人都用它） */
       idOnly: 'ID {{id}}',
-      giftDiamonds: '{{count}} 抖币',
+      giftDiamonds: '{{count}} {{unit}}',
       giftValueUnknown: '价值未知',
       giftReceivedBoard: '收礼物榜',
       giftSentBoard: '送礼物榜',
@@ -251,7 +257,7 @@ export const DouyinLinkZhCN = {
       giftBoardEmpty: '这个窗口里还没有礼物',
       giftNameUnknown: '（礼物名未知）',
       userGiftsTitle: '这个人的礼物',
-      userGiftsTotal: '共 {{count}} 件 · {{diamonds}} 抖币',
+      userGiftsTotal: '共 {{count}} 件 · {{diamonds}} {{unit}}',
       interactions:
         '本场：弹幕 {{chat}} · 进场 {{enter}} · 关注 {{follow}} · 点赞 {{like}} · 礼物 {{gift}}',
       sessionUsers: '本场 {{count}} 人',
@@ -318,9 +324,9 @@ export const DouyinLinkZhCN = {
       /* 礼物价值拆成送 / 收两个（用户 2026-10-11），点开是「每日收益」日历 */
       statsGiftSent: '送礼',
       statsGiftReceived: '收礼',
-      giftCalendarOpen: '点击查看每个月的每一天送礼和收礼的抖币',
+      giftCalendarOpen: '点击查看每个月的每一天送礼和收礼的金额',
       /* 礼物价值那格只有两个数字（没有文字标签），含义靠这句提示说清 */
-      giftCalendarHint: '{{sent}}（绿）· {{received}}（黄）——点击查看每个月的每一天送礼和收礼的抖币',
+      giftCalendarHint: '{{sent}}（绿）· {{received}}（黄）——点击查看每个月的每一天送礼和收礼的金额',
       giftCalendarTitle: '{{name}} · 每日收益',
       giftCalendarSentRow: '送礼',
       giftCalendarReceivedRow: '收礼',
@@ -329,8 +335,8 @@ export const DouyinLinkZhCN = {
       giftCalendarNext: '下一个月',
       giftCalendarEmpty: '这个月没有礼物记录',
       giftCalendarPickMonth: '有记录的月份',
-      giftCalendarDaySent: '送礼 {{count}} 件 · {{diamonds}} 抖币',
-      giftCalendarDayReceived: '收礼 {{count}} 件 · {{diamonds}} 抖币',
+      giftCalendarDaySent: '送礼 {{count}} 件 · {{diamonds}} {{unit}}',
+      giftCalendarDayReceived: '收礼 {{count}} 件 · {{diamonds}} {{unit}}',
       weekdayMon: '一',
       weekdayTue: '二',
       weekdayWed: '三',
@@ -464,6 +470,8 @@ export const DouyinLinkZhCN = {
       analyzeFactRecency: '最近出现',
       analyzeFactActiveDays: '活跃天数',
       analyzeFactMonetary: '累计抖币',
+      /* 人民币口径的同一格（句式内嵌单位，给两条各自成立的写法） */
+      analyzeFactMonetaryCny: '累计人民币',
       analyzeFactAvgGift: '单次均值',
       analyzeFactPeakHour: '活跃时段',
       analyzeFactSentiment: '情感倾向',
@@ -512,8 +520,8 @@ export const DouyinLinkZhCN = {
       analysisTagMultiTarget: '多对象送礼',
       /* 结论（带参数，由界面拼句） */
       analysisInsightSpendNone: '还没有送过礼物，目前是单纯的内容消费。',
-      analysisInsightSpendMid: '累计送出 {{coins}} 抖币，单次平均约 {{avg}}——处于小额常送阶段。',
-      analysisInsightSpendHigh: '累计送出 {{coins}} 抖币，单次平均约 {{avg}}——属于重度打赏用户。',
+      analysisInsightSpendMid: '累计送出 {{coins}} {{unit}}，单次平均约 {{avg}}——处于小额常送阶段。',
+      analysisInsightSpendHigh: '累计送出 {{coins}} {{unit}}，单次平均约 {{avg}}——属于重度打赏用户。',
       analysisInsightRelationNew: '最近才第一次出现，是刚接触的新观众。',
       analysisInsightRelationReturning: '来过 {{days}} 天，属于还在熟悉阶段的回头客。',
       analysisInsightRelationDeep: '活跃 {{days}} 天、跨度约 {{span}} 天，是长期沉淀的老粉。',
@@ -658,12 +666,12 @@ export const DouyinLinkZhCN = {
       /* 送礼相关结论 */
       analysisInsightGiftingFocus: '送礼集中给 {{name}}，占送出的 {{share}}%——明显偏爱这一个对象。',
       analysisInsightGiftingSpread: '送礼分散在 {{n}} 个对象上，属于广撒网式的捧场。',
-      analysisInsightGiftingBurst: '单笔最高 {{max}} 抖币，明显高于平均 {{avg}}——偶尔会有大额爆发。',
+      analysisInsightGiftingBurst: '单笔最高 {{max}} {{unit}}，明显高于平均 {{avg}}——偶尔会有大额爆发。',
       analysisInsightGiftingSteady: '平均每个送礼日送 {{n}} 次，属于稳定的高频小额。',
       analysisInsightGiftingSingleKind: '礼物高度集中在「{{name}}」（占 {{share}}%），认准了就不换。',
       analysisInsightGiftingVariety: '送过 {{kinds}} 种礼物，偏好多样、乐于尝鲜。',
       analysisInsightGiftingRhythm: '送礼高峰在 {{hour}} 点。',
-      analysisInsightGiftingInbound: '本人还收到过 {{coins}} 抖币的礼物——存在互送关系。'
+      analysisInsightGiftingInbound: '本人还收到过 {{coins}} {{unit}} 的礼物——存在互送关系。'
     },
     failure: {
       title: '失败原因',
@@ -707,6 +715,10 @@ export const DouyinLinkZhCN = {
       maxItemsLabel: '内存里保留的弹幕条数',
       kindsLabel: '显示的弹幕类型',
       autoScrollLabel: '弹幕列表自动跟随最新',
+      /* 「按人民币显示金额」（用户 2026-10-12）：换算口径 1 元 = 10 抖币，只影响界面展示 */
+      cnyDisplayLabel: '按人民币显示金额',
+      cnyDisplayHint:
+        '打开后整个页面都按人民币显示金额，按 1 元 = 10 抖币换算（10 抖币只有 1 块钱，不是 10 块）。只是显示口径：库里仍按抖币原值保存，随时可以换回来。',
       cookieLabel: '登录态 Cookie',
       cookieHint:
         '抖音只向已登录会话推送礼物消息：匿名会话能收到弹幕/进场/点赞，但收不到礼物（所以聊天室的礼物以前只能靠点歌那条专线）。只要你在直播间里看得到礼物、插件里却没有，就是这个原因——把抖音网页版的 Cookie 整行贴进来即可。留空 = 匿名。Cookie 只存在本机数据库、不随插件分发，请勿分享给他人。',

@@ -3,7 +3,7 @@ import { theme } from 'antd'
 import { useTranslation } from '@host/renderer/i18n'
 import type { AllRoomsAnalysis, RoomSeriesRow } from '../../shared/types'
 import api, { normalizeAllRoomsAnalysis } from '../api'
-import { EmptyHint, Panel, ScrollStyle, type PluginPalette, roomLabel, usePluginPalette } from './ui'
+import { EmptyHint, Panel, ScrollStyle, type PluginPalette, roomLabel, useMoney, usePluginPalette } from './ui'
 import { EChart } from './EChart'
 import type { ChartOption } from '../lib/echarts'
 import { clock, formatNumber } from './OverviewPanel'
@@ -33,6 +33,8 @@ export function MetricsPanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
+  /** 金额口径（「按人民币显示金额」开关）：KPI、面板标题、三张图的值都按它显示 */
+  const money = useMoney()
   const [analysis, setAnalysis] = useState<AllRoomsAnalysis | null>(null)
   const [loading, setLoading] = useState(false)
   const minutes = Math.max(1, Math.round((props.range.to - props.range.from) / 60000))
@@ -97,12 +99,15 @@ export function MetricsPanel(props: {
   return (
     <div className="grid h-full min-h-0 grid-cols-12 grid-rows-1 gap-3">
       <div className="col-span-8 flex min-h-0 flex-col gap-3">
-        <Panel className="shrink-0" title={t('douyin-link.page.metrics.kpiTitle')}>
+        <Panel
+          className="shrink-0"
+          title={t(money.cny ? 'douyin-link.page.metrics.kpiTitleCny' : 'douyin-link.page.metrics.kpiTitle')}
+        >
           <div className="grid grid-cols-4 gap-2">
             <Kpi
               label={t('douyin-link.page.kpiDiamonds')}
-              value={formatNumber(totalDiamonds)}
-              hint={t('douyin-link.page.kpiDiamondsUnit')}
+              value={money.text(totalDiamonds)}
+              hint={t(money.unitKey)}
               accent={palette.warn}
               palette={palette}
             />
@@ -135,7 +140,12 @@ export function MetricsPanel(props: {
           )}
         </Panel>
 
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.intradayTitle')}>
+        <Panel
+          className="min-h-0 flex-1"
+          title={t(
+            money.cny ? 'douyin-link.page.metrics.intradayTitleCny' : 'douyin-link.page.metrics.intradayTitle'
+          )}
+        >
           {empty ? (
             <EmptyHint text={emptyText} />
           ) : (
@@ -145,7 +155,10 @@ export function MetricsPanel(props: {
       </div>
 
       <div className="col-span-4 flex min-h-0 flex-col gap-3">
-        <Panel className="min-h-0 flex-1" title={t('douyin-link.page.metrics.rankTitle')}>
+        <Panel
+          className="min-h-0 flex-1"
+          title={t(money.cny ? 'douyin-link.page.metrics.rankTitleCny' : 'douyin-link.page.metrics.rankTitle')}
+        >
           {empty ? (
             <EmptyHint text={emptyText} />
           ) : (
@@ -204,6 +217,8 @@ function BarRace(props: {
   t: Translate
 }): React.JSX.Element {
   const { rooms, colorOf, palette, t } = props
+  /** 柱子右侧的数字按当前口径显示（图里的 data 仍是抖币原值：相对长度不变，只换标签写法） */
+  const money = useMoney()
   const racers = useMemo(() => rooms.slice(0, RACE_TOP), [rooms])
   const length = useMemo(() => racers.reduce((max, room) => Math.max(max, room.series.length), 1), [racers])
   /** 每个房间的累计抖币：`cumulative[r][i]` = 前 i 格（含）之和 */
@@ -263,7 +278,7 @@ function BarRace(props: {
             position: 'right',
             color: palette.text,
             fontSize: 10,
-            formatter: (params: unknown): string => formatNumber((params as { value?: number }).value ?? 0)
+            formatter: (params: unknown): string => money.text((params as { value?: number }).value ?? 0)
           }
         }
       ],
@@ -285,7 +300,7 @@ function BarRace(props: {
         }
       ]
     }
-  }, [racers, cumulative, at, atLabel, colorOf, palette])
+  }, [racers, cumulative, at, atLabel, colorOf, palette, money])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -312,6 +327,8 @@ function IntradayChart(props: {
 }): React.JSX.Element {
   const { rooms, colorOf, palette, t } = props
   const { token } = theme.useToken()
+  /** 折线数值与 tooltip、纵轴刻度都按当前口径显示（图里的 data 仍是抖币原值） */
+  const money = useMoney()
   const series = useMemo(() => rooms.slice(0, LINE_MAX), [rooms])
   const labels = series[0]?.series.map((point) => clock(point.minute)) ?? []
   /** 竖向网格线 / 标签的稀疏步长（约 8 格；分钟级数据逐格画会糊成一片） */
@@ -371,7 +388,7 @@ function IntradayChart(props: {
         const body = rows
           .map(
             (row) =>
-              `<div style="display:flex;justify-content:space-between;gap:8px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${colorOf.get(row.room.webRid) ?? palette.accent};margin-right:4px"></span>${roomLabel(row.room)}</span><span style="flex-shrink:0">${formatNumber(row.value)}</span></div>`
+              `<div style="display:flex;justify-content:space-between;gap:8px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:${colorOf.get(row.room.webRid) ?? palette.accent};margin-right:4px"></span>${roomLabel(row.room)}</span><span style="flex-shrink:0">${money.text(row.value)}</span></div>`
           )
           .join('')
         return `${head}<div style="border-top:1px solid ${palette.split};padding-top:4px">${body}</div>`
@@ -416,7 +433,8 @@ function IntradayChart(props: {
       type: 'value',
       splitNumber: 3,
       splitLine: { lineStyle: { color: palette.split } },
-      axisLabel: { color: palette.axis, fontSize: 10 }
+      // 刻度按当前口径写（人民币模式 ÷10，刻度位数不变，只是读数换成元）
+      axisLabel: { color: palette.axis, fontSize: 10, formatter: (value: number) => money.text(value) }
     },
     series: series.map((room) => {
       const color = colorOf.get(room.webRid) ?? palette.accent
@@ -465,6 +483,8 @@ function RevenueRank(props: {
   onSelect: (webRid: string) => void
 }): React.JSX.Element {
   const { rooms, total, colorOf, t, palette } = props
+  /** 行尾的金额按当前口径显示（占比 % 不受影响：分子分母同口径） */
+  const money = useMoney()
   const max = Math.max(1, ...rooms.map((room) => sumSeries(room.series)))
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -495,7 +515,7 @@ function RevenueRank(props: {
                 />
               </span>
               <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
-                {formatNumber(value)}
+                {money.text(value)}
               </span>
               <span className="w-8 shrink-0 text-right opacity-50">{share}%</span>
             </button>
