@@ -1931,7 +1931,13 @@ export async function exportIdentityGroups(): Promise<IdentityGroup[]> {
     const out: IdentityGroup[] = []
     for (const identity of identities) {
       const ids = accounts.filter((row) => row.identityId === identity.id).map((row) => row.userId)
-      if (ids.length < 2) continue
+      if (ids.length === 0) continue
+      /*
+       * 单账号的画像**只在带备注/备注名时才要导出**：画像本来可以只有一个账号
+       * （第一次写备注时补建的，见 `ensureIdentity`），不导出的话备注就随着换机丢了；
+       * 而「只是碰巧只有一个账号、什么都没写」的那种导出没有意义（导入会重建出同样的空行）。
+       */
+      if (ids.length < 2 && !String(identity.name ?? '').trim() && !String(identity.note ?? '').trim()) continue
       out.push({
         name: identity.name,
         note: identity.note,
@@ -1943,19 +1949,28 @@ export async function exportIdentityGroups(): Promise<IdentityGroup[]> {
   })
 }
 
-/** 导入画像分组：逐个账号绑到一起（`bindAccount` 本身幂等，重复导入不会造出重复画像） */
+/**
+ * 导入画像分组：逐个账号绑到一起（`bindAccount` 本身幂等，重复导入不会造出重复画像）。
+ *
+ * 单账号的分组（只有一个账号，但带备注）走 `ensureIdentity` 补建——见 `exportIdentityGroups`
+ * 的注释：备注是按人存的，换机恢复时必须跟着一起回来。
+ */
 export async function importIdentityGroups(groups: IdentityGroup[]): Promise<number> {
   let bound = 0
   for (const group of groups) {
     const accounts = [...new Set((group?.accounts ?? []).map((id) => String(id ?? '').trim()))].filter((id) =>
-      /^\d{4,}$/.test(id)
+      id.length >= 4
     )
-    if (accounts.length < 2) continue
+    if (accounts.length === 0) continue
     const head = accounts[0]
     let identityId = 0
-    for (const account of accounts.slice(1)) {
-      identityId = (await bindAccount(head, account)) || identityId
-      bound += 1
+    if (accounts.length === 1) {
+      identityId = await ensureIdentity(head)
+    } else {
+      for (const account of accounts.slice(1)) {
+        identityId = (await bindAccount(head, account)) || identityId
+        bound += 1
+      }
     }
     if (identityId) {
       if (group.name) await renameIdentity(identityId, group.name)
