@@ -1056,6 +1056,57 @@ export async function todayGiftTotals(dayStart: number): Promise<Map<string, num
   })
 }
 
+/**
+ * 「今日收入」：本地自然日起，按**收礼人**汇总收到的抖币（与 `todayGiftTotals` 严格对称）。
+ *
+ * 给实时列表行首的**主播**那一套指标用（`今日收入 {{n}}`）；观众看的是 `todayGiftTotals`
+ * （送出去的）。两条都只在低频路径上用：这里由 hub 的进程内账本按天补种一次、之后靠落库增量累加。
+ */
+export async function todayReceivedTotals(dayStart: number): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  await schemaReady
+  return withOrm('douyin-link.todayReceivedTotals', async (db) => {
+    const rows = await db
+      .select({
+        userId: douyinLinkMessages.toUserId,
+        total: sql<number>`coalesce(sum(${douyinLinkMessages.diamonds}), 0)::int`
+      })
+      .from(douyinLinkMessages)
+      .where(
+        and(
+          eq(douyinLinkMessages.kind, 'gift'),
+          gte(douyinLinkMessages.atMs, dayStart),
+          ne(douyinLinkMessages.toUserId, '')
+        )
+      )
+      .groupBy(douyinLinkMessages.toUserId)
+    for (const row of rows) if (row.total > 0) out.set(row.userId, row.total)
+    return out
+  })
+}
+
+/**
+ * 「见过他在麦上」的那批 id（库里粘性列 `on_mic`）。
+ *
+ * 实时列表要按身份给两套指标：运行态麦位是**此刻**的（`recorder.isHostOnAir`），
+ * 而个播经常是「帧里不带麦位信息、只能靠收到的礼物反推」——历史信号就得来库里这一列拿。
+ * 一次一小批 id，走 `douyin_link_users` 的 `(user_id)` 索引，很轻。
+ */
+export async function micUsers(userIds: string[]): Promise<Set<string>> {
+  const ids = [...new Set((userIds ?? []).filter((id) => id.length > 0))]
+  const out = new Set<string>()
+  if (ids.length === 0) return out
+  await schemaReady
+  return withOrm('douyin-link.micUsers', async (db) => {
+    const rows = await db
+      .select({ userId: douyinLinkUsers.userId })
+      .from(douyinLinkUsers)
+      .where(and(inArray(douyinLinkUsers.userId, ids), eq(douyinLinkUsers.onMic, true)))
+    for (const row of rows) out.add(row.userId)
+    return out
+  })
+}
+
 export async function clearUsers(webRid = ''): Promise<void> {
   await schemaReady
   await withOrm('douyin-link.clearUsers', async (db) => {

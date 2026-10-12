@@ -468,12 +468,17 @@ export function formatDiamonds(value: number): string {
 }
 
 /**
- * 行首那截人物信息：**等级 · 消费评分 · 入场次数 · 今日消费**（用户 2026-10-11 的要求）。
+ * 行首那截人物信息，**按身份分两套**（用户 2026-10-14）：
+ * - **观众**：等级 · **消费欲望** · 进场次数 · **今日消费**；
+ * - **主播**：等级 · **绩效指标** · 进场次数 · **今日收入**。
+ *
+ * 身份与两个指标都由主进程算好（`UserBadge.role` / `consumeDesire` / `performance`，
+ * 公式见 `shared/engagement.ts`）；这里只负责按角色挑标签。
  *
  * 版式取舍：
  * - 数字用 `tabular-nums` 对齐（不用等宽字体：等宽只该给拉丁与数字，这里的标签是中文）；
  * - 单位与标签压到 10px、透明度 60%，让昵称与正文仍是这一行的主角；
- * - 0 值**照实显示 0**（「入场 0 次」「今日 0」都是真信息：这个人还没进过场 / 今天没花钱），
+ * - 0 值**照实显示 0**（「进场 0 次」「今日 0」都是真信息：这个人还没进过场 / 今天没花钱），
  *   只有「还没取到这个人」（`badge` 缺失）时整截才不画——不编数字，也不显示「—」占位。
  */
 function PersonStats(props: {
@@ -481,6 +486,7 @@ function PersonStats(props: {
   t: (key: string, options?: Record<string, unknown>) => string
 }): React.JSX.Element {
   const { badge, t } = props
+  const host = badge.role === 'host'
   return (
     <span
       className="ml-1 shrink-0 text-[10px] leading-4 opacity-60"
@@ -488,11 +494,19 @@ function PersonStats(props: {
     >
       {badge.honorLevel > 0 ? <span>{t('douyin-link.feed.badgeLevel', { n: badge.honorLevel })}</span> : null}
       <span> · </span>
-      <span>{t('douyin-link.feed.badgeSpend', { n: badge.spendScore })}</span>
+      <span>
+        {host
+          ? t('douyin-link.feed.badgePerformance', { n: badge.performance })
+          : t('douyin-link.feed.badgeDesire', { n: badge.consumeDesire })}
+      </span>
       <span> · </span>
       <span>{t('douyin-link.feed.badgeEnter', { n: badge.enterTotal })}</span>
       <span> · </span>
-      <span>{t('douyin-link.feed.badgeToday', { n: formatDiamonds(badge.todayDiamonds) })}</span>
+      <span>
+        {host
+          ? t('douyin-link.feed.badgeTodayReceived', { n: formatDiamonds(badge.todayReceived) })
+          : t('douyin-link.feed.badgeToday', { n: formatDiamonds(badge.todayDiamonds) })}
+      </span>
     </span>
   )
 }

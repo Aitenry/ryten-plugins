@@ -259,14 +259,17 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       system: 'system'
     },
     /**
-     * The per-person strip in front of a live-feed row (chat / join rows):
-     * level · spend score · joins · spent today.
+     * The per-person strip in front of a live-feed row (chat / join rows), split by role:
+     * - viewer: level · **spend desire** · joins · **spent today**;
+     * - host: level · **performance** · joins · **earned today**.
      */
     feed: {
       badgeLevel: 'Lv{{n}}',
-      badgeSpend: 'spend {{n}}',
+      badgeDesire: 'desire {{n}}',
+      badgePerformance: 'perf {{n}}',
       badgeEnter: 'joins {{n}}',
-      badgeToday: 'today {{n}}'
+      badgeToday: 'today {{n}}',
+      badgeTodayReceived: 'earned {{n}}'
     },
     lines: {
       member: 'joined the room',
