@@ -269,14 +269,18 @@ export const DouyinLinkZhCN = {
       system: '系统'
     },
     /**
-     * 实时列表行首那截人物信息（弹幕 / 进场两种行上）：等级 · 消费评分 · 入场次数 · 今日消费。
+     * 实时列表行首那截人物信息（弹幕 / 进场两种行上），按身份分两套：
+     * - 观众：等级 · **消费欲望** · 进场次数 · **今日消费**；
+     * - 主播：等级 · **绩效指标** · 进场次数 · **今日收入**。
      * 数字一律走 `tabular-nums` 对齐；`{{n}}` 由界面格式化（抖币万以上折成「1.2万」）。
      */
     feed: {
       badgeLevel: 'Lv{{n}}',
-      badgeSpend: '消费 {{n}}',
+      badgeDesire: '消费欲望 {{n}}',
+      badgePerformance: '绩效指标 {{n}}',
       badgeEnter: '进场 {{n}}',
-      badgeToday: '今日 {{n}}'
+      badgeToday: '今日消费 {{n}}',
+      badgeTodayReceived: '今日收入 {{n}}'
     },
     lines: {
       member: '进入了直播间',

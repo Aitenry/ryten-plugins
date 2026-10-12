@@ -1,14 +1,16 @@
 /**
- * 离线渲染验证：**实时列表行首那截人物信息**（用户 2026-10-11：「弹幕 tab 的用户和进场的用户
- * tab 前面的人物要显示等级，消费评分，入场次数，今天消费」）。
+ * 离线渲染验证：**实时列表行首那截人物信息**（用户 2026-10-11 首次要求；2026-10-14 改为按身份两套）。
  *
- * 这一截有四个数，来源分三层（见 `shared/types.ts` 的 `UserBadge`）：
- * - 等级：本房间档案行的荣誉等级（主进程给）；
- * - 消费评分：本房间累计抖币 + 送礼次数 → `shared/score.ts`（与画像「消费力」同一算法）；
- * - 入场次数 / 今日消费：**跨全部直播间**（渲染层手上没有，只能主进程算 → `api.userBadges`）。
+ * - **观众**：`Lv12 · 消费欲望 87 · 进场 5 · 今日消费 1.2万`
+ * - **主播**：`Lv30 · 绩效指标 100 · 进场 42 · 今日收入 0`
+ *
+ * 数来源分三层（见 `shared/types.ts` 的 `UserBadge`）：
+ * - 身份 / 消费欲望 / 绩效指标：主进程按运行态麦位 + 库里 `on_mic` 判定，两个指标是
+ *   `shared/engagement.ts` 的确定性公式；
+ * - 进场次数 / 今日消费 / 今日收入：**跨全部直播间**（渲染层手上没有，只能主进程算 → `api.userBadges`）。
  *
  * 界面这边要验四件事（把**真产物**挂进 jsdom 跑）：
- * 1. 弹幕行与进场行都显示这四个数，格式对（`Lv12 · 消费 87 · 进场 5 · 今日 1.2万`，万以上折「万」）；
+ * 1. 弹幕行与进场行都显示那四个数，**按身份换标签**，格式对（万以上折「万」）；
  * 2. **批量**：当前可见行一次问回来，不是每行一个请求；
  * 3. **只有弹幕/进场两类行**显示（关注/点赞/礼物不显示；今日 0 照实显示 0）；
  * 4. 新来的弹幕（新人）会被补问一次，数字到了那截就出现。
@@ -123,13 +125,16 @@ const THROTTLE = '500000000015'
 const calls = []
 const subs = new Map()
 
-/** 主进程会回的那个人物信息（等级 / 消费评分 / 入场次数 / 今日消费） */
+/**
+ * 主进程会回的那个人物信息（按身份两套：观众=消费欲望/今日消费，主播=绩效指标/今日收入）。
+ * 这里刻意把 `JOIN` 造成**主播**，好把两套标签都覆盖到。
+ */
 const BADGES = {
-  [CHAT]: { honorLevel: 12, fansClubLevel: 0, spendScore: 87, diamonds: 100, giftCount: 1, enterTotal: 5, todayDiamonds: 12345, fromStore: true },
-  [JOIN]: { honorLevel: 30, fansClubLevel: 0, spendScore: 100, diamonds: 250000, giftCount: 40, enterTotal: 42, todayDiamonds: 0, fromStore: true },
-  [LATER]: { honorLevel: 7, fansClubLevel: 0, spendScore: 22, diamonds: 20, giftCount: 1, enterTotal: 3, todayDiamonds: 6, fromStore: true },
-  [SOCIAL]: { honorLevel: 99, fansClubLevel: 0, spendScore: 99, diamonds: 9, giftCount: 1, enterTotal: 9, todayDiamonds: 9, fromStore: true },
-  [THROTTLE]: { honorLevel: 3, fansClubLevel: 0, spendScore: 33, diamonds: 30, giftCount: 1, enterTotal: 2, todayDiamonds: 30, fromStore: true }
+  [CHAT]: { role: 'viewer', honorLevel: 12, fansClubLevel: 0, consumeDesire: 87, performance: 0, spendScore: 87, diamonds: 100, giftCount: 1, enterTotal: 5, todayDiamonds: 12345, todayReceived: 0, fromStore: true },
+  [JOIN]: { role: 'host', honorLevel: 30, fansClubLevel: 0, consumeDesire: 0, performance: 100, spendScore: 100, diamonds: 250000, giftCount: 40, enterTotal: 42, todayDiamonds: 0, todayReceived: 0, fromStore: true },
+  [LATER]: { role: 'viewer', honorLevel: 7, fansClubLevel: 0, consumeDesire: 22, performance: 0, spendScore: 22, diamonds: 20, giftCount: 1, enterTotal: 3, todayDiamonds: 6, todayReceived: 0, fromStore: true },
+  [SOCIAL]: { role: 'viewer', honorLevel: 99, fansClubLevel: 0, consumeDesire: 99, performance: 0, spendScore: 99, diamonds: 9, giftCount: 1, enterTotal: 9, todayDiamonds: 9, todayReceived: 0, fromStore: true },
+  [THROTTLE]: { role: 'viewer', honorLevel: 3, fansClubLevel: 0, consumeDesire: 33, performance: 0, spendScore: 33, diamonds: 30, giftCount: 1, enterTotal: 2, todayDiamonds: 30, todayReceived: 0, fromStore: true }
 }
 
 let sessionId = 1
@@ -413,25 +418,26 @@ const countOf = (needle) => text().split(needle).length - 1
 /** 断言失败时把页面文字打一截出来（省得靠猜） */
 const dump = () => console.log(`  [调试] 页面文字：${text().replace(/\s+/g, ' ').slice(-500)}`)
 
-console.log('=== 1. 实时页签 →「弹幕」分类：那一行带上四个数 ===')
+console.log('=== 1. 实时页签 →「弹幕」分类：那一行带上四个数（观众口径）===')
 check('切到「实时」页签', await clickTab(zh['douyin-link'].page.tabLive), true)
 await settle(1800)
 if (!text().includes('Lv12')) dump()
 check('弹幕行的等级', text().includes('Lv12'), true)
-check('弹幕行的消费评分', text().includes('消费 87'), true)
-check('弹幕行的入场次数', text().includes('进场 5'), true)
-check('弹幕行的今日消费（12345 → 1.2万）', text().includes('今日 1.2万'), true)
+check('弹幕行的消费欲望', text().includes('消费欲望 87'), true)
+check('弹幕行的进场次数', text().includes('进场 5'), true)
+check('弹幕行的今日消费（12345 → 1.2万）', text().includes('今日消费 1.2万'), true)
 check('这一屏只问了可见的那个人（1 次、1 个 id）', badgeCalls().length, 1)
 check('问的就是弹幕行那个人', badgeCalls()[0]?.args?.[1], [CHAT])
 
-console.log('\n=== 2. 切到「进场」分类：进场行也有这四个数（今日 0 照实显示）===')
+console.log('\n=== 2. 切到「进场」分类：进场行是**主播**，换另一套标签（今日收入 0 照实显示）===')
 check('切到「进场」分类', await clickView(zh['douyin-link'].kinds.member), true)
 await settle(1200)
 if (!text().includes('Lv30')) dump()
 check('进场行的等级', text().includes('Lv30'), true)
-check('进场行的消费评分', text().includes('消费 100'), true)
-check('进场行的入场次数', text().includes('进场 42'), true)
-check('今日 0 照实显示（不是藏起来）', text().includes('今日 0'), true)
+check('进场行的绩效指标（主播口径）', text().includes('绩效指标 100'), true)
+check('进场行的进场次数', text().includes('进场 42'), true)
+check('今日收入 0 照实显示（不是藏起来）', text().includes('今日收入 0'), true)
+check('主播行不出现消费欲望', text().includes('消费欲望'), false)
 check('进场行的 id 被补问了', badgeCalls().at(-1)?.args?.[1] ?? [], [JOIN])
 
 console.log('\n=== 3. 「关注」行不显示这一截（它有自己的重点）===')
@@ -442,7 +448,7 @@ await settle(1200)
 if (!text().includes('阿关注')) dump()
 check('关注行渲染出来了', text().includes('阿关注'), true)
 check('关注行不带这截（虽然主进程也给了他的数字）', text().includes('Lv99'), false)
-check('「消费 」这一屏一次都不出现', countOf('消费 '), 0)
+check('「消费欲望」这一屏一次都不出现', countOf('消费欲望 '), 0)
 
 console.log('\n=== 4. 新来的弹幕（新人）会被补问一次，数字到了就显示 ===')
 check('切回「弹幕」分类', await clickView(zh['douyin-link'].kinds.chat), true)
@@ -455,7 +461,7 @@ console.log(
 )
 check('新人被补进请求', (afterNew.at(-1)?.args?.[1] ?? []).includes(LATER), true)
 check('新人的那截显示出来了（Lv7 / 进场 3）', [text().includes('Lv7'), text().includes('进场 3')], [true, true])
-check('这一屏两行都带这截信息', countOf('消费 '), 2)
+check('这一屏两行都带这截信息', countOf('消费欲望 '), 2)
 
 console.log('\n=== 5. 节流：刚问过的人短时间内不重复问（别把主进程的查询排满）===')
 const beforeThrottle = badgeCalls().length
@@ -466,7 +472,7 @@ check('新人第一次被问了一次', afterFirstAsk - beforeThrottle, 1)
 await push(`${PREFIX}messages`, { webRid: ROOM, items: [item('chat', '第二句', '阿节流', THROTTLE)] })
 await settle(900)
 check('同一人 5 秒内再说话：没有再发请求', badgeCalls().length, afterFirstAsk)
-check('那一行照旧带着之前问到的数字', text().includes('Lv3') || text().includes('消费 33'), true)
+check('那一行照旧带着之前问到的数字', text().includes('Lv3') || text().includes('消费欲望 33'), true)
 
 console.log(`\n=== 小结 ===\n${failures === 0 ? '✓ 全部断言通过' : `✗ ${failures} 项断言失败`}`)
 rmSync(workDir, { recursive: true, force: true })

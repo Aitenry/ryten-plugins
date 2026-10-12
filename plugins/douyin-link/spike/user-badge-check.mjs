@@ -118,6 +118,7 @@ export { AnalyzerHub } from '${slash(join(PLUGIN, 'main/monitor/hub.ts'))}'
 export { TodaySpend } from '${slash(join(PLUGIN, 'main/monitor/today-spend.ts'))}'
 export * as mapper from '${slash(join(PLUGIN, 'main/db/mapper.ts'))}'
 export { spendScore } from '${slash(join(PLUGIN, 'shared/score.ts'))}'
+export { consumeDesire, hostPerformance } from '${slash(join(PLUGIN, 'shared/engagement.ts'))}'
 export { rawQuery, closeOrm } from '@host/main/database/orm'
 `,
     loader: 'ts',
@@ -150,7 +151,7 @@ export { rawQuery, closeOrm } from '@host/main/database/orm'
 })
 
 process.env.DY_PGLITE_URL = pathToFileURL(resolvePglite()).href
-const { AnalyzerHub, TodaySpend, mapper, spendScore, rawQuery, closeOrm } = await import(pathToFileURL(outfile).href)
+const { AnalyzerHub, TodaySpend, mapper, spendScore, consumeDesire, hostPerformance, rawQuery, closeOrm } = await import(pathToFileURL(outfile).href)
 
 /* ------------------------------------------------------------------ 工具 */
 
@@ -289,6 +290,42 @@ async function main() {
   console.log(`  ${JSON.stringify({ 等级: fresh.honorLevel, 评分: fresh.spendScore, 入场: fresh.enterTotal, fromStore: fresh.fromStore })}`)
   check('fromStore = false', fresh.fromStore, false)
   check('没有数据时四个数都是 0（不编）', [fresh.honorLevel, fresh.spendScore, fresh.enterTotal, fresh.todayDiamonds], [0, 0, 0, 0])
+
+  /* ---------------------------- 7. 消费欲望 / 绩效指标（公式性质 + 接线） */
+  console.log('\n=== 7. 消费欲望（观众）/ 绩效指标（主播）===')
+  check('观众：身份判定为 viewer', badge.role, 'viewer')
+  check('观众：今日收入恒为 0（那是主播口径）', badge.todayReceived, 0)
+  check('观众：消费欲望落在 0-100', badge.consumeDesire >= 0 && badge.consumeDesire <= 100, true)
+  check('观众：没数据时消费欲望是 0（不编）', fresh.consumeDesire, 0)
+
+  const base = { spendScore: 60, enterTotal: 12, chatTotal: 40, hoursSinceLastSeen: 1, activeNow: false }
+  check(
+    '消费欲望随时间衰减：1 小时前 > 3 天前',
+    consumeDesire(base) > consumeDesire({ ...base, hoursSinceLastSeen: 72 }),
+    true
+  )
+  check(
+    '「此刻还在场」不打折：在场 > 同样时间的衰减值',
+    consumeDesire({ ...base, activeNow: true }) > consumeDesire(base),
+    true
+  )
+  check(
+    '消费欲望随进场/说话增长',
+    consumeDesire({ ...base, activeNow: true, enterTotal: 18, chatTotal: 90 }) >
+      consumeDesire({ ...base, activeNow: true, enterTotal: 2, chatTotal: 3 }),
+    true
+  )
+  check(
+    '绩效指标由直播内容构成：有收入 + 有互动 > 全 0',
+    hostPerformance({ todayReceived: 5000, sessionChat: 200, audience: 80, sessionEnter: 40, hostOutput: 30 }) >
+      hostPerformance({ todayReceived: 0, sessionChat: 0, audience: 0, sessionEnter: 0, hostOutput: 0 }),
+    true
+  )
+  check(
+    '绩效指标只看收入（没监控内容）也 > 0',
+    hostPerformance({ todayReceived: 8000, sessionChat: 0, audience: 0, sessionEnter: 0, hostOutput: 0 }) > 0,
+    true
+  )
 
   hub.dispose()
 }

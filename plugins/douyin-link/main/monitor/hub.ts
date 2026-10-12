@@ -65,6 +65,7 @@ import { avatarCache } from '../avatar'
 import { RoomRecorder, minuteOf } from './recorder'
 import { TodaySpend } from './today-spend'
 import { spendScore } from '../../shared/score'
+import { consumeDesire, hostPerformance } from '../../shared/engagement'
 import { buildUserAnalysis } from '../analysis/portrait'
 import { buildRoomContext, roomBaselineOf } from '../analysis/context'
 import {
@@ -3045,71 +3046,115 @@ export class AnalyzerHub {
   }
 
   /**
-   * 实时列表行首那几个数（用户 2026-10-11：「弹幕 tab 的用户和进场的用户前面的人物要显示
-   * 等级，消费评分，入场次数，今天消费」）。
+   * 实时列表行首那几个数（用户 2026-10-11 首次要求；2026-10-14 改成**按身份两套**）。
    *
    * 一次查一批 id（界面按可见行 + 新到的消息批攒 id，1 秒节流一次），口径：
+   * - **身份**：运行态在麦上 / 是房间主播（`recorder.isHostOnAir`）**或**库里粘性的
+   *   「见过他在麦上」（`micUsers`）→ 主播，否则观众；
    * - **等级**（荣誉/粉丝团）、**消费评分**（本房间累计，算法同画像的「消费力」）：本房间档案行；
    *   还没落库的新人退回本场数字（`fromStore = false`，几秒后就会被 flush 补上）；
-   * - **入场次数**：跨全部直播间合计（`enterTotalsByUser`）；
-   * - **今日消费**：跨全部直播间、本地自然日（`todaySpend` 账本，见 `ensureTodaySpend`）。
+   * - **进场次数**：跨全部直播间合计（`enterTotalsByUser`）；
+   * - **今日消费 / 今日收入**：都跨全部直播间、本地自然日（`todaySpend` / `todayReceived` 两本账）。
+   *
+   * 两个新指标（观众看 `consumeDesire`、主播看 `performance`）都是纯公式，见 `shared/engagement.ts`。
    */
   async userBadges(webRid: string, userIds: string[]): Promise<UserBadge[]> {
     const ids = [...new Set(userIds.map((id) => String(id ?? '').trim()).filter((id) => /^\d{4,}$/.test(id)))]
     if (ids.length === 0) return []
     const capped = ids.slice(0, BADGE_ROWS_CAP)
-    await this.ensureTodaySpend()
-    const [stored, enterTotals] = await Promise.all([
+    await this.ensureTodayLedgers()
+    const [stored, enterTotals, mic] = await Promise.all([
       webRid ? store.getUsers(webRid, capped) : Promise.resolve(new Map<string, UserRankRow>()),
-      store.enterTotalsByUser(capped)
+      store.enterTotalsByUser(capped),
+      store.micUsers(capped).catch(() => new Set<string>())
     ])
     const state = this.states.get(webRid)
+    const recorder = state?.recorder
+    const now = Date.now()
     return capped.map((id) => {
       const row = stored.get(id)
-      const session = state?.recorder.profile(id)
+      const session = recorder?.profile(id)
+      // 身份：运行态在麦上 / 是房间主播，或库里「见过他在麦上」（个播常常只有这一条线索）
+      const host = mic.has(id) || (recorder?.isHostOnAir(id) ?? false)
       const diamonds = row?.stats.diamonds ?? session?.stats.diamonds ?? 0
       const giftCount = row?.stats.gift ?? session?.stats.gift ?? 0
+      const chatTotal = row?.stats.chat ?? session?.stats.chat ?? 0
+      const score = spendScore(diamonds, giftCount)
+      // 跨房间的合计：库里那一列（这个 id 在所有房间的 enter 之和）；查不到就退回本场进场数
+      const enterTotal = enterTotals.get(id) ?? session?.stats.enter ?? 0
+      const todayDiamonds = this.todaySpend.get(id)
+      const todayReceived = this.todayReceived.get(id)
+      const lastSeen = Math.max(row?.lastSeen ?? 0, session?.lastSeen ?? 0)
+      const hoursSinceLastSeen = lastSeen > 0 ? Math.max(0, (now - lastSeen) / 3600000) : 24 * 365
+      // 「此刻还在场」：今天花过钱，或最近十分钟出现过（刚进过场 / 刚说过话）
+      const activeNow = todayDiamonds > 0 || (lastSeen > 0 && now - lastSeen < 10 * 60_000)
       return {
         userId: id,
+        role: host ? 'host' : 'viewer',
         honorLevel: Math.max(row?.honorLevel ?? 0, session?.honorLevel ?? 0),
         fansClubLevel: Math.max(row?.fansClubLevel ?? 0, session?.fansClubLevel ?? 0),
-        spendScore: spendScore(diamonds, giftCount),
+        consumeDesire: host
+          ? 0
+          : consumeDesire({ spendScore: score, enterTotal, chatTotal, hoursSinceLastSeen, activeNow }),
+        performance: host
+          ? hostPerformance({
+              todayReceived,
+              sessionChat: recorder?.counters.chat ?? 0,
+              audience: recorder?.users ?? 0,
+              sessionEnter: recorder?.counters.enter ?? 0,
+              hostOutput: session?.stats.chat ?? 0
+            })
+          : 0,
+        spendScore: score,
         diamonds,
         giftCount,
-        // 跨房间的合计：库里那一列（这个 id 在所有房间的 enter 之和）；查不到就退回本场进场数
-        enterTotal: enterTotals.get(id) ?? session?.stats.enter ?? 0,
-        todayDiamonds: this.todaySpend.get(id),
+        enterTotal,
+        todayDiamonds,
+        todayReceived,
         fromStore: Boolean(row)
       }
     })
   }
 
   /**
-   * 「今日消费」账本（跨全部直播间、按本地自然日）：内存累加 + 换天/启动时从库里补种。
+   * 「今日消费 / 今日收入」两本账（跨全部直播间、按本地自然日）：内存累加 + 换天/启动时从库里补种。
    *
    * 为什么不每次查库、以及两个入口的口径，见 `./today-spend.ts` 的注释。
+   * 两本账复用同一个类：`TodaySpend` 本来就是「按人 + 按天 + 增量累加」，
+   * 「收礼人」只是把键换成 `toUserId`（见 `noteTodaySpend`）。
    */
   private todaySpend = new TodaySpend()
+  private todayReceived = new TodaySpend()
 
   /** 补种（进程刚起来 / 刚换天时跑一次；库里的合计是权威） */
-  private async ensureTodaySpend(): Promise<void> {
+  private async ensureTodayLedgers(): Promise<void> {
     const day = String(localDayStart())
     this.todaySpend.roll(day)
-    if (this.todaySpend.seeded) return
+    this.todayReceived.roll(day)
+    if (this.todaySpend.seeded && this.todayReceived.seeded) return
     try {
-      this.todaySpend.seed(await store.todayGiftTotals(Number(day)))
+      const [sent, received] = await Promise.all([
+        this.todaySpend.seeded ? Promise.resolve(new Map<string, number>()) : store.todayGiftTotals(Number(day)),
+        this.todayReceived.seeded ? Promise.resolve(new Map<string, number>()) : store.todayReceivedTotals(Number(day))
+      ])
+      if (!this.todaySpend.seeded) this.todaySpend.seed(sent)
+      if (!this.todayReceived.seeded) this.todayReceived.seed(received)
     } catch (error) {
-      logger.warn('[douyin-link] 今日消费补种失败（先用内存里的增量）:', describe(error))
+      logger.warn('[douyin-link] 今日账本补种失败（先用内存里的增量）:', describe(error))
       // 标记成已补种：否则每次问都重试一次，失败会一直打库
       this.todaySpend.seed(new Map())
+      this.todayReceived.seed(new Map())
     }
   }
 
-  /** 落库之后把这一批的礼物抖币加进「今日消费」（跨房间共用一本账） */
+  /** 落库之后把这一批的礼物抖币加进「今日消费 / 今日收入」两本账（跨房间共用） */
   private noteTodaySpend(rows: MessageRow[]): void {
     if (rows.length === 0) return
-    this.todaySpend.roll(String(localDayStart()))
+    const day = String(localDayStart())
+    this.todaySpend.roll(day)
     this.todaySpend.note(rows)
+    this.todayReceived.roll(day)
+    this.todayReceived.note(rows.map((row) => ({ kind: row.kind, userId: row.toUserId, diamonds: row.diamonds })))
   }
 
   /**
