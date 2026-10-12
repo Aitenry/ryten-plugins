@@ -36,6 +36,7 @@ import { MetricsPanel } from './components/MetricsPanel'
 import { OverviewPanel } from './components/OverviewPanel'
 import { PresencePanel } from './components/PresencePanel'
 import {
+  MoneyProvider,
   PageShell,
   Pane,
   Panel,
@@ -46,9 +47,10 @@ import {
   splitModalProps,
   cleanName,
   roomLabel,
+  useMoney,
   usePluginPalette
 } from './components/ui'
-import type { PillTabItem, PluginPalette } from './components/ui'
+import type { MoneyFormat, PillTabItem, PluginPalette } from './components/ui'
 import { RoomRail } from './components/RoomRail'
 import { SearchPanel } from './components/SearchPanel'
 import { UserAvatar, forgetAvatar } from './components/UserAvatar'
@@ -1044,8 +1046,14 @@ export default function Page(): React.JSX.Element {
   const activeTabItems = mode === 'room' ? roomTabItems : dashboardTabItems
 
   return (
-    /* 页头整条去掉了：标题与「数据库：… / 声音状态」都由宿主界面和下面的面板给出了，
-       这里不再重复一行。PageShell 的 header 省略即可（顶栏高度随之收掉）。 */
+    /*
+      金额口径在这里下发一次（设置 →「按人民币显示金额」，见 ui.tsx 的 MoneyProvider）：
+      页面上所有面板、档案弹窗、图表 tooltip 都从上下文取换算，**各处不自己写除以 10**。
+      包在整个页面最外层，antd 弹窗（portal 到 body）也能拿到。
+    */
+    <MoneyProvider cny={settings?.cnyDisplay === true}>
+    {/* 页头整条去掉了：标题与「数据库：… / 声音状态」都由宿主界面和下面的面板给出了，
+       这里不再重复一行。PageShell 的 header 省略即可（顶栏高度随之收掉）。 */}
     <PageShell>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {/*
@@ -1229,6 +1237,7 @@ export default function Page(): React.JSX.Element {
         />
       ) : null}
     </PageShell>
+    </MoneyProvider>
   )
 }
 
@@ -1915,6 +1924,7 @@ function GiftValueBlock(props: {
   palette: PluginPalette
   onClick: () => void
 }): React.JSX.Element {
+  const money = useMoney()
   return (
     <button
       type="button"
@@ -1939,14 +1949,14 @@ function GiftValueBlock(props: {
           className="min-w-0 truncate text-sm font-semibold"
           style={{ color: props.sentColor }}
         >
-          {formatNumber(props.sent)}
+          {money.text(props.sent)}
         </span>
         <span
           data-rb-gift-received=""
           className="min-w-0 truncate text-sm font-semibold"
           style={{ color: props.receivedColor }}
         >
-          {formatNumber(props.received)}
+          {money.text(props.received)}
         </span>
       </span>
     </button>
@@ -1975,6 +1985,34 @@ function StatBlock(props: {
 /** 机器键 → i18n 键后缀：首字母大写（`spending` → `Spending`、`bigSpender` → `BigSpender`） */
 function cap(key: string): string {
   return key ? key.charAt(0).toUpperCase() + key.slice(1) : ''
+}
+
+/**
+ * 结论里**带金额的参数**（按 key 列）：主进程给的 `insight.params` 一律是**抖币原值**
+ * （见 `main/analysis/portrait.ts` 的 `buildInsights`），只有下面这几个 key 的参数是钱——
+ * `spendMid`/`spendHigh` 的 `{{coins}}` 与 `{{avg}}`、`giftingBurst` 的 `{{max}}` 与 `{{avg}}`、
+ * `giftingInbound` 的 `{{coins}}`。其余 key（天数、小时、占比……）原样透传，别把计数也换算掉。
+ */
+const MONEY_INSIGHT_PARAMS: Record<string, string[]> = {
+  spendMid: ['coins', 'avg'],
+  spendHigh: ['coins', 'avg'],
+  giftingBurst: ['max', 'avg'],
+  giftingInbound: ['coins']
+}
+
+/** 把结论参数里的金额按当前口径换算（人民币开关），其余参数原样返回 */
+function insightMoneyParams(
+  insight: UserAnalysis['insights'][number],
+  money: MoneyFormat
+): Record<string, string | number> {
+  const keys = MONEY_INSIGHT_PARAMS[insight.key]
+  if (!keys) return insight.params
+  const params: Record<string, string | number> = { ...insight.params }
+  for (const key of keys) {
+    const value = params[key]
+    if (typeof value === 'number') params[key] = money.value(value)
+  }
+  return params
 }
 
 /** 距最近出现：刚刚 / N 分钟前 / N 小时前 / N 天前（`hours` 是小时数） */
@@ -2093,6 +2131,8 @@ function RelationshipGraph(props: {
   t: Translate
 }): React.JSX.Element | null {
   const { analysis, palette, t } = props
+  /** 线上的金额（送礼值）按当前口径显示（人民币开关见 ui.tsx 的 MoneyProvider） */
+  const money = useMoney()
   const outgoing = analysis.network.outgoing.slice(0, NETWORK_MAX_NODES)
   const incoming = analysis.network.incoming.slice(0, NETWORK_MAX_NODES)
   if (outgoing.length === 0 && incoming.length === 0) return null
@@ -2112,7 +2152,7 @@ function RelationshipGraph(props: {
   const radiusOf = (share: number): number => 5 + (7 * Math.max(0, Math.min(100, share))) / 100
   const widthOf = (share: number): number => 1 + (4 * Math.max(0, Math.min(100, share))) / 100
   const weightText = (peer: UserAnalysis['network']['outgoing'][number]): string =>
-    peer.diamonds > 0 ? formatNumber(peer.diamonds) : `${formatNumber(peer.items)} ${t('douyin-link.users.analyzeGiftItem')}`
+    peer.diamonds > 0 ? money.text(peer.diamonds) : `${formatNumber(peer.items)} ${t('douyin-link.users.analyzeGiftItem')}`
 
   return (
     <div className="flex flex-col gap-1">
@@ -2175,11 +2215,11 @@ function RelationshipGraph(props: {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] opacity-60">
         <span className="flex items-center gap-1">
           <span className="inline-block h-1.5 w-3 rounded-full" style={{ backgroundColor: palette.accent }} />
-          {t('douyin-link.users.analyzeNetworkOut', { coins: formatNumber(analysis.network.outTotal) })}
+          {t('douyin-link.users.analyzeNetworkOut', { coins: money.text(analysis.network.outTotal) })}
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block h-1.5 w-3 rounded-full" style={{ backgroundColor: palette.up }} />
-          {t('douyin-link.users.analyzeNetworkIn', { coins: formatNumber(analysis.network.inTotal) })}
+          {t('douyin-link.users.analyzeNetworkIn', { coins: money.text(analysis.network.inTotal) })}
         </span>
       </div>
       {outgoing.length > 0 ? (
@@ -2214,6 +2254,8 @@ function UserAnalysisPanel(props: {
   t: Translate
 }): React.JSX.Element {
   const { analysis, palette, t } = props
+  /** 量化事实里的金额（累计抖币 / 单次均值 / 单笔最大）按当前口径显示 */
+  const money = useMoney()
   if (!analysis.hasData) {
     return (
       <div className="rounded-md px-2.5 py-2 text-xs opacity-70" style={{ backgroundColor: palette.soft }}>
@@ -2429,7 +2471,7 @@ function UserAnalysisPanel(props: {
               />
               <StatBlock
                 label={t('douyin-link.users.analyzeGiftingMax')}
-                value={formatNumber(analysis.gifting.maxGift)}
+                value={money.text(analysis.gifting.maxGift)}
                 palette={palette}
               />
               <StatBlock
@@ -2515,7 +2557,11 @@ function UserAnalysisPanel(props: {
             <span key={`${insight.key}-${index}`} className="flex items-start gap-1 text-[11px] leading-4 opacity-80">
               <span style={{ color: palette.accent }}>•</span>
               <span className="min-w-0 flex-1">
-                {t(`douyin-link.users.analysisInsight${cap(insight.key)}`, insight.params)}
+                {/* 结论参数里的金额（{{coins}}/{{avg}}/{{max}}）按当前口径换算，并带上单位文案 */}
+                {t(`douyin-link.users.analysisInsight${cap(insight.key)}`, {
+                  ...insightMoneyParams(insight, money),
+                  unit: t(money.unitKey)
+                })}
               </span>
             </span>
           ))}
@@ -2536,13 +2582,15 @@ function UserAnalysisPanel(props: {
             palette={palette}
           />
           <StatBlock
-            label={t('douyin-link.users.analyzeFactMonetary')}
-            value={formatNumber(facts.monetary)}
+            label={t(
+              money.cny ? 'douyin-link.users.analyzeFactMonetaryCny' : 'douyin-link.users.analyzeFactMonetary'
+            )}
+            value={money.text(facts.monetary)}
             palette={palette}
           />
           <StatBlock
             label={t('douyin-link.users.analyzeFactAvgGift')}
-            value={formatNumber(facts.avgGift)}
+            value={money.text(facts.avgGift)}
             palette={palette}
           />
           <StatBlock

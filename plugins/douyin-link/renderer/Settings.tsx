@@ -295,6 +295,24 @@ export default function Settings(): React.JSX.Element {
           />
         </Row>
 
+        {/*
+          「按人民币显示金额」（用户 2026-10-12）：打开后**整页**金额都按 1 元 = 10 抖币换算展示
+          （数值 ÷ 10、单位换「元」），库里仍按抖币原值存——换回来不动任何数据。
+          `data-rb-cny-display`：给工装一个稳定钩子（页面上有多个 Switch，按类名取会抓错）。
+        */}
+        <Row
+          label={t('douyin-link.settingsPage.cnyDisplayLabel')}
+          hint={t('douyin-link.settingsPage.cnyDisplayHint')}
+        >
+          <span data-rb-cny-display="" className="inline-flex">
+            <Switch
+              size="small"
+              checked={settings?.cnyDisplay === true}
+              onChange={(value) => void save({ cnyDisplay: value })}
+            />
+          </span>
+        </Row>
+
         <Row
           label={t('douyin-link.settingsPage.cookieLabel')}
           hint={t('douyin-link.settingsPage.cookieHint')}

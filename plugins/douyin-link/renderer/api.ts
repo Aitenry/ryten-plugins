@@ -125,6 +125,8 @@ export const FALLBACK_SETTINGS: LiveSettings = {
   monitorConcurrency: 3,
   resumeOnStart: true,
   retentionDays: 7,
+  /** 金额默认按抖币显示（人民币换算开关见 `shared/types.ts` 的 LiveSettings.cnyDisplay） */
+  cnyDisplay: false,
   /** 没选过 = null（用宿主的默认模型）；设置页会把「实际会用的那一个」显示出来 */
   portraitProviderId: null,
   /** 默认不动模型（关思考要用户显式打开：它只对支持 `think` 的本地供应商有意义） */
@@ -162,6 +164,7 @@ export function normalizeSettings(value: unknown, fallback: LiveSettings = FALLB
       typeof value.retentionDays === 'number' && Number.isFinite(value.retentionDays)
         ? value.retentionDays
         : fallback.retentionDays,
+    cnyDisplay: bool(value.cnyDisplay, fallback.cnyDisplay),
     portraitProviderId:
       typeof providerId === 'number' && Number.isFinite(providerId) && providerId > 0
         ? Math.round(providerId)

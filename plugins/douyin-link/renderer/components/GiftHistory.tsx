@@ -4,7 +4,7 @@ import { RiArrowLeftLine, RiArrowRightLine, RiRefreshLine } from '@remixicon/rea
 import { useTranslation } from '@host/renderer/i18n'
 import type { GiftHistoryRow } from '../../shared/types'
 import api from '../api'
-import { ScrollStyle, formModalProps, usePluginPalette } from './ui'
+import { ScrollStyle, formModalProps, useMoney, usePluginPalette } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -53,6 +53,8 @@ export function GiftHistoryModal(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
+  /** 明细里的金额按当前口径显示（人民币开关） */
+  const money = useMoney()
   const [rows, setRows] = useState<GiftHistoryRow[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
@@ -202,7 +204,7 @@ export function GiftHistoryModal(props: {
                   {row.count > 1 ? <span className="shrink-0 opacity-60">×{row.count}</span> : null}
                   <span className="w-16 shrink-0 text-right font-medium" style={{ color: palette.warn }}>
                     {row.diamonds > 0
-                      ? t('douyin-link.page.giftDiamonds', { count: formatNumber(row.diamonds) })
+                      ? t('douyin-link.page.giftDiamonds', { count: money.text(row.diamonds), unit: t(money.unitKey) })
                       : t('douyin-link.page.giftValueUnknown')}
                   </span>
                 </div>

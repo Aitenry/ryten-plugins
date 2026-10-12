@@ -3,7 +3,7 @@ import { Button, Segmented, Tooltip } from 'antd'
 import { RiArrowDownLine, RiLoginCircleLine, RiHeartLine, RiAddCircleLine, RiGiftLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { DanmakuItem, DanmakuKind, UserBadge, UserProfile } from '../../shared/types'
-import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
+import { ScrollStyle, useMoney, usePluginPalette, type PluginPalette } from './ui'
 import { UserAvatar } from './UserAvatar'
 
 /**
@@ -300,6 +300,8 @@ function DanmakuRow(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { item, palette, user } = props
+  /** 金额口径（「按人民币显示金额」开关）：礼物价值那一列按它显示 */
+  const money = useMoney()
   const accent = kindColor(item.kind, palette)
 
   /**
@@ -415,7 +417,10 @@ function DanmakuRow(props: {
       {item.kind === 'gift' && (item.user || item.userId) ? (
         <span className="shrink-0 text-[10px] opacity-60">
           {item.diamonds > 0
-            ? t('douyin-link.page.giftDiamonds', { count: formatDiamonds(item.diamonds) })
+            ? t('douyin-link.page.giftDiamonds', {
+                count: formatDiamonds(money.value(item.diamonds)),
+                unit: t(money.unitKey)
+              })
             : t('douyin-link.page.giftValueUnknown')}
         </span>
       ) : null}
@@ -463,7 +468,12 @@ export function giftRecipientText(
   })
 }
 
-/** 抖币数字（万以上折成「1.2万」，弹幕行里放不下长数字） */
+/**
+ * 金额数字的**短写法**（万以上折成「1.2万」，弹幕行里放不下长数字）。
+ *
+ * 注意传进来的应当是**当前口径的数值**（`money.value(...)` 的结果）——人民币模式下
+ * 那是除以 10 之后的元数，缩写也跟着按元算（100000 抖币 = 1 万元）。
+ */
 export function formatDiamonds(value: number): string {
   if (value >= 10000) return `${Math.round(value / 1000) / 10}万`
   return String(value)
@@ -515,6 +525,8 @@ function PersonStats(props: {
   t: (key: string, options?: Record<string, unknown>) => string
 }): React.JSX.Element {
   const { badge, t } = props
+  /** 「今日消费 / 今日收入」也是金额：按当前口径换算（人民币开关） */
+  const money = useMoney()
   const host = badge.role === 'host'
   return (
     <span
@@ -533,8 +545,8 @@ function PersonStats(props: {
       <span> · </span>
       <span>
         {host
-          ? t('douyin-link.feed.badgeTodayReceived', { n: formatDiamonds(badge.todayReceived) })
-          : t('douyin-link.feed.badgeToday', { n: formatDiamonds(badge.todayDiamonds) })}
+          ? t('douyin-link.feed.badgeTodayReceived', { n: formatDiamonds(money.value(badge.todayReceived)) })
+          : t('douyin-link.feed.badgeToday', { n: formatDiamonds(money.value(badge.todayDiamonds)) })}
       </span>
     </span>
   )

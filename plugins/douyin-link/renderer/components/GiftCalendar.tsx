@@ -5,7 +5,7 @@ import { useTranslation } from '@host/renderer/i18n'
 import type { GiftDayRow } from '../../shared/types'
 import { dayRangeOf, monthDays } from '../../shared/gift-calendar'
 import api from '../api'
-import { ScrollStyle, usePluginPalette, type PluginPalette } from './ui'
+import { ScrollStyle, useMoney, usePluginPalette, type PluginPalette } from './ui'
 import { MODAL_Z } from './modal-z'
 import { formatNumber } from './OverviewPanel'
 
@@ -49,6 +49,8 @@ export function GiftCalendarModal(props: {
 
   const palette = usePluginPalette()
   const { token } = theme.useToken()
+  /** 金额口径（「按人民币显示金额」开关）：月合计、格内数字、悬浮明细都按它显示 */
+  const money = useMoney()
   const [month, setMonth] = useState('')
   const [months, setMonths] = useState<string[]>([])
   const [days, setDays] = useState<GiftDayRow[]>([])
@@ -162,8 +164,8 @@ export function GiftCalendarModal(props: {
           />
           <span className="ml-auto min-w-0 truncate text-[11px] opacity-60">
             {t('douyin-link.users.giftCalendarMonthTotal', {
-              sent: formatNumber(totals.sent),
-              received: formatNumber(totals.received)
+              sent: money.text(totals.sent),
+              received: money.text(totals.received)
             })}
           </span>
         </div>
@@ -219,7 +221,7 @@ export function GiftCalendarModal(props: {
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                         <span style={{ fontWeight: 500 }}>{day.label}</span>
                         <span style={{ opacity: 0.75 }}>
-                          {`${formatNumber(sent + received)} ${t('douyin-link.page.kpiDiamondsUnit')}`}
+                          {`${money.text(sent + received)} ${t(money.unitKey)}`}
                         </span>
                       </div>
                       <div style={{ margin: '4px 0', borderTop: `1px solid ${palette.split}` }} />
@@ -249,7 +251,8 @@ export function GiftCalendarModal(props: {
                                     : 'douyin-link.users.giftCalendarDayReceived',
                                   {
                                     count: formatNumber(line.gifts),
-                                    diamonds: formatNumber(line.diamonds)
+                                    diamonds: money.text(line.diamonds),
+                                    unit: t(money.unitKey)
                                   }
                                 )
                               : '-'}
@@ -311,6 +314,8 @@ function DayAmount(props: {
   color: string
   palette: PluginPalette
 }): React.JSX.Element {
+  /** 格内数字按当前口径显示（人民币开关；`value` 与 `peak` 仍是抖币原值，深浅比例不受影响） */
+  const money = useMoney()
   if (props.value <= 0) {
     return <span className="text-[10px] leading-3 opacity-25">·</span>
   }
@@ -325,9 +330,9 @@ function DayAmount(props: {
     <span
       className="truncate text-[10px] font-medium leading-3"
       style={{ color: props.color, opacity: 0.55 + 0.45 * Math.min(1, ratio) }}
-      title={formatNumber(props.value)}
+      title={money.text(props.value)}
     >
-      {compact(props.value)}
+      {compact(money.value(props.value))}
     </span>
   )
 }

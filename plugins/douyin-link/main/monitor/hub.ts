@@ -292,6 +292,11 @@ export const DEFAULT_SETTINGS: LiveSettings = {
    */
   retentionDays: 0,
   /**
+   * **按人民币显示金额**：默认关（保持抖币口径）。打开后整页按 1 元 = 10 抖币换算展示，
+   * 只是界面口径，库里仍按抖币存（见 `shared/types.ts` 的 LiveSettings.cnyDisplay）。
+   */
+  cnyDisplay: false,
+  /**
    * 「AI 画像」用哪个模型 / 要不要关掉本地模型的思考（2026-10-13）。
    * 两个都是**可选**字段：老设置文件里没有它们，读出来就是 undefined（= 跟随宿主默认模型、不动思考）。
    */
@@ -766,6 +771,8 @@ export class AnalyzerHub {
     if (typeof patch.retentionDays === 'number' && Number.isFinite(patch.retentionDays)) {
       next.retentionDays = Math.min(365, Math.max(0, Math.round(patch.retentionDays)))
     }
+    // 「按人民币显示金额」：布尔开关（只是界面口径，落库照旧；渲染层自己拿这个值换算）
+    if (typeof patch.cnyDisplay === 'boolean') next.cnyDisplay = patch.cnyDisplay
     /**
      * 「AI 画像」用哪个模型：给 0/负数/空 = 清成「跟随宿主默认模型」。
      * 这里只做形状校验（正整数或 null），**不校验配置是否还存在**——那个判断在用的那一刻做

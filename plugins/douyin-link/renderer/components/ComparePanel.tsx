@@ -1,10 +1,10 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Segmented, Tag } from 'antd'
 import { RiVolumeUpLine } from '@remixicon/react'
 import { useTranslation } from '@host/renderer/i18n'
 import type { RoomCompareRow } from '../../shared/types'
 import api from '../api'
-import { EmptyHint, FitTable, Panel, roomLabel, usePluginPalette } from './ui'
+import { EmptyHint, FitTable, Panel, roomLabel, useMoney, usePluginPalette } from './ui'
 import { WINDOWS, formatNumber, windowLabel } from './OverviewPanel'
 
 type Translate = (key: string, options?: Record<string, unknown>) => string
@@ -28,6 +28,8 @@ export function ComparePanel(props: {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
   const palette = usePluginPalette()
+  /** 流水表里的抖币列按当前口径显示（人民币开关；本页签当前未挂在页面上，改造与其它面板保持一致） */
+  const money = useMoney()
   const [rows, setRows] = useState<RoomCompareRow[]>([])
   const [loading, setLoading] = useState(false)
   /** 推送里带着「这份是按多少分钟算的」：切窗口期间迟到的旧数据要丢掉 */
@@ -151,7 +153,7 @@ export function ComparePanel(props: {
                 width: 90,
                 align: 'right',
                 render: (value: number) => (
-                  <span className={value === 0 ? 'opacity-40' : undefined}>{formatNumber(value)}</span>
+                  <span className={value === 0 ? 'opacity-40' : undefined}>{money.text(value)}</span>
                 )
               },
               {

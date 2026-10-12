@@ -493,6 +493,14 @@ check(
   [normalizeSettings({ portraitDisableThinking: 'yes' }).portraitDisableThinking, normalizeSettings({}).portraitDisableThinking],
   [false, false]
 )
+/* 「按人民币显示金额」（用户 2026-10-12）也是同一类字段：四处要一起改，这里直测归一化那一步 */
+check('兜底设置里「按人民币显示金额」默认 false（保持抖币口径）', FALLBACK_SETTINGS.cnyDisplay, false)
+check('归一化保留「按人民币显示金额」开关', normalizeSettings({ cnyDisplay: true }).cnyDisplay, true)
+check(
+  '归一化把非布尔值当成默认值（人民币开关同样不是「真值就开」）',
+  [normalizeSettings({ cnyDisplay: 'yes' }).cnyDisplay, normalizeSettings({}).cnyDisplay],
+  [false, false]
+)
 
 const providerA = { id: 41, name: '工装供应商A', model: 'model-a', isDefault: true }
 const providerB = { id: 42, name: '工装供应商B', model: 'model-b', isDefault: false }
@@ -619,6 +627,21 @@ await settle()
 const noThinkSet = setCalls().at(-1)
 check('打开它会把 portraitDisableThinking=true 存下去', noThinkSet?.args?.[0]?.portraitDisableThinking, true)
 check('打开之后控件显示为开', noThinkSwitch()?.classList.contains('ant-switch-checked'), true)
+
+/* 「按人民币显示金额」开关：默认关、能打开、存的是布尔（换算本体在渲染层的 MoneyProvider） */
+const cnySwitch = () =>
+  dom.window.document.querySelector('[data-rb-cny-display] .ant-switch') ??
+  dom.window.document.querySelector('[data-rb-cny-display] button')
+check('「按人民币显示金额」这一行渲染出来了', Boolean(cnySwitch()), true)
+check('默认是关的（保持抖币口径）', cnySwitch()?.classList.contains('ant-switch-checked'), false)
+calls.length = 0
+await act(async () => {
+  cnySwitch()?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, button: 0 }))
+})
+await settle()
+const cnySet = setCalls().at(-1)
+check('打开它会把 cnyDisplay=true 存下去', cnySet?.args?.[0]?.cnyDisplay, true)
+check('打开之后控件显示为开', cnySwitch()?.classList.contains('ant-switch-checked'), true)
 
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项失败`)
 rmSync(workDir, { recursive: true, force: true })

@@ -1,5 +1,5 @@
 import { useTranslation } from '@host/renderer/i18n'
-import { Panel, ScrollStyle } from './ui'
+import { Panel, ScrollStyle, useMoney } from './ui'
 import { formatNumber, stamp } from './OverviewPanel'
 import type { DayRecordRow } from '../../shared/types'
 
@@ -35,6 +35,8 @@ export function DayRail(props: {
 }): React.JSX.Element {
   const { t: translate } = useTranslation()
   const t = translate as unknown as Translate
+  /** 每天那一行的礼物流水按当前口径显示（人民币开关） */
+  const money = useMoney()
 
   return (
     <Panel
@@ -78,7 +80,13 @@ export function DayRail(props: {
                       <span>· {t('douyin-link.page.dayGifts', { count: formatNumber(day.gifts) })}</span>
                     ) : null}
                     {day.diamonds > 0 ? (
-                      <span>· {t('douyin-link.page.giftDiamonds', { count: formatNumber(day.diamonds) })}</span>
+                      <span>
+                        ·{' '}
+                        {t('douyin-link.page.giftDiamonds', {
+                          count: money.text(day.diamonds),
+                          unit: t(money.unitKey)
+                        })}
+                      </span>
                     ) : null}
                     {day.sessions > 1 ? (
                       <span>· {t('douyin-link.page.daySessions', { count: day.sessions })}</span>
