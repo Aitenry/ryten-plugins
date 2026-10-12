@@ -23,11 +23,17 @@ const DESIRE_ENTER_FULL = 20
 const DESIRE_CHAT_FULL = 100
 /** 每次到访平均说几句算「话密」（3 句以上拉满） */
 const DESIRE_TALK_PER_VISIT_FULL = 3
+/** 「每次来花多少」的参考量级（本房间：单次到访平均花到 2000 抖币算满分） */
+const DESIRE_PER_VISIT_FULL = 2000
 
 export interface ConsumeDesireInput {
   /** 既往消费倾向 0-100（本房间消费评分，见 `shared/score.ts`） */
   spendScore: number
-  /** 跨全部直播间的进场次数合计 */
+  /** 本房间累计送出抖币（与 `roomVisits` 一起算「每次来花多少」） */
+  diamonds: number
+  /** 本房间进场次数（算「每次来花多少」用；与 `diamonds` 同口径） */
+  roomVisits: number
+  /** 跨全部直播间的进场次数合计（到访频次） */
   enterTotal: number
   /** 本房间累计发言条数 */
   chatTotal: number
@@ -40,26 +46,36 @@ export interface ConsumeDesireInput {
 /**
  * **消费欲望 0-100** = 意愿 × 时机。
  *
- * - **意愿**（他是「想花钱」的那类人吗，四项加权）：
- *   - 既往消费倾向 `spendScore`（已经花过钱 = 最硬的证据）40%；
- *   - 到访频次 `enterTotal`（常来 = 有消费习惯）25%；
- *   - 说话频次 `chatTotal`（愿意投入表达 = 参与度高）25%；
- *   - **说话密度**（每次到访平均说几句，比绝对条数更能看出「话多话少」）10%。
+ * 关键取舍（用户 2026-10-14）：「**有一些人是不经常来，也不经常来说话，但是一来就消费很多**」——
+ * 所以**消费才是主项，到访与说话只是辅助**，绝不能因为「来得少、不说话」就把一个大金主算成低欲望。
+ *
+ * - **消费强度 80%**（这才是「欲望」本身）：
+ *   - 既往消费倾向 `spendScore`（累计金额 75% + 单次均值 25%，已经花过钱 = 最硬的证据）50%；
+ *   - **每次到访花多少** `diamonds / roomVisits`（直接命中「一来就消费很多」这类人）30%；
+ * - **参与度 20%**（只用来在同一档消费里再分个高下，**不能反过来压过消费**）：
+ *   - 到访频次 `enterTotal`（常来 = 有消费习惯）10%；
+ *   - 说话频次 `chatTotal` 6% + **说话密度**（每次到访平均说几句）4%。
  * - **时机**：今天还在场 / 今天花过钱 → 1（不打折）；否则按 `2^(-Δt/6h)` 衰减，
  *   下限 0.5（老观众再久没来，也不至于被算成毫无欲望——他的习惯还在）。
  *
- * 于是「同一个人」在不同时候会得到不同的分数：刚来过/正在说话 → 高；隔了几天 → 低。
+ * 于是「同一个人」在不同时候会得到不同的分数（刚来过/正在说话 → 高，隔了几天 → 低）；
+ * 而「很少来但每次来都大额消费」的人，靠「既往消费倾向 + 每次到访消费额」这两项就能**压过**
+ * 一个「天天来聊天但从不花钱」的人——这正是用户要的排序。
  */
 export function consumeDesire(input: ConsumeDesireInput): number {
   const spendPropensity = clamp01((Number(input.spendScore) || 0) / 100)
+  const visits = Math.max(0, input.roomVisits)
+  const perVisitSpend = logNorm(Math.max(0, input.diamonds) / Math.max(1, visits), DESIRE_PER_VISIT_FULL)
   const visitFreq = logNorm(Math.max(0, input.enterTotal), DESIRE_ENTER_FULL)
   const talkFreq = logNorm(Math.max(0, input.chatTotal), DESIRE_CHAT_FULL)
-  const visits = Math.max(0, input.enterTotal)
+  const totalVisits = Math.max(0, input.enterTotal)
   const talkDensity = clamp01(
-    Math.max(0, input.chatTotal) / Math.max(DESIRE_TALK_PER_VISIT_FULL, visits) / DESIRE_TALK_PER_VISIT_FULL
+    Math.max(0, input.chatTotal) / Math.max(DESIRE_TALK_PER_VISIT_FULL, totalVisits) / DESIRE_TALK_PER_VISIT_FULL
   )
 
-  const intent = clamp01(0.4 * spendPropensity + 0.25 * visitFreq + 0.25 * talkFreq + 0.1 * talkDensity)
+  const intent = clamp01(
+    0.5 * spendPropensity + 0.3 * perVisitSpend + 0.1 * visitFreq + 0.06 * talkFreq + 0.04 * talkDensity
+  )
 
   const hours = Number.isFinite(input.hoursSinceLastSeen) ? Math.max(0, input.hoursSinceLastSeen) : 0
   const freshness = input.activeNow ? 1 : Math.max(0.5, Math.pow(0.5, hours / DESIRE_HALF_LIFE_H))

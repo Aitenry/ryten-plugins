@@ -298,7 +298,15 @@ async function main() {
   check('观众：消费欲望落在 0-100', badge.consumeDesire >= 0 && badge.consumeDesire <= 100, true)
   check('观众：没数据时消费欲望是 0（不编）', fresh.consumeDesire, 0)
 
-  const base = { spendScore: 60, enterTotal: 12, chatTotal: 40, hoursSinceLastSeen: 1, activeNow: false }
+  const base = {
+    spendScore: 60,
+    diamonds: 8000,
+    roomVisits: 8,
+    enterTotal: 12,
+    chatTotal: 40,
+    hoursSinceLastSeen: 1,
+    activeNow: false
+  }
   check(
     '消费欲望随时间衰减：1 小时前 > 3 天前',
     consumeDesire(base) > consumeDesire({ ...base, hoursSinceLastSeen: 72 }),
@@ -315,6 +323,16 @@ async function main() {
       consumeDesire({ ...base, activeNow: true, enterTotal: 2, chatTotal: 3 }),
     true
   )
+  /*
+   * 用户 2026-10-14 的核心诉求：**不常来、不常说话、但一来就消费很多**的人，必须是高欲望。
+   * 造两个对照：稀有金主（来 1 次、说 0 句、单次 30000 抖币）vs 常来话痨但一分不花。
+   */
+  const rareWhale = { spendScore: spendScore(30000, 2), diamonds: 30000, roomVisits: 1, enterTotal: 1, chatTotal: 0, hoursSinceLastSeen: 0, activeNow: true }
+  const chattyFree = { spendScore: spendScore(0, 0), diamonds: 0, roomVisits: 0, enterTotal: 30, chatTotal: 200, hoursSinceLastSeen: 0, activeNow: true }
+  check('稀有金主（来 1 次、不说话、单次 3 万）算高欲望（≥60）', consumeDesire(rareWhale) >= 60, true)
+  check('稀有金主 > 常来话痨但从不花钱', consumeDesire(rareWhale) > consumeDesire(chattyFree), true)
+  check('从不花钱的人欲望低（< 40）', consumeDesire(chattyFree) < 40, true)
+
   check(
     '绩效指标由直播内容构成：有收入 + 有互动 > 全 0',
     hostPerformance({ todayReceived: 5000, sessionChat: 200, audience: 80, sessionEnter: 40, hostOutput: 30 }) >

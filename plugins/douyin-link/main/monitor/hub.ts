@@ -3082,6 +3082,8 @@ export class AnalyzerHub {
       const score = spendScore(diamonds, giftCount)
       // 跨房间的合计：库里那一列（这个 id 在所有房间的 enter 之和）；查不到就退回本场进场数
       const enterTotal = enterTotals.get(id) ?? session?.stats.enter ?? 0
+      // 本房间的进场次数（与 `diamonds` 同口径）：算「每次来花多少」用
+      const roomVisits = row?.stats.enter ?? session?.stats.enter ?? 0
       const todayDiamonds = this.todaySpend.get(id)
       const todayReceived = this.todayReceived.get(id)
       const lastSeen = Math.max(row?.lastSeen ?? 0, session?.lastSeen ?? 0)
@@ -3095,7 +3097,15 @@ export class AnalyzerHub {
         fansClubLevel: Math.max(row?.fansClubLevel ?? 0, session?.fansClubLevel ?? 0),
         consumeDesire: host
           ? 0
-          : consumeDesire({ spendScore: score, enterTotal, chatTotal, hoursSinceLastSeen, activeNow }),
+          : consumeDesire({
+              spendScore: score,
+              diamonds,
+              roomVisits,
+              enterTotal,
+              chatTotal,
+              hoursSinceLastSeen,
+              activeNow
+            }),
         performance: host
           ? hostPerformance({
               todayReceived,
