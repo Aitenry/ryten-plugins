@@ -21,7 +21,8 @@ import type { MysteryReveal, UserRankRow } from '../../shared/types'
  *
  * 剩下唯一**不猜数字**的一步是本地核对：把马甲名尾段拿去比我们库里**已经有的**真实 id
  * （`mapper.getAnonymousCandidates` 按「id 以尾段结尾」或「昵称就是马甲名」收窄），
- * 并且必须**尾段 + 昵称尾段 + 粉丝 + 关注四条全中**才算命中——不中就不给结论。
+ * 命中条件**只看「id 尾段 + 候选自己的昵称尾段」两条**，而且要求**唯一命中**才算数——
+ * 不中、或同时撞上好几个，都不给结论（用户 2026-10-14：粉丝 / 关注 / 等级这些会变的字段已不再参与判定）。
  *
  * ---------------------------------------------------------------------------
  * **2026-10-12 真机抓帧的结论：抖音的「匿名」分两类，不能一锅端。**
@@ -69,30 +70,28 @@ import type { MysteryReveal, UserRankRow } from '../../shared/types'
  * `webcast_uid` 反查（发帖人自己说「风险很大，迟早被起诉」）。**不值得为这个功能去碰。**
  */
 
-/** 本地候选：需要的东西全在 `UserRankRow` 里（`toRankRow` 已经带上粉丝/关注） */
+/** 本地候选：只需要「id + 昵称」（用户 2026-10-14：不再用会变的字段参与判定） */
 export interface AnonymousCandidate {
   userId: string
   nickname: string
-  follower: number
-  following: number
 }
 
 /**
- * 候选判定：**四条全中才算同一个人**（尾段只是索引，不是证据）。
+ * 候选判定：**只看两件事，且都必须成立**（尾段只是索引，昵称尾段才是证据）。
  *
- * - id 尾段：马甲名里的数字 = 真实 id 的尾段（实测）；
- * - 昵称尾段：候选自己的昵称也得是同一个马甲名（防止「别的匿名的人」被算进来）；
- * - 粉丝 / 关注：匿名档案行里已经记着这两个数，必须一致。
+ * - **id 尾段**：马甲名里的数字 = 真实 id 的尾段（真机实测）；
+ * - **昵称尾段**：候选自己的昵称也得是同一个马甲名（防止「别的匿名的人」被算进来）。
+ *
+ * ⚠️ **不再比对粉丝数 / 关注数 / 等级**（用户 2026-10-14：「移除等级，关注，和粉丝匹配，
+ * 因为这些内容都是会变化的」）：那三个数逐日变，今天记下的快照拿去和库里对上，本来能中的也常常中不了
+ * （对方涨了几个粉 → 判定失败）。去掉之后判定更稳，代价是**可能有多个候选**——
+ * 所以调用方必须再过一道「唯一命中」的关（见 `revealAnonymousProfile`），绝不猜。
  */
-export function matchAnonymousCandidate(
-  candidate: AnonymousCandidate,
-  target: { mask: string; follower: number; following: number }
-): boolean {
+export function matchAnonymousCandidate(candidate: AnonymousCandidate, target: { mask: string }): boolean {
   const tail = anonymousMaskTail(target.mask)
   if (!tail) return false
   if (!rawDouyinId(candidate.userId).endsWith(tail)) return false
-  if (anonymousMaskTail(candidate.nickname) !== tail) return false
-  return candidate.follower === target.follower && candidate.following === target.following
+  return anonymousMaskTail(candidate.nickname) === tail
 }
 
 /**
@@ -102,7 +101,7 @@ export function matchAnonymousCandidate(
  * `onRaw` 与神秘人那条链一致：拿到原始字段就先回填，头像下载失败也不影响。
  */
 export async function revealAnonymousProfile(
-  input: { webRid: string; userId: string; mask: string; follower: number; following: number },
+  input: { webRid: string; userId: string; mask: string },
   lookup: () => Promise<UserRankRow[]>,
   onRaw?: (profile: RawUserProfile) => Promise<void> | void
 ): Promise<MysteryReveal> {
@@ -122,15 +121,21 @@ export async function revealAnonymousProfile(
   } catch (error) {
     logger.warn('[douyin-link] 匿名身份：本地核对失败（按查不到处理）:', describe(error))
   }
-  const hit = candidates.find((candidate) => matchAnonymousCandidate(candidate, input))
-  if (!hit) {
+  /**
+   * **唯一命中才给结论**：判定不再比粉丝/关注之后，同一尾段可能撞上好几个账号
+   * ——这时宁可说「还原不了」，也不挑一个「最像的」交差（口径与「查不到就不编」一致）。
+   * 同一个人的档案行是**按房间**存的（一个 id 多行），所以这里按 userId 去重再数。
+   */
+  const matched = [...new Set(candidates.filter((candidate) => matchAnonymousCandidate(candidate, input)).map((row) => rawDouyinId(row.userId)))]
+  if (matched.length !== 1) {
     logger.info(
-      `[douyin-link] 匿名身份未还原：尾段 ${tail} 在库里没有「昵称尾段 + 粉丝 ${input.follower} + 关注 ${input.following}」全中的账号`
+      `[douyin-link] 匿名身份未还原：尾段 ${tail} 在库里命中 ${matched.length} 个账号（要求唯一）` +
+        `${matched.length > 1 ? `：${matched.join(' / ')}` : ''}`
     )
     return { ok: false, code: 'anonymousMasked' }
   }
 
-  const realId = rawDouyinId(hit.userId)
+  const realId = matched[0]
   const result = await revealMysteryProfile(realId, onRaw)
   if (result.ok) {
     logger.info(`[douyin-link] 匿名身份已还原：${input.userId} → ${realId}`)

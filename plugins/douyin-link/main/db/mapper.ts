@@ -1357,8 +1357,9 @@ export async function splitAnonymousIdentities(): Promise<number> {
  * 所以拿它在**我们自己已经见过的身份**里收窄一遍——`(用户 id 以该尾段结尾)` 或者
  * `(昵称就是这个马甲名)`，外加本房间画像里已经绑定的账号。
  *
- * **这只是「收窄」，不是结论**：判定必须再过 `matchAnonymousCandidate`（尾段 + 粉丝 + 关注三条全中）。
- * 顺序按「最近出现」排，界面上真要还原时也只认全中的那一条。
+ * **这只是「收窄」，不是结论**：判定必须再过 `matchAnonymousCandidate`
+ * （**id 尾段 + 昵称尾段**两条命中，且**唯一**才算数；粉丝/关注/等级这些会变的字段已不参与判定）。
+ * 顺序按「最近出现」排，界面上真要还原时也只认唯一命中的那一条。
  */
 export async function getAnonymousCandidates(
   webRid: string,

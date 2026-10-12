@@ -496,18 +496,18 @@ check(
 
 console.log('\n=== 6. 匿名档案的「查看真实资料」：按钮能点、判定要严 ===')
 const mask = 'dou2056511'
-const target = { mask, follower: 9974, following: 12 }
-const candidate = (userId, nickname, follower, following) => ({ userId, nickname, follower, following })
+/** 用户 2026-10-14：「移除等级，关注，和粉丝匹配，因为这些内容都是会变化的」→ 判定只剩两条 */
+const target = { mask }
+const candidate = (userId, nickname) => ({ userId, nickname })
 check(
-  '四条全中才算同一个人（id 尾段 + 昵称尾段 + 粉丝 + 关注）',
-  matchAnonymousCandidate(candidate('73500002056511', mask, 9974, 12), target),
+  'id 尾段 + 候选自己的昵称尾段都中 → 同一个人',
+  matchAnonymousCandidate(candidate('73500002056511', mask), target),
   true
 )
-check('id 尾段不对 → 不算', matchAnonymousCandidate(candidate('73500002056512', mask, 9974, 12), target), false)
-check('昵称尾段不对（另一个人）→ 不算', matchAnonymousCandidate(candidate('73500002056511', 'dou9999999', 9974, 12), target), false)
-check('粉丝数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9973, 12), target), false)
-check('关注数对不上 → 不算', matchAnonymousCandidate(candidate('73500002056511', mask, 9974, 13), target), false)
-check('昵称不是马甲名（真名字）→ 不算', matchAnonymousCandidate(candidate('73500002056511', '张三', 9974, 12), target), false)
+check('id 尾段不对 → 不算', matchAnonymousCandidate(candidate('73500002056512', mask), target), false)
+check('昵称尾段不对（另一个人）→ 不算', matchAnonymousCandidate(candidate('73500002056511', 'dou9999999'), target), false)
+check('昵称不是马甲名（真名字）→ 不算', matchAnonymousCandidate(candidate('73500002056511', '张三'), target), false)
+check('马甲名里没数字（`秋***`）→ 不算', matchAnonymousCandidate(candidate('73500002056511', '秋***'), target), false)
 
 /**
  * **两类「匿名」不能一锅端**（2026-10-12 真机抓帧的分界，见 `main/douyin/anonymous-reveal.ts`）：
@@ -524,17 +524,26 @@ check('A 类（占位 id / 合成键）才算匿名', [
   anon.isAnonymousId('anon:111111#dou2056511')
 ], [true, true])
 
-/** 正式链路：库里没有全中的候选 → 如实回 `anonymousMasked`，绝不给「猜的那个人」 */
-const masked = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111#dou2056511', ...target }, async () => [])
+/** 正式链路：库里没有候选 → 如实回 `anonymousMasked`，绝不给「猜的那个人」 */
+const masked = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111#dou2056511', mask }, async () => [])
 check('核不上 → 回 anonymousMasked（如实说还原不了）', masked, { ok: false, code: 'anonymousMasked' })
 /** 连马甲名都没有（空名帧）→ 同样如实回，不去打抖音 */
-const noLead = await revealAnonymousProfile(
-  { webRid: ROOM, userId: 'anon:111111', mask: '', follower: 0, following: 0 },
-  async () => {
-    throw new Error('不该查库')
-  }
-)
+const noLead = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111', mask: '' }, async () => {
+  throw new Error('不该查库')
+})
 check('没有线索 → 回 anonymousMasked，且不查库', noLead, { ok: false, code: 'anonymousMasked' })
+/**
+ * 去掉粉丝/关注之后可能出现**撞车**（同一尾段对上两个不同账号）：这时**不给结论**
+ * ——与「查不到就不编」同一口径，绝不挑一个最像的交差。
+ */
+const ambiguous = await revealAnonymousProfile({ webRid: ROOM, userId: 'anon:111111#dou2056511', mask }, async () => [
+  { userId: '73500002056511', nickname: mask },
+  { userId: '99900002056511', nickname: mask }
+])
+check('两个不同账号都命中（尾段撞车）→ 同样回 anonymousMasked（不猜）', ambiguous, {
+  ok: false,
+  code: 'anonymousMasked'
+})
 
 console.log('\n=== 7. 帧里没带名字、但我们库里已经有档案 → 弹幕行要把名字补上 ===')
 /**

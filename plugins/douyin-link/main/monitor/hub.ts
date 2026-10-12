@@ -3458,13 +3458,7 @@ export class AnalyzerHub {
     const profile = webRid ? await store.getUser(webRid, userId) : undefined
     const mask = profile?.nickname ?? ''
     return revealAnonymousProfile(
-      {
-        webRid,
-        userId,
-        mask,
-        follower: profile?.follower ?? 0,
-        following: profile?.following ?? 0
-      },
+      { webRid, userId, mask },
       () => store.getAnonymousCandidates(webRid, mask, anonymousMaskTail(mask)),
       async (raw) => {
         if (!webRid) return
