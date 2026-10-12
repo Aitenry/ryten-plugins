@@ -238,6 +238,8 @@ const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 /** 一次最多给多少个 id 算「行首那截人物信息」（界面按可见行 + 新到的消息批攒，1 秒一次） */
 const BADGE_ROWS_CAP = 400
+/** 展开成「全部账号」之后的总量上限（每个可见 id 可能带出几个号；防止异常数据把一批查询撑爆） */
+const BADGE_EXPANDED_CAP = 1200
 
 /**
  * 「补档案」跑没跑过的标记（`douyin_link_meta` 的键，见 `repairUserRowsOnce`）。
@@ -3046,10 +3048,13 @@ export class AnalyzerHub {
   }
 
   /**
-   * 实时列表行首那几个数（用户 2026-10-11 首次要求；2026-10-14 改成**按身份两套**）。
+   * 实时列表行首那几个数（用户 2026-10-11 首次要求；2026-10-14 改成**按身份两套 + 多账号汇聚**）。
    *
    * 一次查一批 id（界面按可见行 + 新到的消息批攒 id，1 秒节流一次），口径：
-   * - **身份**：运行态在麦上 / 是房间主播（`recorder.isHostOnAir`）**或**库里粘性的
+   * - **多账号（用户 2026-10-14：「之前实现了一套一个人有多个账号的绑定机制，所有的计算都要
+   *   按照多账号汇聚的内容来计算」）**：先把每个可见 id 展开成**这个人的全部账号**，所有计数在各账号上
+   *   **求和**、等级与首末时间取**极值**、身份取**或**——一个人换号来说话/送礼，行首还是同一个人的数；
+   * - **身份**：任一账号「此刻在麦上 / 是本房间主播」（`recorder.isHostOnAir`）**或**库里粘性的
    *   「见过他在麦上」（`micUsers`）→ 主播，否则观众；
    * - **等级**（荣誉/粉丝团）、**消费评分**（本房间累计，算法同画像的「消费力」）：本房间档案行；
    *   还没落库的新人退回本场数字（`fromStore = false`，几秒后就会被 flush 补上）；
@@ -3063,38 +3068,74 @@ export class AnalyzerHub {
     if (ids.length === 0) return []
     const capped = ids.slice(0, BADGE_ROWS_CAP)
     await this.ensureTodayLedgers()
+    /*
+     * 展开成「这个人的全部账号」：走**批量**解析（两条查询），而不是逐个 `resolveAccountIds`
+     * ——后者在每秒一批、每批几百个 id 时就是几百次往返（这条线踩过「监控一开助手就卡」）。
+     * 展开后的总量另设一个上限，防止异常数据把这一批查询撑爆。
+     */
+    const groups = await store.resolveAccountIdsBatch(capped).catch(() => new Map<string, string[]>())
+    const expanded: string[] = []
+    const expandedSet = new Set<string>()
+    for (const id of capped) {
+      for (const account of groups.get(id) ?? [id]) {
+        if (expandedSet.has(account)) continue
+        expandedSet.add(account)
+        expanded.push(account)
+      }
+    }
+    const scope = expanded.slice(0, BADGE_EXPANDED_CAP)
     const [stored, enterTotals, mic] = await Promise.all([
-      webRid ? store.getUsers(webRid, capped) : Promise.resolve(new Map<string, UserRankRow>()),
-      store.enterTotalsByUser(capped),
-      store.micUsers(capped).catch(() => new Set<string>())
+      webRid ? store.getUsers(webRid, scope) : Promise.resolve(new Map<string, UserRankRow>()),
+      store.enterTotalsByUser(scope),
+      store.micUsers(scope).catch(() => new Set<string>())
     ])
     const state = this.states.get(webRid)
     const recorder = state?.recorder
     const now = Date.now()
     return capped.map((id) => {
-      const row = stored.get(id)
-      const session = recorder?.profile(id)
-      // 身份：运行态在麦上 / 是房间主播，或库里「见过他在麦上」（个播常常只有这一条线索）
-      const host = mic.has(id) || (recorder?.isHostOnAir(id) ?? false)
-      const diamonds = row?.stats.diamonds ?? session?.stats.diamonds ?? 0
-      const giftCount = row?.stats.gift ?? session?.stats.gift ?? 0
-      const chatTotal = row?.stats.chat ?? session?.stats.chat ?? 0
+      const accounts = groups.get(id) ?? [id]
+      let honorLevel = 0
+      let fansClubLevel = 0
+      let diamonds = 0
+      let giftCount = 0
+      let chatTotal = 0
+      let roomVisits = 0
+      let enterTotal = 0
+      let todayDiamonds = 0
+      let todayReceived = 0
+      let lastSeen = 0
+      let hostOutput = 0
+      let host = false
+      let fromStore = false
+      for (const account of accounts) {
+        const row = stored.get(account)
+        const session = recorder?.profile(account)
+        // 计数求和（他的每个号说的话、花的钱都算这个人的）
+        diamonds += row?.stats.diamonds ?? session?.stats.diamonds ?? 0
+        giftCount += row?.stats.gift ?? session?.stats.gift ?? 0
+        chatTotal += row?.stats.chat ?? session?.stats.chat ?? 0
+        roomVisits += row?.stats.enter ?? session?.stats.enter ?? 0
+        hostOutput += session?.stats.chat ?? 0
+        // 跨房间的合计：库里按 id 的那一列，再在账号之间相加；查不到就退回本场进场数
+        enterTotal += enterTotals.get(account) ?? session?.stats.enter ?? 0
+        todayDiamonds += this.todaySpend.get(account)
+        todayReceived += this.todayReceived.get(account)
+        // 等级与时间取极值（等级是平台级的、时间要「最近的那个号」）
+        honorLevel = Math.max(honorLevel, row?.honorLevel ?? 0, session?.honorLevel ?? 0)
+        fansClubLevel = Math.max(fansClubLevel, row?.fansClubLevel ?? 0, session?.fansClubLevel ?? 0)
+        lastSeen = Math.max(lastSeen, row?.lastSeen ?? 0, session?.lastSeen ?? 0)
+        if (row) fromStore = true
+        if (mic.has(account) || (recorder?.isHostOnAir(account) ?? false)) host = true
+      }
       const score = spendScore(diamonds, giftCount)
-      // 跨房间的合计：库里那一列（这个 id 在所有房间的 enter 之和）；查不到就退回本场进场数
-      const enterTotal = enterTotals.get(id) ?? session?.stats.enter ?? 0
-      // 本房间的进场次数（与 `diamonds` 同口径）：算「每次来花多少」用
-      const roomVisits = row?.stats.enter ?? session?.stats.enter ?? 0
-      const todayDiamonds = this.todaySpend.get(id)
-      const todayReceived = this.todayReceived.get(id)
-      const lastSeen = Math.max(row?.lastSeen ?? 0, session?.lastSeen ?? 0)
       const hoursSinceLastSeen = lastSeen > 0 ? Math.max(0, (now - lastSeen) / 3600000) : 24 * 365
       // 「此刻还在场」：今天花过钱，或最近十分钟出现过（刚进过场 / 刚说过话）
       const activeNow = todayDiamonds > 0 || (lastSeen > 0 && now - lastSeen < 10 * 60_000)
       return {
         userId: id,
         role: host ? 'host' : 'viewer',
-        honorLevel: Math.max(row?.honorLevel ?? 0, session?.honorLevel ?? 0),
-        fansClubLevel: Math.max(row?.fansClubLevel ?? 0, session?.fansClubLevel ?? 0),
+        honorLevel,
+        fansClubLevel,
         consumeDesire: host
           ? 0
           : consumeDesire({
@@ -3112,7 +3153,7 @@ export class AnalyzerHub {
               sessionChat: recorder?.counters.chat ?? 0,
               audience: recorder?.users ?? 0,
               sessionEnter: recorder?.counters.enter ?? 0,
-              hostOutput: session?.stats.chat ?? 0
+              hostOutput
             })
           : 0,
         spendScore: score,
@@ -3121,7 +3162,7 @@ export class AnalyzerHub {
         enterTotal,
         todayDiamonds,
         todayReceived,
-        fromStore: Boolean(row)
+        fromStore
       }
     })
   }

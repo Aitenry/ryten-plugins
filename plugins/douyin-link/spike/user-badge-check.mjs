@@ -1,20 +1,26 @@
 /**
  * 「实时列表行首那截人物信息」的主进程侧回归工装（dev-only，不参与打包）。
  *
- * 用户 2026-10-11 的要求：弹幕与进场两种行的前面要显示 **等级 / 消费评分 / 入场次数 / 今天消费**。
- * 四个数里只有第一个（等级）渲染层手上就有，其余三个都得主进程算：
- * - 消费评分 = **本房间累计**，算法与画像里的「消费力」同一套（`shared/score.ts`）；
+ * 用户 2026-10-11 的要求：弹幕与进场两种行的前面要显示 **等级 / 消费评分 / 入场次数 / 今天消费**；
+ * 2026-10-14 又改成**按身份两套 + 多账号汇聚**：
+ * - 观众 = `消费欲望 · 进场次数 · 今日消费`，主播 = `绩效指标 · 进场次数 · 今日收入`；
+ * - **绑定过的多个账号按「这个人」汇聚**（计数求和、等级/时间取极值），从哪个号问都得到同一份数。
+ *
+ * 四个数里只有第一个（等级）渲染层手上就有，其余都得主进程算：
+ * - 消费评分 / 消费欲望 = **本房间累计**（算法见 `shared/score.ts` / `shared/engagement.ts`）；
  * - 入场次数 = **跨全部直播间**合计；
- * - 今日消费 = **跨全部直播间**、本地自然日（`TodaySpend` 账本 + 库里补种）。
+ * - 今日消费 / 今日收入 = **跨全部直播间**、本地自然日（两本 `TodaySpend` 账本 + 库里补种）。
  *
  * 这个工装跑**真代码**（真 `AnalyzerHub` + 真 mapper + 真 PGlite + 真画像算法 + 真账本），
- * 只把 electron / 采集器 / 音频泵 / 头像缓存 / 解析器换成桩，断言六件事：
+ * 只把 electron / 采集器 / 音频泵 / 头像缓存 / 解析器换成桩，断言八件事：
  * 1. 一次 `userBadges` 就把四个数给全（等级取本房间档案、消费评分按本房间累计、入场跨房合计）；
  * 2. **今日消费只算今天**：昨天的礼物不计（同一批数据里放一条两天前的礼物行）；
  * 3. **消费评分与画像同源**：`userAnalysis` 的 `spending` 维度 == `spendScore(累计抖币, 送礼次数)`；
  * 4. `TodaySpend` 账本：落库增量是「加」、库里补种是「以库为准（set）」、换天会清空；
  * 5. 跨房间的入场合计：`enterTotalsByUser` = 该 id 在所有房间的 enter 之和；
- * 6. 新人（库里还没有档案行）退回本场数字，并标 `fromStore = false`。
+ * 6. 新人（库里还没有档案行）退回本场数字，并标 `fromStore = false`；
+ * 7. `消费欲望` / `绩效指标` 两条公式的性质（随时间衰减、随消费/说过变化、稀有金主不被低估）；
+ * 8. **多账号汇聚**：M1 与 M2 绑成同一个人之后，等级取最高、抖币与进场求和、从哪个号问都一样。
  *
  * 跑法（仓库根目录；PGlite 从 ryten-bench 找，或用 RB_PGLITE 指定 dist/index.js）：
  *   node plugins/douyin-link/spike/user-badge-check.mjs
@@ -169,6 +175,8 @@ const ROOM_B = '700000000002'
 const U1 = '500000000001' // 两个房间都有档案：本房间 100 抖币，另一个房间 500 抖币
 const U2 = '500000000002' // 只在 A 房；今天的礼物不算他的（那条是两天前的）
 const NEW = '500000000003' // 还没落库的新人（只有本场数据）
+const M1 = '500000000021' // 多账号：同一个人的主号（本房间 700 抖币 / 进场 2 / 等级 5）
+const M2 = '500000000022' // 多账号：同一个人的小号（本房间 300 抖币 / 进场 3 / 等级 9）
 
 const DAY = 86400000
 
@@ -224,13 +232,21 @@ async function main() {
     // 今天：U1 在 B 房送 200 抖币（跨房间的「今日消费」要认；U1 在 A 房没有今天的礼物）
     message('gift', ROOM_B, U1, 200, today + 3600_000),
     // 两天前：U2 送 999 抖币 —— **不算今天**
-    message('gift', ROOM_A, U2, 999, today - 2 * DAY + 3600_000)
+    message('gift', ROOM_A, U2, 999, today - 2 * DAY + 3600_000),
+    // 多账号（第 8 节）：M1 与 M2 是**同一个人**的两个号，今天的礼物分别在两个号上
+    { ...message('gift', ROOM_A, M1, 700, today + 1800_000), orderKey: 'badge-m1' },
+    { ...message('gift', ROOM_A, M2, 300, today + 2400_000), orderKey: 'badge-m2' }
   ])
   await mapper.upsertUserDeltas([
     userRow(ROOM_A, U1, 2, 1, 100, 12),
     userRow(ROOM_B, U1, 3, 2, 500, 14),
-    userRow(ROOM_A, U2, 1, 1, 999, 6)
+    userRow(ROOM_A, U2, 1, 1, 999, 6),
+    // 多账号：M1（本房间 700 抖币 / 进场 2 / 等级 5）、M2（本房间 300 抖币 / 进场 3 / 等级 9）
+    userRow(ROOM_A, M1, 2, 1, 700, 5),
+    userRow(ROOM_A, M2, 3, 2, 300, 9)
   ])
+  // 绑定成同一个人（第 8 节要用；绑在**第一次 userBadges 之前**，这样「今日」两本账补种时就认它）
+  await mapper.bindAccount(M2, M1)
 
   /* ------------------------------------------- 1. 四个数一次给全（U1） */
   console.log('=== 1. userBadges（U1：本房间 A 房）===')
@@ -343,6 +359,30 @@ async function main() {
     '绩效指标只看收入（没监控内容）也 > 0',
     hostPerformance({ todayReceived: 8000, sessionChat: 0, audience: 0, sessionEnter: 0, hostOutput: 0 }) > 0,
     true
+  )
+
+  /* ------------------------------- 8. 多账号：绑定后所有数按「这个人」汇聚 */
+  console.log('\n=== 8. 多账号汇聚（M1 + M2 绑成同一个人）===')
+  const [merged] = await hub.userBadges(ROOM_A, [M1])
+  console.log(
+    `  ${JSON.stringify({ 等级: merged.honorLevel, 送礼抖币: merged.diamonds, 送礼次数: merged.giftCount, 进场: merged.enterTotal, 今日消费: merged.todayDiamonds })}`
+  )
+  check('等级取最高（5 / 9 → 9）', merged.honorLevel, 9)
+  check('送礼抖币求和（700 + 300）', merged.diamonds, 1000)
+  check('送礼次数求和（1 + 2）', merged.giftCount, 3)
+  check('消费评分按合计算', merged.spendScore, spendScore(1000, 3))
+  check('进场次数求和（2 + 3）', merged.enterTotal, 5)
+  check('今日消费求和（700 + 300，两个号今天的礼物都算）', merged.todayDiamonds, 1000)
+  const [mergedFromOther] = await hub.userBadges(ROOM_A, [M2])
+  check(
+    '从哪个号问，得到的是同一份数（多账号汇聚）',
+    [mergedFromOther.honorLevel, mergedFromOther.diamonds, mergedFromOther.enterTotal, mergedFromOther.todayDiamonds],
+    [9, 1000, 5, 1000]
+  )
+  check(
+    '消费欲望也是按汇聚后的数算的',
+    merged.consumeDesire,
+    mergedFromOther.consumeDesire
   )
 
   hub.dispose()

@@ -1551,6 +1551,46 @@ export async function resolveAccountIds(userId: string): Promise<string[]> {
   })
 }
 
+/**
+ * **批量**版的 `resolveAccountIds`：一次给一批 id 各自的全账号清单（`id → 账号数组`）。
+ *
+ * 为什么需要它：实时列表每秒一批（最多 400 个）id 都要按人聚合，逐个调 `resolveAccountIds`
+ * 就是每批几百次往返（每次都先查 owner、再查同画像账号）——这条线踩过「监控一开助手输出就卡」。
+ * 这里收成**两条查询**：先查这批 id 各属哪个画像，再一次性把这些画像的账号全捞出来。
+ */
+export async function resolveAccountIdsBatch(userIds: string[]): Promise<Map<string, string[]>> {
+  const ids = [...new Set((userIds ?? []).map((id) => String(id ?? '').trim()).filter((id) => id.length > 0))]
+  const out = new Map<string, string[]>()
+  if (ids.length === 0) return out
+  await schemaReady
+  return withOrm('douyin-link.resolveAccountIdsBatch', async (db) => {
+    const owners = await db
+      .select({ userId: douyinLinkIdentityAccounts.userId, identityId: douyinLinkIdentityAccounts.identityId })
+      .from(douyinLinkIdentityAccounts)
+      .where(inArray(douyinLinkIdentityAccounts.userId, ids))
+    const identityOfId = new Map(owners.map((row) => [row.userId, row.identityId]))
+    const identityIds = [...new Set(owners.map((row) => row.identityId))]
+    const accounts = new Map<number, string[]>()
+    if (identityIds.length > 0) {
+      const rows = await db
+        .select({ userId: douyinLinkIdentityAccounts.userId, identityId: douyinLinkIdentityAccounts.identityId })
+        .from(douyinLinkIdentityAccounts)
+        .where(inArray(douyinLinkIdentityAccounts.identityId, identityIds))
+      for (const row of rows) {
+        const list = accounts.get(row.identityId)
+        if (list) list.push(row.userId)
+        else accounts.set(row.identityId, [row.userId])
+      }
+    }
+    for (const id of ids) {
+      const identityId = identityOfId.get(id) ?? 0
+      const list = identityId ? (accounts.get(identityId) ?? []) : []
+      out.set(id, list.includes(id) ? list : [id, ...list.filter((other) => other !== id)])
+    }
+    return out
+  })
+}
+
 /** 画像视图：名字 + 主账号 + 全部账号（跨房间概览）。没绑定就返回「一个账号的画像」。 */
 export async function userIdentity(userId: string): Promise<UserIdentity> {
   const id = String(userId ?? '').trim()
