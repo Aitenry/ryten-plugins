@@ -30,20 +30,24 @@ import {
  * 压缩包（ZIP，见 `./zip.ts`）里的结构：
  * - `manifest.json`            —— 格式与版本、导出时刻、房间数等；
  * - `rooms.json`               —— 房间清单（备注 / 监控开关也在内）；
- * - `users/<webRid>.json`      —— 该房间的全部用户档案；
+ * - `users/<webRid>.json`      —— 该房间的全部用户档案（**含 `onMic` 主播标记**，0.15.37 起）；
  * - `identities.json`          —— **画像（多账号关联）**：一个人绑了哪几个抖音 id（全局，不按房间）；
  * - `records/<webRid>/<day>.json` —— **每个 JSON = 某房间某一天的直播数据**
- *    （消息流水 + 分钟聚合 + 当天的监控会话）。
+ *    （消息流水 + 分钟聚合 + 当天的监控会话，会话带自己的库内 id 供导入时重指）。
  *
- * **AI 画像（大模型写的那份）不进压缩包**，这是有意的：它是按人（跨房间）的派生结果，
- * 放进「按房间某一天」的结构里会对不上；而且它是花钱换来的、随时可以重新生成。
- * 它自己的表（`douyin_link_user_portraits`）由卸载时的「同时删除数据」负责清掉。
- *
- * 导入按「不能重复」设计：
- * - 房间只补缺（已存在的不覆盖备注/监控开关）；
+ * 导入是**幂等**的（同一份包反复导入不会多出一条、一个数）：
+ * - 房间只补缺（已存在的不覆盖备注/监控开关；新增的一律 `monitor = false`）；
  * - 消息按（房间/时刻/类型/发送者/内容/数量/抖币/收礼人/单号）指纹去重；
- * - 分钟桶与用户统计**取大不累加**；会话按（房间 + 开始时刻）只补缺。
- * 于是同一份包反复导入是**幂等**的。
+ * - 分钟桶与用户统计**取大不累加**；会话按（房间 + 开始时刻）只补缺；
+ * - 画像关联按账号重建（`bindAccount` 本身幂等；画像名 / 备注 / 主账号也一并恢复）；
+ * - 消息的 `session_id` **按「旧 id → 新 id」映射重指**（自增 id 换库就变；不重指的话
+ *   「到访场次 / 平均停留 / 最长停留」在恢复后全是 0）。回路的实现见 `importSessions`。
+ *
+ * **刻意不进包**的东西（都不是「记录」本身，缺了不影响数据完整性）：
+ * - **AI 画像**（`douyin_link_user_portraits`）：按人跨房间的派生结果，塞进「按房间某一天」的结构里
+ *   会对不上；而且是花钱换来的、随时可以重新生成（它自己的表由卸载时的「同时删除数据」负责清）；
+ * - **插件设置**（保留期、AI 画像用哪个模型、各房间监控开关）：存在宿主的插件设置里，不是这个库的数据；
+ * - `douyin_link_meta`（`users.repaired` 这类「一次性动作跑过没有」的标记）：导入后重跑一次更安全。
  */
 
 const FORMAT = 'douyin-link-archive'
@@ -216,15 +220,25 @@ export async function importArchive(): Promise<ImportResult> {
       const groups = JSON.parse(files.get('identities.json')!.toString('utf-8')) as IdentityGroup[]
       if (Array.isArray(groups)) identitiesBound = await importIdentityGroups(groups)
     }
-    // 逐天文件处理：每个 JSON 是「某房间某一天的直播数据」
+    // 逐天文件先全部解析出来（后面要**分两遍**处理：先把会话映射建全，再落消息）
+    const dayFiles: DayFile[] = []
     for (const [name, content] of files) {
       if (!name.startsWith('records/') || !name.endsWith('.json')) continue
       const day = parseDayFile(JSON.parse(content.toString('utf-8')))
-      if (!day) continue
+      if (day) dayFiles.push(day)
+    }
+    /*
+     * 两遍处理（0.15.37 修）：
+     * 1. **先所有会话**——消息的 `session_id` 要按映射重指到库里的新 id，而一场跨天的会话只出现在
+     *    「开始那一天」的文件里；导出是把最新的一天排在最前，一遍走完的话，后一天的消息会先落库、
+     *    那时映射里还没有它引用的那一场（于是「到访场次 / 停留时长」又变回 0）；
+     * 2. 再分钟桶与消息——此时映射已经齐全。
+     */
+    const sessionMap = await importSessions(dayFiles.flatMap((day) => day.sessions))
+    for (const day of dayFiles) {
       if (day.minutes.length > 0) await importMinutes(day.minutes)
-      if (day.sessions.length > 0) await importSessions(day.sessions)
       if (day.messages.length > 0) {
-        const result = await importMessages(day.messages)
+        const result = await importMessages(day.messages, sessionMap)
         messages += result.added
         skipped += result.skipped
       }

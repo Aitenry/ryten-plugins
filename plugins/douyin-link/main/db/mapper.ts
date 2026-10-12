@@ -3516,6 +3516,12 @@ export interface UserExportRow {
   fansClubLevel: number
   badges: string
   secUid: string
+  /**
+   * 见过他在麦上（粘性列，0.15.32 起）——**必须进备份**：它就是「这个人是不是主播」的历史证据，
+   * 丢了之后恢复出来的库里所有人都成了观众（AI 画像的默认角色、实时列表的「绩效指标」那一套全错）。
+   * 旧备份里没这个字段 = `undefined`，按 `false` 处理（导入端用 `OR` 合并，不会把已有的 true 抹掉）。
+   */
+  onMic?: boolean
   chat: number
   enter: number
   likes: number
@@ -3540,6 +3546,14 @@ export interface MinuteExportRow {
 }
 
 export interface SessionExportRow {
+  /**
+   * 库里这次会话的自增 id（0.15.37 起导出）。
+   *
+   * 为什么必须带上它：消息流水靠 `session_id` 归属到「某一场」，而自增 id 换一个库就会变
+   * ——导出时记下旧 id、导入时按（房间 + 开始时刻）反查新 id 建一张映射表，消息才接得回去
+   * （否则「到访场次 / 平均停留 / 最长停留」在恢复后全是 0）。旧备份没有这个字段 → 消息按 0 落。
+   */
+  id?: number
   webRid: string
   startedAt: number
   endedAt: number
@@ -3653,6 +3667,7 @@ export async function exportSessionRows(webRid: string, fromMs: number, toMs: nu
       .where(and(eq(douyinLinkSessions.webRid, webRid), gte(douyinLinkSessions.startedAt, fromMs), lte(douyinLinkSessions.startedAt, toMs)))
       .orderBy(asc(douyinLinkSessions.startedAt))
     return rows.map((row) => ({
+      id: row.id,
       webRid: row.webRid,
       startedAt: row.startedAt,
       endedAt: row.endedAt,
@@ -3683,6 +3698,7 @@ export async function exportUserRows(webRid: string): Promise<UserExportRow[]> {
       fansClubLevel: row.fansClubLevel,
       badges: row.badges,
       secUid: row.secUid,
+      onMic: row.onMic,
       chat: row.chat,
       enter: row.enter,
       likes: row.likes,
@@ -3776,6 +3792,9 @@ export async function importUsers(rows: UserExportRow[]): Promise<number> {
             follower: greatest('follower'),
             honorLevel: greatest('honor_level'),
             fansClubLevel: greatest('fans_club_level'),
+            // 主播标记是**粘性**的（与实时落库 `upsertUserDeltas` 同一口径）：true 一旦有过就不再回退；
+            // 旧备份没有这个字段时 `EXCLUDED.on_mic` = false，`OR` 之后等于保持原值。
+            onMic: sql`douyin_link_users.on_mic OR EXCLUDED.on_mic`,
             chat: greatest('chat'),
             enter: greatest('enter'),
             likes: greatest('likes'),
@@ -3799,8 +3818,14 @@ export async function importUsers(rows: UserExportRow[]): Promise<number> {
  * 先按房间 + 时段把库里已有的行的指纹读进来（限定在导入批次的 [minAt, maxAt] 内，
  * 不做全表扫描），再逐条比对：库里已有、或本次批次内已经收过的，一律跳过。
  * 这样重复导入同一份压缩包是**幂等**的——不会多出任何一条。
+ *
+ * `sessionMap`（旧会话 id → 新会话 id，见 `importSessions`）：消息的 `session_id` **不是**
+ * 原样照抄（自增 id 换库就变），而是按映射重指；映射拿不到（旧备份没导出会话 id）就落 0。
  */
-export async function importMessages(rows: MessageExportRow[]): Promise<{ added: number; skipped: number }> {
+export async function importMessages(
+  rows: MessageExportRow[],
+  sessionMap?: Map<string, number>
+): Promise<{ added: number; skipped: number }> {
   if (rows.length === 0) return { added: 0, skipped: 0 }
   await schemaReady
   return withOrm('douyin-link.importMessages', async (db) => {
@@ -3859,8 +3884,8 @@ export async function importMessages(rows: MessageExportRow[]): Promise<{ added:
       await db.insert(douyinLinkMessages).values(
         fresh.slice(index, index + MSG_CHUNK).map((row) => ({
           webRid: row.webRid,
-          // 会话 id 不复用（导入后 sessions 会重新分配自增 id，留旧值只会指错）
-          sessionId: 0,
+          // 会话 id **重指到库里的那一场**（旧 id 是另一个库的自增号，原样照抄只会指错）
+          sessionId: sessionMap?.get(`${row.webRid}:${row.sessionId}`) ?? 0,
           kind: row.kind as DanmakuKind,
           userId: row.userId,
           userName: row.userName,
@@ -3912,29 +3937,43 @@ export async function importMinutes(rows: MinuteExportRow[]): Promise<number> {
   })
 }
 
-/** 导入监控会话：**只补缺**（同一房间、同一开始时刻的会话视为同一次） */
-export async function importSessions(rows: SessionExportRow[]): Promise<number> {
-  if (rows.length === 0) return 0
+/**
+ * 导入监控会话：**只补缺**（同一房间、同一开始时刻的会话视为同一次）。
+ *
+ * 返回**旧会话 id → 新会话 id** 的映射（键是 `${webRid}:${旧 id}`）：自增 id 换库就变，
+ * 消息流水的 `session_id` 必须跟着重指，否则恢复出来的库里「到访场次 / 停留时长」全是 0。
+ * 已经存在的会话（重复导入）也放进映射里（指向库里那一行的真实 id），所以重复导入同样接得回去。
+ * 旧备份没有 `id` 字段 → 不产生映射（消息按 0 落，与 0.15.36 之前的行为一致）。
+ */
+export async function importSessions(rows: SessionExportRow[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  if (rows.length === 0) return map
   await schemaReady
   return withOrm('douyin-link.importSessions', async (db) => {
-    let added = 0
     for (const row of rows) {
       const found = await db
         .select({ id: douyinLinkSessions.id })
         .from(douyinLinkSessions)
         .where(and(eq(douyinLinkSessions.webRid, row.webRid), eq(douyinLinkSessions.startedAt, row.startedAt)))
         .limit(1)
-      if (found.length > 0) continue
-      await db.insert(douyinLinkSessions).values({
-        webRid: row.webRid,
-        startedAt: row.startedAt,
-        endedAt: row.endedAt,
-        messages: row.messages,
-        endReason: row.endReason
-      })
-      added += 1
+      let newId = found[0]?.id ?? 0
+      if (!newId) {
+        const inserted = await db
+          .insert(douyinLinkSessions)
+          .values({
+            webRid: row.webRid,
+            startedAt: row.startedAt,
+            endedAt: row.endedAt,
+            messages: row.messages,
+            endReason: row.endReason
+          })
+          .returning({ id: douyinLinkSessions.id })
+        newId = inserted[0]?.id ?? 0
+      }
+      const oldId = Math.trunc(Number(row.id))
+      if (newId > 0 && Number.isFinite(oldId) && oldId > 0) map.set(`${row.webRid}:${oldId}`, newId)
     }
-    return added
+    return map
   })
 }
 
