@@ -339,6 +339,7 @@ function DanmakuRow(props: {
                   </span>
                 </Tooltip>
               ) : null}
+              {props.badge ? <RemarkTag remark={props.badge.remark} palette={palette} t={t} /> : null}
               {showPersonStats && props.badge ? <PersonStats badge={props.badge} t={t} /> : null}
               {item.user ? <span className="opacity-60">：</span> : null}
               <span>{item.text}</span>
@@ -399,6 +400,7 @@ function DanmakuRow(props: {
                 {item.user || user?.nickname || t('douyin-link.page.idOnly', { id: item.userId })}
               </span>
             </Tooltip>
+            {props.badge ? <RemarkTag remark={props.badge.remark} palette={palette} t={t} /> : null}
             <span className="opacity-70"> </span>
           </>
         ) : null}
@@ -465,6 +467,33 @@ export function giftRecipientText(
 export function formatDiamonds(value: number): string {
   if (value >= 10000) return `${Math.round(value / 1000) / 10}万`
   return String(value)
+}
+
+/**
+ * **备注名称**（用户 2026-10-14：「增加用户备注名称……可以在弹幕后面显示其备注名称，
+ * 支持多账户显示同一个备注」）。
+ *
+ * 位置选在**昵称紧后面**：备注的用途就是「一眼认出这是谁」，放到正文末尾的话，
+ * 长弹幕换行时要读到行尾才看得见；旁注在名字边上也与其它工具的习惯一致。
+ *
+ * 数据由主进程按**人**给（`UserBadge.remark`，挂在画像上）：同一个人绑的几个号显示同一个备注，
+ * 换号说话也是同一个。没设过（空串）就整枚不画。
+ */
+function RemarkTag(props: {
+  remark: string
+  palette: PluginPalette
+  t: (key: string, options?: Record<string, unknown>) => string
+}): React.JSX.Element | null {
+  if (!props.remark) return null
+  return (
+    <span
+      className="ml-1 shrink-0 text-[10px] leading-4"
+      style={{ color: props.palette.accent, opacity: 0.9 }}
+      title={props.t('douyin-link.feed.remarkHint')}
+    >
+      {props.t('douyin-link.feed.remark', { n: props.remark })}
+    </span>
+  )
 }
 
 /**

@@ -269,7 +269,10 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       badgePerformance: 'perf {{n}}',
       badgeEnter: 'joins {{n}}',
       badgeToday: 'today {{n}}',
-      badgeTodayReceived: 'earned {{n}}'
+      badgeTodayReceived: 'earned {{n}}',
+      /** Remark name: shown right after the nickname (2026-10-14) */
+      remark: '({{n}})',
+      remarkHint: 'Remark name: set it in the user profile; all accounts of the same person share it'
     },
     lines: {
       member: 'joined the room',
@@ -334,8 +337,8 @@ export const DouyinLinkEnUS: typeof DouyinLinkZhCN = {
       identityBindEmpty: 'No matching account (you can also paste a user id)',
       identityBindOther: 'Already in another profile (linking merges them)',
       identityUnbind: 'Unlink',
-      identityNameEdit: 'Rename profile',
-      identityNamePlaceholder: 'Profile name (empty = primary account nickname)',
+      identityNameEdit: 'Edit remark',
+      identityNamePlaceholder: 'Remark name (empty = primary account nickname)',
       identityAccountStats: 'chat {{chat}} · join {{enter}} · gift {{gift}}',
       identityLinked: 'Linked accounts',
       historyAccounts: 'includes {{count}} linked account(s)',

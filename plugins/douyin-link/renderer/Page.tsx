@@ -1612,8 +1612,11 @@ function UserProfileModal(props: {
                   ) : (
                     <span className="min-w-0 truncate text-sm font-semibold">{identityTitle}</span>
                   )}
-                  {/* 改名：画像名（留空 = 退回主账号昵称）。只在绑定了账号时才有意义 */}
-                  {identity && identity.accounts.length > 1 && !nameEditing ? (
+                  {/*
+                    备注名称（留空 = 退回主账号昵称）：**所有人**都能设——单账号的人第一次写时，
+                    主进程会补建一个「只有他自己」的画像（备注按人存，绑了多账号就自动共用同一个）。
+                  */}
+                  {!nameEditing ? (
                     <Button
                       size="small"
                       type="text"
@@ -1621,7 +1624,7 @@ function UserProfileModal(props: {
                       aria-label={t('douyin-link.users.identityNameEdit')}
                       icon={<RiPencilLine size={13} />}
                       onClick={() => {
-                        setNameDraft(identity.name)
+                        setNameDraft(identity?.name ?? '')
                         setNameEditing(true)
                       }}
                     />

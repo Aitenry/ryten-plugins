@@ -12,7 +12,7 @@
  * - 今日消费 / 今日收入 = **跨全部直播间**、本地自然日（两本 `TodaySpend` 账本 + 库里补种）。
  *
  * 这个工装跑**真代码**（真 `AnalyzerHub` + 真 mapper + 真 PGlite + 真画像算法 + 真账本），
- * 只把 electron / 采集器 / 音频泵 / 头像缓存 / 解析器换成桩，断言八件事：
+ * 只把 electron / 采集器 / 音频泵 / 头像缓存 / 解析器换成桩，断言九件事：
  * 1. 一次 `userBadges` 就把四个数给全（等级取本房间档案、消费评分按本房间累计、入场跨房合计）；
  * 2. **今日消费只算今天**：昨天的礼物不计（同一批数据里放一条两天前的礼物行）；
  * 3. **消费评分与画像同源**：`userAnalysis` 的 `spending` 维度 == `spendScore(累计抖币, 送礼次数)`；
@@ -20,7 +20,8 @@
  * 5. 跨房间的入场合计：`enterTotalsByUser` = 该 id 在所有房间的 enter 之和；
  * 6. 新人（库里还没有档案行）退回本场数字，并标 `fromStore = false`；
  * 7. `消费欲望` / `绩效指标` 两条公式的性质（随时间衰减、随消费/说过变化、稀有金主不被低估）；
- * 8. **多账号汇聚**：M1 与 M2 绑成同一个人之后，等级取最高、抖币与进场求和、从哪个号问都一样。
+ * 8. **多账号汇聚**：M1 与 M2 绑成同一个人之后，等级取最高、抖币与进场求和、从哪个号问都一样；
+ * 9. **备注名称**：多账号共用一个备注（写在哪个号上都一样）、单账号也能设（补建画像）、留空即清。
  *
  * 跑法（仓库根目录；PGlite 从 ryten-bench 找，或用 RB_PGLITE 指定 dist/index.js）：
  *   node plugins/douyin-link/spike/user-badge-check.mjs
@@ -384,6 +385,29 @@ async function main() {
     merged.consumeDesire,
     mergedFromOther.consumeDesire
   )
+
+  /* ------------------------- 9. 备注名称（按人存：多账号共用 + 单账号也能设） */
+  console.log('\n=== 9. 备注名称（用户 2026-10-14）===')
+  check('没设过时备注是空串（不编）', merged.remark, '')
+  await hub.renameIdentity(M2, '老王')
+  const [afterRemarkA] = await hub.userBadges(ROOM_A, [M1])
+  const [afterRemarkB] = await hub.userBadges(ROOM_A, [M2])
+  console.log(`  M1 备注 ${JSON.stringify(afterRemarkA.remark)} · M2 备注 ${JSON.stringify(afterRemarkB.remark)}`)
+  check('备注写在一个号上，两个号都是同一个（多账号共用一个备注）', [afterRemarkA.remark, afterRemarkB.remark], ['老王', '老王'])
+
+  // 单账号的人也能备注：第一次写时主进程会补建一个「只有他自己」的画像（备注按人存）
+  const [beforeSingle] = await hub.userBadges(ROOM_A, [U2])
+  check('单账号的人一开始没有备注', beforeSingle.remark, '')
+  await hub.renameIdentity(U2, '老李')
+  const [afterSingle] = await hub.userBadges(ROOM_A, [U2])
+  const singleIdentity = await hub.userIdentity(U2)
+  console.log(`  U2 备注 ${JSON.stringify(afterSingle.remark)} · 画像 ${singleIdentity.identityId} · 账号 ${singleIdentity.accounts.map((a) => a.userId).join(',')}`)
+  check('单账号也能设备注（补建了画像）', [afterSingle.remark, singleIdentity.identityId > 0], ['老李', true])
+  check('补建的画像只有他自己一个账号', singleIdentity.accounts.map((a) => a.userId), [U2])
+  // 清空 = 退回昵称
+  await hub.renameIdentity(U2, '')
+  const [cleared] = await hub.userBadges(ROOM_A, [U2])
+  check('备注留空 = 清掉（界面退回昵称）', cleared.remark, '')
 
   hub.dispose()
 }

@@ -1552,15 +1552,27 @@ export async function resolveAccountIds(userId: string): Promise<string[]> {
 }
 
 /**
- * **批量**版的 `resolveAccountIds`：一次给一批 id 各自的全账号清单（`id → 账号数组`）。
+ * **批量**版的 `resolveAccountIds`：一次给一批 id 各自的「这个人」信息（`id → 分组`）。
  *
  * 为什么需要它：实时列表每秒一批（最多 400 个）id 都要按人聚合，逐个调 `resolveAccountIds`
  * 就是每批几百次往返（每次都先查 owner、再查同画像账号）——这条线踩过「监控一开助手输出就卡」。
- * 这里收成**两条查询**：先查这批 id 各属哪个画像，再一次性把这些画像的账号全捞出来。
+ * 这里收成**三条查询**：这批 id 各属哪个画像 → 这些画像的全部账号 → 画像的备注名。
+ *
+ * 备注名（`remark`）与账号清单来自同一个画像，所以**同一个人换号说话时备注是同一个**
+ * （用户 2026-10-14：「支持多账户显示同一个备注」）。
  */
-export async function resolveAccountIdsBatch(userIds: string[]): Promise<Map<string, string[]>> {
+export interface PersonGroup {
+  /** 这个人的全部账号（含自己） */
+  accounts: string[]
+  /** 画像 id（0 = 还没建画像：没绑定、也没备注过） */
+  identityId: number
+  /** 备注名称（画像名；空串 = 没设过） */
+  remark: string
+}
+
+export async function resolveAccountIdsBatch(userIds: string[]): Promise<Map<string, PersonGroup>> {
   const ids = [...new Set((userIds ?? []).map((id) => String(id ?? '').trim()).filter((id) => id.length > 0))]
-  const out = new Map<string, string[]>()
+  const out = new Map<string, PersonGroup>()
   if (ids.length === 0) return out
   await schemaReady
   return withOrm('douyin-link.resolveAccountIdsBatch', async (db) => {
@@ -1571,21 +1583,33 @@ export async function resolveAccountIdsBatch(userIds: string[]): Promise<Map<str
     const identityOfId = new Map(owners.map((row) => [row.userId, row.identityId]))
     const identityIds = [...new Set(owners.map((row) => row.identityId))]
     const accounts = new Map<number, string[]>()
+    const remarks = new Map<number, string>()
     if (identityIds.length > 0) {
-      const rows = await db
-        .select({ userId: douyinLinkIdentityAccounts.userId, identityId: douyinLinkIdentityAccounts.identityId })
-        .from(douyinLinkIdentityAccounts)
-        .where(inArray(douyinLinkIdentityAccounts.identityId, identityIds))
-      for (const row of rows) {
+      const [accountRows, identityRows] = await Promise.all([
+        db
+          .select({ userId: douyinLinkIdentityAccounts.userId, identityId: douyinLinkIdentityAccounts.identityId })
+          .from(douyinLinkIdentityAccounts)
+          .where(inArray(douyinLinkIdentityAccounts.identityId, identityIds)),
+        db
+          .select({ id: douyinLinkIdentities.id, name: douyinLinkIdentities.name })
+          .from(douyinLinkIdentities)
+          .where(inArray(douyinLinkIdentities.id, identityIds))
+      ])
+      for (const row of accountRows) {
         const list = accounts.get(row.identityId)
         if (list) list.push(row.userId)
         else accounts.set(row.identityId, [row.userId])
       }
+      for (const row of identityRows) remarks.set(row.id, String(row.name ?? ''))
     }
     for (const id of ids) {
       const identityId = identityOfId.get(id) ?? 0
       const list = identityId ? (accounts.get(identityId) ?? []) : []
-      out.set(id, list.includes(id) ? list : [id, ...list.filter((other) => other !== id)])
+      out.set(id, {
+        accounts: list.includes(id) ? list : [id, ...list.filter((other) => other !== id)],
+        identityId,
+        remark: identityId ? (remarks.get(identityId) ?? '') : ''
+      })
     }
     return out
   })
@@ -1822,6 +1846,79 @@ export async function renameIdentity(identityId: number, name: string): Promise<
       .update(douyinLinkIdentities)
       .set({ name: trimmed, updatedAt: Date.now() })
       .where(eq(douyinLinkIdentities.id, id))
+  })
+}
+
+/**
+ * 拿到某个 id 的画像，**没有就建一个「只有他自己」的**，返回画像 id。
+ *
+ * 为什么需要它：**备注名称是按人存的**（一个人几个号共用一个备注），所以它必须挂在画像上，
+ * 而不是账号上。以前只有「绑定过多个账号」的人才有画像行，于是**单账号的人根本没法备注**
+ * （用户 2026-10-14：「增加用户备注名称……支持多账户显示同一个备注」）。第一次写备注时补一行，
+ * 语义与表结构本来就一致（画像可以只有一个账号），不用新开一张表。
+ *
+ * 匿名马甲（`anon:111111#dou2056511`）也允许：它就是「一个马甲一个人」，备注恰恰最有用；
+ * 只有共用的占位 id（`111111`）不给建——那不是一个人。
+ */
+export async function ensureIdentity(userId: string): Promise<number> {
+  const id = String(userId ?? '').trim()
+  if (id.length < 4 || id === ANONYMOUS_ID) return 0
+  await schemaReady
+  return withOrm('douyin-link.ensureIdentity', async (db) => {
+    const owner = await db
+      .select({ identityId: douyinLinkIdentityAccounts.identityId })
+      .from(douyinLinkIdentityAccounts)
+      .where(eq(douyinLinkIdentityAccounts.userId, id))
+      .limit(1)
+    if (owner[0]?.identityId) return owner[0].identityId
+    const now = Date.now()
+    const created = await db
+      .insert(douyinLinkIdentities)
+      .values({ name: '', note: '', primaryUserId: id, createdAt: now, updatedAt: now })
+      .returning({ id: douyinLinkIdentities.id })
+    const identityId = created[0]?.id ?? 0
+    if (!identityId) return 0
+    await db
+      .insert(douyinLinkIdentityAccounts)
+      .values({ userId: id, identityId, addedAt: now })
+      .onConflictDoNothing({ target: douyinLinkIdentityAccounts.userId })
+    return identityId
+  })
+}
+
+/**
+ * 把「按 id 存的 AI 画像缓存」搬到新的画像键上。
+ *
+ * 只在**刚给单账号的人建画像**（第一次写备注）时调用：AI 画像的缓存键里含画像 id
+ * （`user:<id>:role` → `identity:<画像 id>:role`），不搬的话备注一下就把已经花过 token 生成的
+ * 那一版「弄丢」了（行还在库里，只是界面再也读不到，用户只能重新生成、再花一次钱）。
+ */
+export async function adoptPortraitKeys(userId: string, identityId: number): Promise<number> {
+  const id = String(userId ?? '').trim()
+  const iid = Math.trunc(Number(identityId) || 0)
+  if (!id || !iid) return 0
+  await schemaReady
+  return withOrm('douyin-link.adoptPortraitKeys', async (db) => {
+    const rows = await db
+      .select({ key: douyinLinkUserPortraits.portraitKey, role: douyinLinkUserPortraits.role })
+      .from(douyinLinkUserPortraits)
+      .where(inArray(douyinLinkUserPortraits.portraitKey, [`user:${id}:viewer`, `user:${id}:host`]))
+    let moved = 0
+    for (const row of rows) {
+      const nextKey = `identity:${iid}:${row.role === 'host' ? 'host' : 'viewer'}`
+      const clash = await db
+        .select({ key: douyinLinkUserPortraits.portraitKey })
+        .from(douyinLinkUserPortraits)
+        .where(eq(douyinLinkUserPortraits.portraitKey, nextKey))
+        .limit(1)
+      if (clash.length > 0) continue
+      await db
+        .update(douyinLinkUserPortraits)
+        .set({ portraitKey: nextKey, identityId: iid })
+        .where(eq(douyinLinkUserPortraits.portraitKey, row.key))
+      moved += 1
+    }
+    return moved
   })
 }
 

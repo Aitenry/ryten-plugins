@@ -280,7 +280,10 @@ export const DouyinLinkZhCN = {
       badgePerformance: '绩效指标 {{n}}',
       badgeEnter: '进场 {{n}}',
       badgeToday: '今日消费 {{n}}',
-      badgeTodayReceived: '今日收入 {{n}}'
+      badgeTodayReceived: '今日收入 {{n}}',
+      /** 备注名称：跟在昵称后面显示（用户 2026-10-14） */
+      remark: '（{{n}}）',
+      remarkHint: '备注名称：在用户档案里设置，同一个人的多个账号共用同一个备注'
     },
     lines: {
       member: '进入了直播间',
@@ -344,8 +347,8 @@ export const DouyinLinkZhCN = {
       identityBindEmpty: '没有匹配的账号（也可以直接粘贴用户 id）',
       identityBindOther: '已属于另一个画像（关联会合并成一个）',
       identityUnbind: '解除关联',
-      identityNameEdit: '改画像名',
-      identityNamePlaceholder: '画像名（留空 = 用主账号昵称）',
+      identityNameEdit: '改备注',
+      identityNamePlaceholder: '备注名称（留空 = 用主账号昵称）',
       identityAccountStats: '弹幕 {{chat}} · 进场 {{enter}} · 礼物 {{gift}}',
       identityLinked: '关联账号',
       historyAccounts: '含 {{count}} 个关联账号',

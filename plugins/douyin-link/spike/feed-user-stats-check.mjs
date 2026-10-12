@@ -127,14 +127,15 @@ const subs = new Map()
 
 /**
  * 主进程会回的那个人物信息（按身份两套：观众=消费欲望/今日消费，主播=绩效指标/今日收入）。
- * 这里刻意把 `JOIN` 造成**主播**，好把两套标签都覆盖到。
+ * 这里刻意把 `JOIN` 造成**主播**，好把两套标签都覆盖到；并给 `CHAT` 设一个**备注名称**，
+ * 验证它跟在昵称后面显示（用户 2026-10-14 的备注功能）。
  */
 const BADGES = {
-  [CHAT]: { role: 'viewer', honorLevel: 12, fansClubLevel: 0, consumeDesire: 87, performance: 0, spendScore: 87, diamonds: 100, giftCount: 1, enterTotal: 5, todayDiamonds: 12345, todayReceived: 0, fromStore: true },
-  [JOIN]: { role: 'host', honorLevel: 30, fansClubLevel: 0, consumeDesire: 0, performance: 100, spendScore: 100, diamonds: 250000, giftCount: 40, enterTotal: 42, todayDiamonds: 0, todayReceived: 0, fromStore: true },
-  [LATER]: { role: 'viewer', honorLevel: 7, fansClubLevel: 0, consumeDesire: 22, performance: 0, spendScore: 22, diamonds: 20, giftCount: 1, enterTotal: 3, todayDiamonds: 6, todayReceived: 0, fromStore: true },
-  [SOCIAL]: { role: 'viewer', honorLevel: 99, fansClubLevel: 0, consumeDesire: 99, performance: 0, spendScore: 99, diamonds: 9, giftCount: 1, enterTotal: 9, todayDiamonds: 9, todayReceived: 0, fromStore: true },
-  [THROTTLE]: { role: 'viewer', honorLevel: 3, fansClubLevel: 0, consumeDesire: 33, performance: 0, spendScore: 33, diamonds: 30, giftCount: 1, enterTotal: 2, todayDiamonds: 30, todayReceived: 0, fromStore: true }
+  [CHAT]: { role: 'viewer', remark: '老王', honorLevel: 12, fansClubLevel: 0, consumeDesire: 87, performance: 0, spendScore: 87, diamonds: 100, giftCount: 1, enterTotal: 5, todayDiamonds: 12345, todayReceived: 0, fromStore: true },
+  [JOIN]: { role: 'host', remark: '', honorLevel: 30, fansClubLevel: 0, consumeDesire: 0, performance: 100, spendScore: 100, diamonds: 250000, giftCount: 40, enterTotal: 42, todayDiamonds: 0, todayReceived: 0, fromStore: true },
+  [LATER]: { role: 'viewer', remark: '', honorLevel: 7, fansClubLevel: 0, consumeDesire: 22, performance: 0, spendScore: 22, diamonds: 20, giftCount: 1, enterTotal: 3, todayDiamonds: 6, todayReceived: 0, fromStore: true },
+  [SOCIAL]: { role: 'viewer', remark: '', honorLevel: 99, fansClubLevel: 0, consumeDesire: 99, performance: 0, spendScore: 99, diamonds: 9, giftCount: 1, enterTotal: 9, todayDiamonds: 9, todayReceived: 0, fromStore: true },
+  [THROTTLE]: { role: 'viewer', remark: '', honorLevel: 3, fansClubLevel: 0, consumeDesire: 33, performance: 0, spendScore: 33, diamonds: 30, giftCount: 1, enterTotal: 2, todayDiamonds: 30, todayReceived: 0, fromStore: true }
 }
 
 let sessionId = 1
@@ -426,6 +427,7 @@ check('弹幕行的等级', text().includes('Lv12'), true)
 check('弹幕行的消费欲望', text().includes('消费欲望 87'), true)
 check('弹幕行的进场次数', text().includes('进场 5'), true)
 check('弹幕行的今日消费（12345 → 1.2万）', text().includes('今日消费 1.2万'), true)
+check('备注名称跟在昵称后面（阿弹幕（老王））', text().includes('阿弹幕（老王）'), true)
 check('这一屏只问了可见的那个人（1 次、1 个 id）', badgeCalls().length, 1)
 check('问的就是弹幕行那个人', badgeCalls()[0]?.args?.[1], [CHAT])
 
@@ -449,6 +451,7 @@ if (!text().includes('阿关注')) dump()
 check('关注行渲染出来了', text().includes('阿关注'), true)
 check('关注行不带这截（虽然主进程也给了他的数字）', text().includes('Lv99'), false)
 check('「消费欲望」这一屏一次都不出现', countOf('消费欲望 '), 0)
+check('没设备注的人不会凭空多出一对括号', text().includes('（老王）'), false)
 
 console.log('\n=== 4. 新来的弹幕（新人）会被补问一次，数字到了就显示 ===')
 check('切回「弹幕」分类', await clickView(zh['douyin-link'].kinds.chat), true)

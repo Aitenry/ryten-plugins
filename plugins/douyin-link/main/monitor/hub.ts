@@ -54,7 +54,7 @@ import {
   type AiPortraitState
 } from '../../shared/types'
 import * as store from '../db/mapper'
-import type { MessageRow } from '../db/mapper'
+import type { MessageRow, PersonGroup } from '../db/mapper'
 import { AudioPump } from '../audio/pump'
 import { DirectPushCapture } from '../douyin/push-capture'
 import { ResolveFailure, enterLiveRoom, resolveLiveRoom } from '../douyin/room'
@@ -2937,11 +2937,24 @@ export class AnalyzerHub {
     return store.userIdentity(viewer)
   }
 
-  /** 改画像名（空 = 退回主账号昵称）。按账号 id 定位画像，改完回一份最新视图。 */
+  /**
+   * 写**备注名称**（空 = 退回主账号昵称）。按账号 id 定位画像，改完回一份最新视图。
+   *
+   * 用户 2026-10-14：「增加用户备注名称，在用户档案进行备注……支持多账户显示同一个备注」——
+   * 备注按**人**存（画像名），所以：
+   * - 已经绑定过多账号的人直接改画像名，几个号一起变；
+   * - **单账号的人也有备注**：第一次写的时候补建一个「只有他自己」的画像（`ensureIdentity`），
+   *   并把按 id 存的 AI 画像缓存搬到新键上（`adoptPortraitKeys`），免得备注一下就把花过 token
+   *   生成的那一版画像读不到了。
+   */
   async renameIdentity(userId: string, name: string): Promise<UserIdentity> {
     const id = String(userId ?? '').trim()
     if (!id) return { identityId: 0, name: '', note: '', primaryUserId: '', accounts: [] }
-    const identityId = await store.identityOf(id)
+    let identityId = await store.identityOf(id)
+    if (!identityId) {
+      identityId = await store.ensureIdentity(id)
+      if (identityId) await store.adoptPortraitKeys(id, identityId)
+    }
     if (!identityId) return store.userIdentity(id)
     await store.renameIdentity(identityId, name)
     return store.userIdentity(id)
@@ -3064,20 +3077,27 @@ export class AnalyzerHub {
    * 两个新指标（观众看 `consumeDesire`、主播看 `performance`）都是纯公式，见 `shared/engagement.ts`。
    */
   async userBadges(webRid: string, userIds: string[]): Promise<UserBadge[]> {
-    const ids = [...new Set(userIds.map((id) => String(id ?? '').trim()).filter((id) => /^\d{4,}$/.test(id)))]
+    // 匿名马甲（`anon:111111#dou2056511`）也是「一个人」，同样要他那一截信息与备注
+    const ids = [
+      ...new Set(
+        userIds
+          .map((id) => String(id ?? '').trim())
+          .filter((id) => /^\d{4,}$/.test(id) || id.startsWith('anon:'))
+      )
+    ]
     if (ids.length === 0) return []
     const capped = ids.slice(0, BADGE_ROWS_CAP)
     await this.ensureTodayLedgers()
     /*
-     * 展开成「这个人的全部账号」：走**批量**解析（两条查询），而不是逐个 `resolveAccountIds`
+     * 展开成「这个人的全部账号」：走**批量**解析（三条查询），而不是逐个 `resolveAccountIds`
      * ——后者在每秒一批、每批几百个 id 时就是几百次往返（这条线踩过「监控一开助手就卡」）。
      * 展开后的总量另设一个上限，防止异常数据把这一批查询撑爆。
      */
-    const groups = await store.resolveAccountIdsBatch(capped).catch(() => new Map<string, string[]>())
+    const groups = await store.resolveAccountIdsBatch(capped).catch(() => new Map<string, PersonGroup>())
     const expanded: string[] = []
     const expandedSet = new Set<string>()
     for (const id of capped) {
-      for (const account of groups.get(id) ?? [id]) {
+      for (const account of groups.get(id)?.accounts ?? [id]) {
         if (expandedSet.has(account)) continue
         expandedSet.add(account)
         expanded.push(account)
@@ -3093,7 +3113,8 @@ export class AnalyzerHub {
     const recorder = state?.recorder
     const now = Date.now()
     return capped.map((id) => {
-      const accounts = groups.get(id) ?? [id]
+      const group = groups.get(id)
+      const accounts = group?.accounts ?? [id]
       let honorLevel = 0
       let fansClubLevel = 0
       let diamonds = 0
@@ -3134,6 +3155,8 @@ export class AnalyzerHub {
       return {
         userId: id,
         role: host ? 'host' : 'viewer',
+        // 备注名称：按人（画像）取，同一个人多个号共用一个
+        remark: group?.remark ?? '',
         honorLevel,
         fansClubLevel,
         consumeDesire: host
