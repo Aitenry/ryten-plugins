@@ -9,8 +9,8 @@ import type { PluginManifest } from './types/plugin'
 export const musicManifest: PluginManifest = {
   id: 'music-player',
   name: '音乐播放器',
-  version: '0.1.0',
-  description: '本地音乐播放器：歌单、播放控制与迷你播放器',
+  version: '0.1.1',
+  description: '本地音乐播放器，歌单与播放控制。',
   /** 独立插件：`false`。宿主据此按「第三方」对待（不随应用分发、默认停用） */
   builtin: false,
   /**

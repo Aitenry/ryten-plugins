@@ -11,9 +11,8 @@ import type { PluginManifest } from './types/plugin'
 export const personalLedgerManifest: PluginManifest = {
   id: 'personal-ledger',
   name: '个人记账台账',
-  version: '1.1.6',
-  description:
-    '个人 / 家庭记账台账：多账户多币种流水、分类标签商家、预算与储蓄目标、周期记账与分期、借入借出（应收应付）、信用卡账单与定期存款提醒、资产净值与报表图表、CSV 账单导入导出，并给 AI 助手提供记账与查账工具。',
+  version: '1.1.7',
+  description: '个人家庭记账，流水预算与报表。',
   /** 独立插件：`false`。宿主据此按「第三方」对待（不随应用分发、默认停用） */
   builtin: false,
   /**

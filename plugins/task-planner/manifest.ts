@@ -9,8 +9,8 @@ import type { PluginManifest } from './types/plugin'
 export const plannerManifest: PluginManifest = {
   id: 'task-planner',
   name: '任务规划',
-  version: '0.1.0',
-  description: '任务树、甘特图与列表视图',
+  version: '0.1.1',
+  description: '任务树，甘特图，列表视图。',
   /** 独立插件：`false`。宿主据此按「第三方」对待（不随应用分发、默认停用） */
   builtin: false,
   /**
