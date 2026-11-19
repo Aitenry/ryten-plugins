@@ -739,6 +739,60 @@ eq('删完读不到', await mapper.getUserPortrait(keyOf(USER)), null)
 await rawQuery('delete from douyin_link_user_portraits')
 eq('表可以整表清空（purge 走的就是这个）', (await rowsOf('select count(*)::int as n from douyin_link_user_portraits'))[0].n, 0)
 
+console.log('\n=== 13b. 老库迁移：没有角色后缀的旧画像行 → :viewer（省一次重新生成）')
+/*
+ * 用户 2026-10-13 的硬约束是「每一次都要重新生成，会很亏 token」，所以升级不能让
+ * 0.15.31 及以前生成的画像**白白作废**：那些行是观众口径生成的（当时只有这一套提示词），
+ * 语义上就是 viewer 那一版，DDL 里有一条幂等 UPDATE 把它们补上 `:viewer` 后缀。
+ *
+ * 这里真的造一行旧键、**再开一次连接**（DDL 只在 `schemaReady` 时跑一次，所以必须重开），
+ * 然后看它有没有被补上——版本号与正文都不许动。
+ */
+await rawQuery(
+  `insert into douyin_link_user_portraits (portrait_key, user_id, identity_id, version, provider_name, model, structured, report, raw, fingerprint, interactions, input_tokens, output_tokens, generated_at, updated_at) values (` +
+    `${q(`user:${USER}`)}, ${q(USER)}, 0, 7, ${q('老供应商')}, ${q('old-model')}, true, ${q('{}')}, ${q('旧版留下的正文')}, ${q('f:1')}, 11, 22, 33, ${NOW}, ${NOW})`
+)
+// 目标键已经被占用时**不能撞主键**（来回切换版本的那种库）：另造一行冲突样本
+await rawQuery(
+  `insert into douyin_link_user_portraits (portrait_key, user_id, version, raw, generated_at, updated_at) values (` +
+    `${q(`user:${USER}2`)}, ${q(`${USER}2`)}, 1, ${q('旧键')}, ${NOW}, ${NOW}), (` +
+    `${q(`user:${USER}2:viewer`)}, ${q(`${USER}2`)}, 2, ${q('新键')}, ${NOW}, ${NOW})`
+)
+await closeOrm()
+const reopened = await import(`${pathToFileURL(outfile).href}?migrate=${Date.now()}`)
+const rowByKey = async (key) =>
+  (
+    await reopened.rawQuery(
+      `select portrait_key, role, version, raw from douyin_link_user_portraits where portrait_key = ${q(key)}`
+    )
+  ).rows[0] ?? null
+const migrated = await rowByKey(`user:${USER}:viewer`)
+check('旧键被补成 :viewer（升级不白花那一次 token）', migrated !== null, JSON.stringify(migrated))
+eq(
+  '角色 / 版本 / 正文都没动',
+  migrated ? [migrated.role, migrated.version, migrated.raw] : null,
+  ['viewer', 7, '旧版留下的正文']
+)
+eq('旧键本身已经不在', await rowByKey(`user:${USER}`), null)
+/*
+ * 来回切换版本的库：目标键已经被新版本写过了 —— 迁移必须**跳过**（撞主键会让整个建表失败，
+ * 那等于插件起不来），而且两份内容都不能丢。
+ */
+const conflictOld = await rowByKey(`user:${USER}2`)
+const conflictNew = await rowByKey(`user:${USER}2:viewer`)
+eq('目标键已存在时跳过旧键（不撞主键）', conflictOld?.raw, '旧键')
+eq('新那一份也没被覆盖', conflictNew?.raw, '新键')
+eq(
+  '再跑一次也不会再改（幂等：只剩那一行被跳过的旧键）',
+  (
+    await reopened.rawQuery(
+      `select count(*)::int as n from douyin_link_user_portraits where portrait_key not like '%:viewer' and portrait_key not like '%:host'`
+    )
+  ).rows[0].n,
+  1
+)
+await reopened.closeOrm()
+
 /* ------------------------------------------------- B 段：真库副本（可选） */
 
 if (realDbDir && existsSync(join(realDbDir, 'PG_VERSION'))) {
@@ -812,6 +866,25 @@ if (realDbDir && existsSync(join(realDbDir, 'PG_VERSION'))) {
     const onMicRows = (await realOrm.rawQuery(`select count(*)::int as n from douyin_link_users where on_mic`)).rows[0].n
     console.log(
       `     真库里 on_mic 为真的档案行：${onMicRows}（老库刚加列时通常是 0：麦位是运行态信息，历史没有回填）`
+    )
+    /*
+     * 用户真金白银换来的画像：升级后必须还在、而且**都带角色后缀**（否则缓存键对不上，
+     * 每个人都要重新生成一次——用户明确说过那样很亏 token）。
+     */
+    const realPortraitRows = (
+      await realOrm.rawQuery(`select portrait_key, role, version from douyin_link_user_portraits order by updated_at desc`)
+    ).rows
+    const unsuffixed = realPortraitRows.filter(
+      (row) => !String(row.portrait_key).endsWith(':viewer') && !String(row.portrait_key).endsWith(':host')
+    )
+    console.log(
+      `     真库里已有的 AI 画像行：${realPortraitRows.length} 行（迁移后仍没有角色后缀的：${unsuffixed.length} 行）` +
+        (realPortraitRows[0] ? `，最近一行：${realPortraitRows[0].portrait_key}（role=${realPortraitRows[0].role}，v${realPortraitRows[0].version}）` : '')
+    )
+    check(
+      '真库已有的 AI 画像都带上了角色后缀（升级不白花那一次 token）',
+      unsuffixed.length === 0,
+      JSON.stringify(unsuffixed.map((row) => row.portrait_key))
     )
 
     const receivers = (

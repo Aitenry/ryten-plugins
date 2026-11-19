@@ -154,10 +154,30 @@ const DDL: string[] = [
    * AI 画像的**角色**（0.15.32 起）：`viewer` = 观众画像，`host` = 主播画像。
    *
    * 用户 2026-10-13：「应该是分析主播（个播、房间播有好多主播的）和用户，两者分开」。
-   * 角色进了缓存键（`identity:<id>:<viewer|host>`），老库里 `identity:<id>` 那样的旧行自然过期，
-   * 不需要迁移内容；这条 ALTER 只保证**已有库**也有这一列（旧行按观众读）。
+   * 角色进了缓存键（`identity:<id>:<viewer|host>`）；老库里 `identity:<id>` 那样的旧行
+   * 由下面那条幂等 UPDATE 补上 `:viewer`（它们本来就是观众口径生成的），这条 ALTER
+   * 只保证**已有库**也有这一列（旧行按观众读）。
    */
   `ALTER TABLE douyin_link_user_portraits ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'viewer'`,
+  /**
+   * 旧画像行补角色后缀（0.15.42 起，幂等）：`identity:<id>` → `identity:<id>:viewer`。
+   *
+   * 为什么值得专门做一次迁移：那些行是**观众口径**生成的（当时只有这一套提示词），
+   * 语义上就是 viewer 那一版——补上后缀它们立刻还能用；不补的话缓存键对不上，
+   * 用户升级后每个人都要**重新花一次 token**，而用户明确说过「每一次都要重新生成，会很亏 token」。
+   *
+   * 两条保护：
+   * - 只动**没有角色后缀**的行（`:viewer` / `:host` 一律不碰）；
+   * - 目标键已存在时跳过（防「先升到 0.15.42、再退回旧版生成一行、又升级」这种来回切换撞主键）。
+   *   跳过的那些是死行，留着无害。
+   */
+  `UPDATE douyin_link_user_portraits p
+      SET portrait_key = p.portrait_key || ':viewer'
+    WHERE p.portrait_key NOT LIKE '%:viewer'
+      AND p.portrait_key NOT LIKE '%:host'
+      AND NOT EXISTS (
+        SELECT 1 FROM douyin_link_user_portraits q WHERE q.portrait_key = p.portrait_key || ':viewer'
+      )`,
   /**
    * 礼物功能的列迁移（**幂等**，0.7.1 起）。
    *
